@@ -1,0 +1,569 @@
+================================================================================
+NIM CODING STANDARDS AND STYLE GUIDE
+For use as an LLM Programming Constraint Prompt
+Project: get -- get anything from your computer
+Author: WaterRun
+GitHub: https://github.com/Water-Run/get
+================================================================================
+
+
+OVERVIEW
+--------
+This document defines the Nim coding standards to be followed for all source
+files in this project. All generated or written Nim code must strictly conform
+to these rules without exception. This guide targets Nim 2.2.x. Any syntax,
+feature, or idiom that is deprecated or unavailable in Nim 2.2.x must not be
+used.
+
+
+================================================================================
+1. FILE HEADER DOCUMENTATION COMMENT
+================================================================================
+
+Every Nim source file MUST begin with a file-level documentation comment block.
+This block is mandatory and must not be omitted under any circumstances.
+
+The file header uses the `##` doc-comment style and must include the following
+fields in the exact order shown below:
+
+  ## <Brief one-line description of the file's purpose>
+  ##
+  ## :Author: WaterRun
+  ## :GitHub: https://github.com/Water-Run/get
+  ## :Date: <today's date in YYYY-MM-DD format, e.g. 2026-04-13>
+  ## :File: <filename including extension, e.g. main.nim>
+  ## :License: AGPL-3.0
+  ##
+  ## <Extended description of the module's responsibility, design intent,
+  ## and any important usage notes. This section should be at least two
+  ## sentences and may span multiple lines.>
+
+Example:
+
+  ## Entry point and CLI dispatcher for the get tool.
+  ##
+  ## :Author: WaterRun
+  ## :GitHub: https://github.com/Water-Run/get
+  ## :Date: 2026-04-13
+  ## :File: main.nim
+  ## :License: AGPL-3.0
+  ##
+  ## This module parses command-line arguments, routes execution to the
+  ## appropriate subcommand handler, and manages top-level error reporting.
+  ## It depends on the config, runner, and llm modules.
+
+
+================================================================================
+2. GENERAL FORMATTING AND STYLE
+================================================================================
+
+2.1 Indentation
+    Use 2 spaces per indentation level. Never use tabs.
+
+2.2 Line Length
+    Keep lines to a maximum of 100 characters. Break long expressions or
+    parameter lists across multiple lines when this limit would be exceeded.
+
+2.3 Blank Lines
+    - Separate top-level declarations (procs, types, consts, vars) with exactly
+      one blank line.
+    - Separate logically distinct blocks within a proc body with one blank line.
+    - Do not use more than two consecutive blank lines anywhere in a file.
+
+2.4 Trailing Whitespace
+    No trailing whitespace on any line.
+
+2.5 End of File
+    Every file must end with exactly one newline character.
+
+2.6 Encoding
+    All source files must be UTF-8 encoded.
+
+
+================================================================================
+3. NAMING CONVENTIONS
+================================================================================
+
+3.1 Variables and Procedure Parameters
+    Use camelCase.
+    Examples: inputLine, maxRetries, apiKey
+
+3.2 Procedures, Functions, Methods, and Iterators
+    Use camelCase.
+    Examples: fetchConfig, parseResponse, runCommand
+
+3.3 Types (object, enum, distinct, ref, tuple)
+    Use PascalCase.
+    Examples: ConfigOptions, ShellRunner, ApiResponse
+
+3.4 Constants
+    Use SCREAMING_SNAKE_CASE for module-level constants.
+    Examples: DEFAULT_TIMEOUT, MAX_TOKEN_LIMIT
+
+3.5 Enum Fields
+    Use camelCase prefixed with a short type abbreviation to avoid ambiguity,
+    consistent with Nim 2.x scoped enums.
+    Examples: for enum LogLevel: llDebug, llInfo, llWarn, llError
+
+3.6 Generic Type Parameters
+    Use single uppercase letters or short PascalCase names.
+    Examples: T, K, V, TKey
+
+3.7 File Names
+    Use snake_case for all .nim source files.
+    Examples: config_manager.nim, shell_runner.nim, llm_client.nim
+
+3.8 Avoid Abbreviations
+    Use full, descriptive names unless an abbreviation is universally understood
+    (e.g., url, api, llm, io). Never use single-character names except for
+    short-lived loop indices (i, j, k) or generic parameters.
+
+
+================================================================================
+4. DOCUMENTATION COMMENTS (MANDATORY)
+================================================================================
+
+Documentation comments use `##` (double-hash). Single-hash comments (`#`) are
+for inline implementation notes only and must never replace doc-comments.
+
+4.1 Rule: No Declaration Without a Doc-Comment
+    Every proc, func, method, iterator, macro, template, type, object field,
+    enum type, const, and module-level var/let declaration MUST have a
+    doc-comment. Omitting a doc-comment on any of these is a violation.
+
+4.2 Procedure / Function / Method / Iterator Doc-Comment Format
+    Place the doc-comment immediately before the proc/func/method/iterator
+    declaration. The comment must describe:
+      - What the procedure does (first line, imperative mood, e.g. "Reads ...")
+      - Parameters: document every parameter using :param <name>: <description>
+      - Return value: use :returns: <description> (omit only for void procs)
+      - Side effects or raises: use :raises: <ExceptionType>: <description>
+      - Any important usage notes or preconditions
+
+    Example:
+
+      ## Reads the configuration file from the given path and returns a parsed
+      ## ConfigOptions object.
+      ##
+      ## :param path: Absolute or relative path to the configuration file.
+      ## :param strict: When true, raises an error on unknown keys; when false,
+      ##                unknown keys are silently ignored.
+      ## :returns: A fully populated ConfigOptions instance.
+      ## :raises: IOError: If the file cannot be opened or read.
+      ## :raises: ValueError: If a required configuration key is missing.
+      proc loadConfig(path: string, strict: bool = true): ConfigOptions =
+
+4.3 Type and Object Doc-Comment Format
+    Document every type declaration above it. For object types, also document
+    every field using `##` placed on the same line or immediately after.
+
+    Example:
+
+      ## Holds all runtime configuration options for the get tool.
+      ## Populated from the configuration file and overridden by CLI flags.
+      type
+        ConfigOptions* = object
+          apiKey*: string       ## The LLM API authentication key.
+          apiUrl*: string       ## The LLM API endpoint URL.
+          modelName*: string    ## The identifier of the LLM model to use.
+          timeout*: int         ## Request timeout in seconds.
+          maxToken*: int        ## Maximum tokens allowed per request.
+          manualConfirm*: bool  ## Whether to prompt the user before executing.
+          doubleCheck*: bool    ## Whether to run a second model review pass.
+          quick*: bool          ## Whether to request faster model responses.
+          cautious*: bool       ## Whether to request more cautious commands.
+          logEnabled*: bool     ## Whether to log requests and executions.
+          allowTempFile*: bool  ## Whether temporary file creation is permitted.
+          shell*: string        ## Shell executable path or name.
+          commandPattern*: string ## Regex pattern for command validation.
+          systemPrompt*: string ## Custom system prompt for the LLM.
+
+4.4 Enum Doc-Comment Format
+    Document the enum type itself, and each field.
+
+    Example:
+
+      ## Represents the severity level of a log entry.
+      type
+        LogLevel* = enum
+          llDebug  ## Verbose debug output, for development use.
+          llInfo   ## General informational messages.
+          llWarn   ## Warnings that do not halt execution.
+          llError  ## Errors that indicate a failure condition.
+
+4.5 Const and Module-Level Var/Let Doc-Comments
+
+    Example:
+
+      ## Default timeout value in seconds for a single API request.
+      const DEFAULT_TIMEOUT* = 300
+
+      ## Maximum number of tokens consumed per LLM request.
+      const MAX_TOKEN_LIMIT* = 20480
+
+4.6 Template and Macro Doc-Comments
+    Apply the same doc-comment rules as for procedures. Document parameters,
+    return type (if any), and intended usage context.
+
+4.7 Inline Comments
+    Use `#` (single-hash) comments sparingly within procedure bodies to explain
+    non-obvious logic, algorithm steps, or workarounds. These comments must be
+    on their own line above the code they describe, not at the end of a line,
+    unless the annotation is very brief (under 40 characters).
+
+
+================================================================================
+5. NIM 2.2.x SPECIFIC REQUIREMENTS
+================================================================================
+
+5.1 Strict Mode
+    Every file must include the following pragma at the top (after the file
+    header doc-comment) to enable strict and safe defaults:
+
+      {.experimental: "strictFuncs".}
+
+    Consider also enabling:
+
+      {.experimental: "views".}
+
+    when working with borrowed data to avoid unnecessary copies.
+
+5.2 func vs proc
+    Use `func` for pure, side-effect-free procedures. Use `proc` for procedures
+    with side effects (I/O, state mutation, etc.). Never use `proc` for
+    something that qualifies as a `func`.
+
+5.3 Avoid var Parameters When Possible
+    Prefer returning values over mutating via `var` parameters. Use `var`
+    parameters only when mutation of the caller's data is the explicit intent
+    and returning a copy would be prohibitively expensive.
+
+5.4 Result Variable
+    Prefer using the implicit `result` variable over explicit `return`
+    statements in non-trivial procs. Use explicit `return` only for early exits.
+
+5.5 String Formatting
+    Use `std/strformat` with the `fmt` macro for string interpolation.
+    Example: fmt"Connected to {apiUrl} using model {modelName}"
+    Never use string concatenation with `&` for anything beyond two operands.
+
+5.6 Option Types
+    Use `std/options` (Option[T]) for values that may be absent. Never use
+    nil, empty strings, or sentinel integers to represent "no value".
+
+5.7 Error Handling
+    Prefer raising typed exceptions (defined as object types inheriting from
+    Exception or a project-specific base exception) over using return codes or
+    boolean flags to signal errors.
+
+    Define custom exception types for domain-specific errors:
+
+      ## Raised when the LLM API returns an unexpected or error response.
+      type LlmApiError* = object of IOError
+
+5.8 Iterators
+    Prefer iterators over building and returning sequences when the caller
+    only needs to iterate once. Use `yield` correctly and document the
+    yielded value type and semantics.
+
+5.9 Avoid Deprecated Features
+    The following must NOT be used in Nim 2.2.x code:
+      - `system.newException` shorthand without a message (always pass message)
+      - `{.deprecated.}` items from the standard library
+      - Old-style object variants without proper `case` field handling
+      - `tables.initTable` with no argument (use `initTable[K, V]()` explicitly)
+      - Implicit conversions that produce warnings under `--warning:all`
+
+5.10 Imports
+    - Use explicit imports: `import std/[strutils, strformat, os, options]`
+    - Never use wildcard imports (`from module import *`) except for well-known
+      DSL modules where it is conventional.
+    - Group imports in this order: stdlib, third-party, project-local.
+    - Separate each group with a blank line.
+    - Use `include` only when absolutely necessary; prefer `import`.
+
+5.11 Pragmas
+    Document every non-trivial pragma with an inline comment explaining why
+    it is applied.
+
+5.12 Generics
+    Constrain generic parameters with concepts or type classes wherever the
+    constraint can be meaningfully expressed. Never leave generics unconstrained
+    when a meaningful constraint exists.
+
+5.13 Object Constructors
+    Always use named field initialization for object construction:
+
+      let cfg = ConfigOptions(
+        apiKey: "abc",
+        timeout: 300,
+        logEnabled: true
+      )
+
+    Never use positional initialization.
+
+5.14 Nil Safety
+    Nim 2.x enforces stricter nil-safety. Do not assign `nil` to ref types
+    unless explicitly modeling an absent reference. Prefer `Option[ref T]`.
+
+
+================================================================================
+6. MODULE STRUCTURE
+================================================================================
+
+Every .nim file must follow this top-to-bottom structure:
+
+  1. File header doc-comment (Section 1)
+  2. Experimental / compiler pragmas (Section 5.1)
+  3. Import statements (grouped as described in Section 5.10)
+  4. Module-level constants (`const`)
+  5. Type declarations (`type`)
+  6. Module-level variables (`var` / `let`) — minimize these
+  7. Private helper procedures and functions (no export marker)
+  8. Public API procedures and functions (with `*` export marker)
+  9. Main execution block (`when isMainModule:`) if applicable
+
+Each section must be separated by a blank line. Sections that are empty may
+be omitted, but the order of non-empty sections must not change.
+
+
+================================================================================
+7. EXPORTS AND VISIBILITY
+================================================================================
+
+7.1 Mark with `*` only what is part of the public API of the module.
+7.2 Internal helpers must not be exported. Prefix with `impl` or place in a
+    private submodule if the symbol needs to be shared across internal modules
+    without being public.
+7.3 Every exported symbol MUST have a doc-comment (see Section 4).
+
+
+================================================================================
+8. TYPES AND DATA MODELING
+================================================================================
+
+8.1 Prefer `object` over `tuple` for named structured data that has associated
+    behavior or invariants.
+8.2 Use `tuple` only for lightweight, anonymous groupings with no associated
+    procs (e.g., returning two values from a func).
+8.3 Use `distinct` types to enforce type-safe wrappers around primitives
+    (e.g., a URL string, a shell command string).
+8.4 Use `ref object` only when reference semantics and heap allocation are
+    genuinely required (e.g., for mutable shared state or recursive structures).
+8.5 Avoid deep inheritance hierarchies. Prefer composition.
+
+
+================================================================================
+9. CONCURRENCY
+================================================================================
+
+9.1 If concurrency is needed, use `std/asyncdispatch` with `async`/`await`.
+9.2 Document every `async` proc with a note that it is asynchronous and must
+    be awaited.
+9.3 Do not mix threaded and async concurrency models unless absolutely required,
+    and document the reasoning thoroughly if done.
+
+
+================================================================================
+10. TESTING
+================================================================================
+
+10.1 Every public proc must have at least one corresponding `runnableExamples`
+     block embedded in its doc-comment, demonstrating correct usage.
+
+     Example:
+
+       ## Parses a timeout string and returns its integer value in seconds.
+       ##
+       ## :param s: A string representing a positive integer.
+       ## :returns: The parsed integer timeout value.
+       ## :raises: ValueError: If the string is not a valid positive integer.
+       ##
+       ## .. code-block:: nim
+       ##   runnableExamples:
+       ##     assert parseTimeout("300") == 300
+       proc parseTimeout(s: string): int =
+
+10.2 Unit tests are placed in a `tests/` directory. Each test file is named
+     `test_<module_name>.nim`.
+10.3 Use `std/unittest` for all tests.
+10.4 Every test suite must have a doc-comment describing what it tests.
+
+
+================================================================================
+11. SECURITY AND SAFETY (PROJECT-SPECIFIC)
+================================================================================
+
+11.1 This project is designed to perform read-only operations. No generated or
+     written procedure may perform write, delete, or mutate operations on the
+     filesystem or system state unless it is explicitly part of configuration
+     management (i.e., the `set` subcommand writing to the config file).
+11.2 Any proc that invokes an external shell command must validate the command
+     against the configured `commandPattern` regex before execution.
+11.3 API keys and secrets must never be logged, printed to stdout, or included
+     in error messages. Redact them as `***` in any output.
+11.4 All external input (LLM responses, CLI arguments, config file values) must
+     be validated before use. Never pass raw external input to a shell.
+
+
+================================================================================
+12. EXAMPLE COMPLIANT FILE SKELETON
+================================================================================
+
+The following skeleton illustrates a fully compliant Nim 2.2.x source file:
+
+--------------------------------------------------------------------------------
+## Manages LLM API communication for the get tool.
+##
+## :Author: WaterRun
+## :GitHub: https://github.com/Water-Run/get
+## :Date: 2026-04-13
+## :File: llm_client.nim
+## :License: AGPL-3.0
+##
+## This module provides procedures to construct API requests, send them to a
+## configured OpenAI-compatible endpoint, and parse the resulting responses.
+## It handles timeout enforcement, token limit tracking, and optional
+## double-check review passes.
+
+{.experimental: "strictFuncs".}
+
+import std/[httpclient, strformat, strutils, options, json]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+## Default HTTP request timeout in seconds.
+const DEFAULT_TIMEOUT* = 300
+
+## Maximum tokens allowed per LLM request.
+const MAX_TOKEN_LIMIT* = 20480
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+## Raised when the LLM API returns a non-successful HTTP status or malformed
+## response body.
+type LlmApiError* = object of IOError
+
+## Encapsulates a single request payload sent to the LLM API.
+type
+  LlmRequest* = object
+    model*: string      ## The model identifier to use for this request.
+    prompt*: string     ## The user prompt text.
+    systemPrompt*: string ## The system-level instruction prompt.
+    maxTokens*: int     ## Maximum tokens for the response.
+    quick*: bool        ## Whether to request a faster, less thorough response.
+
+## Encapsulates the parsed response from the LLM API.
+type
+  LlmResponse* = object
+    command*: string    ## The shell command extracted from the model's reply.
+    rawText*: string    ## The full raw text returned by the model.
+    tokenUsed*: int     ## Number of tokens consumed by this request.
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+## Constructs the JSON body for an OpenAI-compatible chat completion request.
+##
+## :param req: The LlmRequest describing the desired query.
+## :returns: A JsonNode representing the request body.
+func buildRequestBody(req: LlmRequest): JsonNode =
+  result = %* {
+    "model": req.model,
+    "max_tokens": req.maxTokens,
+    "messages": [
+      {"role": "system", "content": req.systemPrompt},
+      {"role": "user",   "content": req.prompt}
+    ]
+  }
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+## Sends an LlmRequest to the configured API endpoint and returns the parsed
+## LlmResponse.
+##
+## :param req: The request to send.
+## :param url: The API endpoint URL.
+## :param apiKey: The authentication key. Must not be empty.
+## :param timeoutSec: Request timeout in seconds.
+## :returns: A populated LlmResponse on success.
+## :raises: LlmApiError: If the HTTP request fails or the response is invalid.
+## :raises: ValueError: If apiKey or url is empty.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     # This example requires a live API endpoint and is illustrative only.
+##     discard
+proc sendRequest*(
+  req: LlmRequest,
+  url: string,
+  apiKey: string,
+  timeoutSec: int = DEFAULT_TIMEOUT
+): LlmResponse =
+  if apiKey.len == 0:
+    raise newException(ValueError, "API key must not be empty.")
+  if url.len == 0:
+    raise newException(ValueError, "API URL must not be empty.")
+
+  let client = newHttpClient(timeout = timeoutSec * 1000)
+  client.headers = newHttpHeaders({
+    "Authorization": fmt"Bearer ***",
+    "Content-Type":  "application/json"
+  })
+
+  let body = $buildRequestBody(req)
+  let response = client.post(url, body = body)
+
+  if response.code != Http200:
+    raise newException(
+      LlmApiError,
+      fmt"API returned status {response.code}: {response.body}"
+    )
+
+  # Parse the response JSON and extract the command text
+  let parsed = parseJson(response.body)
+  result = LlmResponse(
+    rawText:   parsed["choices"][0]["message"]["content"].getStr(),
+    tokenUsed: parsed["usage"]["total_tokens"].getInt()
+  )
+  result.command = result.rawText.strip()
+--------------------------------------------------------------------------------
+
+
+================================================================================
+13. CHECKLIST FOR LLM CODE GENERATION
+================================================================================
+
+Before producing any Nim code, verify the following checklist. Every item must
+be satisfied:
+
+  [ ] File header doc-comment is present with all required fields
+      (Author, GitHub, Date, File, License, description).
+  [ ] All procs, funcs, methods, iterators, macros, and templates have
+      doc-comments with :param:, :returns:, and :raises: as applicable.
+  [ ] All types, object fields, enum fields, consts, and module-level
+      vars/lets have doc-comments.
+  [ ] Nim 2.2.x syntax is used throughout; no deprecated features.
+  [ ] `func` is used for pure procedures; `proc` for side-effectful ones.
+  [ ] Imports are explicit, grouped, and ordered (stdlib, third-party, local).
+  [ ] Naming follows camelCase (procs/vars), PascalCase (types),
+      SCREAMING_SNAKE_CASE (consts).
+  [ ] No read-only constraint violations (no unauthorized write operations).
+  [ ] API keys are never exposed in output, logs, or error messages.
+  [ ] All external input is validated before use.
+  [ ] runnableExamples blocks are present for every public proc.
+  [ ] File ends with exactly one newline.
+  [ ] No lines exceed 100 characters.
+  [ ] 2-space indentation throughout; no tabs.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
