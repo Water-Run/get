@@ -6,12 +6,15 @@
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
-## This module provides procedures to construct API requests, send them
-## to an OpenAI-compatible chat-completions endpoint, parse the JSON
-## response, and display elapsed-time progress on stderr while the
-## request is in flight.  It uses asynchronous I/O so that a one-second
-## timer can fire between event-loop polls without blocking the HTTP
-## transfer.
+## This module sends requests to an OpenAI-compatible
+## chat-completions endpoint, parses the JSON response, and displays
+## elapsed-time progress on stderr while the HTTP round-trip is in
+## flight.  It uses asynchronous I/O so that a one-second timer can
+## fire between event-loop polls without blocking the transfer.
+##
+## The LlmRequest type accepts a generic seq[LlmMessage] so that
+## callers (prompt builders, isok, double-check) can construct
+## arbitrary conversation histories.
 
 {.experimental: "strictFuncs".}
 
@@ -32,44 +35,41 @@ const CHAT_COMPLETIONS_PATH* = "/chat/completions"
 # ---------------------------------------------------------------------------
 
 ## Raised when the LLM API returns a non-successful HTTP status, a
-## malformed response body, or when the request exceeds the configured
-## timeout.
+## malformed response body, or when the request exceeds the
+## configured timeout.
 type
   LlmApiError* = object of GetError
 
-## Encapsulates a single chat-completion request to be sent to the API.
+## Encapsulates a single chat-completion request.
 type
   LlmRequest* = object
-    model*: string        ## Model identifier (e.g. "gpt-5.3-codex").
-    systemPrompt*: string ## System-level instruction prompt.
-    userPrompt*: string   ## User prompt text.
-    maxTokens*: int       ## Maximum tokens for the response.
+    model*: string              ## Model identifier.
+    messages*: seq[LlmMessage]  ## Conversation messages.
+    maxTokens*: int             ## Maximum tokens for the response.
 
 ## Encapsulates the parsed response returned by the API.
 type
   LlmResponse* = object
-    content*: string  ## Text content extracted from the first choice.
-    tokensUsed*: int  ## Total tokens consumed (0 when unavailable).
+    content*: string  ## Text from the first choice.
+    tokensUsed*: int  ## Total tokens consumed (0 if unavailable).
 
 # ---------------------------------------------------------------------------
 # Private helpers — request construction
 # ---------------------------------------------------------------------------
 
 ## Builds the JSON request body for an OpenAI-compatible
-## chat-completions endpoint.
+## chat-completions endpoint from the message list.
 ##
 ## :param req: The LLM request parameters.
 ## :returns: A JsonNode representing the full request body.
 proc implBuildRequestBody(req: LlmRequest): JsonNode =
-  # JSON construction mutates ref objects internally, so this is a
-  # proc rather than a func to satisfy strictFuncs.
+  var msgs = newJArray()
+  for m in req.messages:
+    msgs.add(%*{"role": m.role, "content": m.content})
   result = %*{
     "model": req.model,
     "max_tokens": req.maxTokens,
-    "messages": [
-      {"role": "system", "content": req.systemPrompt},
-      {"role": "user", "content": req.userPrompt}
-    ]
+    "messages": msgs
   }
 
 ## Strips any trailing slash from a URL so that appending a path
@@ -85,10 +85,9 @@ func implNormaliseUrl(url: string): string =
 # ---------------------------------------------------------------------------
 
 ## Posts the JSON body to the endpoint and returns the raw response
-## body string.  The returned future completes once both HTTP headers
-## and body have been fully received.
+## body string.
 ##
-## :param client: An open async HTTP client with headers already set.
+## :param client: An open async HTTP client with headers set.
 ## :param endpoint: The full URL including the path.
 ## :param body: The serialised JSON request body.
 ## :returns: The response body as a string.
@@ -102,7 +101,6 @@ proc implPostRequest(
   let respBody = await resp.body
   if resp.code != Http200:
     let codeInt = resp.code.int
-    # Truncate very long error bodies to keep output readable.
     let preview =
       if respBody.len > 512: respBody[0 ..< 512] & "..."
       else: respBody
@@ -114,16 +112,16 @@ proc implPostRequest(
 # Private helpers — progress display
 # ---------------------------------------------------------------------------
 
-## Waits for the given future while printing elapsed-time progress to
-## stderr.  During the first nine seconds a dot is appended each
-## second.  From ten seconds onward a "- waited N/Ts" line is printed
-## every ten seconds.  The proc enforces the timeout by raising when
-## the elapsed time reaches the limit.
+## Waits for the given future while printing elapsed-time progress
+## to stderr.  During the first nine seconds a dot is appended each
+## second.  From ten seconds onward a "waited N/Ts" line is printed
+## every ten seconds.  Raises when the elapsed time reaches the
+## timeout limit.
 ##
-## :param fut: The future representing the in-flight HTTP request.
-## :param timeoutSec: Maximum wait in seconds before raising.
-## :param hideProcess: When true, all progress output is suppressed.
-## :returns: The value carried by the future once it completes.
+## :param fut: The future representing the in-flight request.
+## :param timeoutSec: Maximum wait in seconds.
+## :param hideProcess: Suppress all progress output when true.
+## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
 proc implAwaitWithProgress(
   fut: Future[string],
@@ -143,7 +141,6 @@ proc implAwaitWithProgress(
       if elapsed < 10:
         stderr.write(".")
         stderr.flushFile()
-        # lineOpen stays true
       elif elapsed == 10:
         stderr.writeLine("")
         stderr.writeLine(
@@ -166,13 +163,13 @@ proc implAwaitWithProgress(
 # Private helpers — response parsing
 # ---------------------------------------------------------------------------
 
-## Parses the raw JSON body returned by an OpenAI-compatible endpoint
-## into an LlmResponse.
+## Parses the raw JSON body returned by an OpenAI-compatible
+## endpoint into an LlmResponse.
 ##
 ## :param body: The raw JSON string.
 ## :returns: A populated LlmResponse.
-## :raises: LlmApiError: If the JSON is malformed or required fields
-##          are missing.
+## :raises: LlmApiError: If the JSON is malformed or missing
+##          required fields.
 proc implParseResponse(body: string): LlmResponse =
   var node: JsonNode
   try:
@@ -203,17 +200,18 @@ proc implParseResponse(body: string): LlmResponse =
 # ---------------------------------------------------------------------------
 
 ## Sends an LlmRequest to the configured OpenAI-compatible endpoint
-## and returns the parsed LlmResponse.  While the HTTP round-trip is
-## in progress, elapsed-time information is written to stderr unless
-## hideProcess is true.
+## and returns the parsed LlmResponse.  While the HTTP round-trip
+## is in progress, elapsed-time information is written to stderr
+## unless hideProcess is true.
 ##
-## :param req: The request payload.
-## :param url: The API base URL (e.g. "https://api.poe.com/v1").
+## :param req: The request payload (model, messages, maxTokens).
+## :param url: The API base URL.
 ## :param apiKey: The Bearer token.  Must not be empty.
 ## :param timeoutSec: Maximum seconds to wait before aborting.
 ## :param hideProcess: Suppress progress output when true.
 ## :returns: A populated LlmResponse on success.
-## :raises: LlmApiError: On timeout, HTTP error, or malformed response.
+## :raises: LlmApiError: On timeout, HTTP error, or malformed
+##          response.
 ## :raises: GetError: If apiKey or url is empty.
 ##
 ## .. code-block:: nim
@@ -245,7 +243,8 @@ proc sendLlmRequest*(
     })
     try:
       let bodyStr = $implBuildRequestBody(req)
-      let fut = implPostRequest(client, endpoint, bodyStr)
+      let fut = implPostRequest(
+        client, endpoint, bodyStr)
       let respBody = await implAwaitWithProgress(
         fut, timeoutSec, hideProcess)
       result = implParseResponse(respBody)

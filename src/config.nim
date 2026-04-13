@@ -11,6 +11,11 @@
 ## secure key storage (Linux: file permissions 0600; Windows: DPAPI).
 ## It exposes high-level operations consumed by the CLI dispatcher:
 ## load, save, display, reset, set-by-name, and readiness checking.
+##
+## String options (url, model, shell) accept an empty string as an
+## explicit "unset" value.  Boolean and integer options reset to their
+## compile-time defaults when an empty string is supplied to
+## setConfigOption.
 
 {.experimental: "strictFuncs".}
 
@@ -52,26 +57,38 @@ const DEFAULT_LOG* = true
 ## Default hide-process flag.
 const DEFAULT_HIDE_PROCESS* = false
 
+## Default cache-enabled flag.
+const DEFAULT_CACHE* = true
+
+## Default cache expiry in days.
+const DEFAULT_CACHE_EXPIRY* = 30
+
+## Default maximum number of cached entries.
+const DEFAULT_CACHE_MAX_ENTRIES* = 1000
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
-## Holds every runtime configuration option except the API key, which is
-## stored and managed separately for security reasons.
+## Holds every runtime configuration option except the API key,
+## which is stored and managed separately for security reasons.
 type
   Config* = object
-    url*: string              ## LLM API endpoint URL.
-    model*: string            ## LLM model identifier.
-    manualConfirm*: bool      ## Prompt user before executing a command.
-    doubleCheck*: bool        ## Run a second model review pass.
-    instance*: bool           ## Ask the model to reply quickly.
-    timeout*: int             ## Per-request timeout in seconds.
-    maxToken*: int            ## Maximum tokens per request.
-    commandPattern*: Option[string]  ## Regex for command validation.
-    systemPrompt*: Option[string]    ## Custom system prompt for the LLM.
-    shell*: string            ## Shell executable path or name.
-    log*: bool                ## Whether to log requests and executions.
-    hideProcess*: bool        ## Hide intermediate steps in output.
+    url*: string                     ## LLM API endpoint URL.
+    model*: string                   ## LLM model identifier.
+    manualConfirm*: bool             ## Prompt before executing.
+    doubleCheck*: bool               ## Second model review pass.
+    instance*: bool                  ## Single-call mode.
+    timeout*: int                    ## Per-request timeout (s).
+    maxToken*: int                   ## Max tokens per request.
+    commandPattern*: Option[string]  ## Regex for validation.
+    systemPrompt*: Option[string]    ## Custom system prompt.
+    shell*: string                   ## Shell executable.
+    log*: bool                       ## Log requests/executions.
+    hideProcess*: bool               ## Hide intermediate output.
+    cache*: bool                     ## Enable response cache.
+    cacheExpiry*: int                ## Cache expiry in days.
+    cacheMaxEntries*: int            ## Max cached entries.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -96,7 +113,8 @@ when defined(windows):
   ): int32 {.importc: "CryptProtectData",
     stdcall, dynlib: "crypt32.dll".}
 
-  ## Decrypts ciphertext previously encrypted with CryptProtectData.
+  ## Decrypts ciphertext previously encrypted with
+  ## CryptProtectData.
   proc cryptUnprotectData(
     pDataIn: ptr DataBlob,
     ppszDataDescr: pointer,
@@ -119,8 +137,8 @@ when defined(windows):
 # ---------------------------------------------------------------------------
 
 when defined(windows):
-  ## Encrypts a plaintext string with DPAPI and returns a base64 encoding
-  ## of the ciphertext.
+  ## Encrypts a plaintext string with DPAPI and returns a base64
+  ## encoding of the ciphertext.
   ##
   ## :param data: The plaintext to encrypt.
   ## :returns: Base64-encoded ciphertext.
@@ -150,7 +168,7 @@ when defined(windows):
   ##
   ## :param encoded: Base64-encoded ciphertext.
   ## :returns: The original plaintext string.
-  ## :raises: GetError: If decryption fails (e.g. corrupted data).
+  ## :raises: GetError: If decryption fails.
   proc implDecryptDpapi(encoded: string): string =
     let encrypted = decode(encoded)
     var inputBlob = DataBlob(
@@ -180,27 +198,16 @@ when defined(windows):
 ##
 ## :returns: "powershell" on Windows, "bash" everywhere else.
 func implDefaultShell(): string =
-  when defined(windows):
-    result = "powershell"
-  else:
-    result = "bash"
+  result = defaultShell()
 
-## Returns value when non-empty, otherwise returns the fallback.
-##
-## :param value: The candidate string.
-## :param fallback: Returned when value is empty.
-## :returns: value or fallback.
-func implNonEmpty(value: string, fallback: string): string =
-  if value.len > 0: value else: fallback
-
-## Parses a boolean string ("true" / "false").  When the input is empty
-## the provided default is returned.
+## Parses a boolean string ("true" / "false").  When the input is
+## empty the provided default is returned.
 ##
 ## :param value: Raw string from the CLI.
 ## :param optName: Option name, used in error messages.
 ## :param default: Fallback when value is empty.
 ## :returns: The parsed boolean.
-## :raises: GetError: If value is neither empty, "true", nor "false".
+## :raises: GetError: If value is invalid.
 func implParseBool(
   value: string,
   optName: string,
@@ -252,52 +259,62 @@ func implParsePositiveInt(
 ## :returns: A JsonNode representing the configuration.
 proc implConfigToJson(cfg: Config): JsonNode =
   result = %*{
-    "url": cfg.url,
-    "model": cfg.model,
-    "manualConfirm": cfg.manualConfirm,
-    "doubleCheck": cfg.doubleCheck,
-    "instance": cfg.instance,
-    "timeout": cfg.timeout,
-    "maxToken": cfg.maxToken,
-    "shell": cfg.shell,
-    "log": cfg.log,
-    "hideProcess": cfg.hideProcess
+    "url":             cfg.url,
+    "model":           cfg.model,
+    "manualConfirm":   cfg.manualConfirm,
+    "doubleCheck":     cfg.doubleCheck,
+    "instance":        cfg.instance,
+    "timeout":         cfg.timeout,
+    "maxToken":        cfg.maxToken,
+    "shell":           cfg.shell,
+    "log":             cfg.log,
+    "hideProcess":     cfg.hideProcess,
+    "cache":           cfg.cache,
+    "cacheExpiry":     cfg.cacheExpiry,
+    "cacheMaxEntries": cfg.cacheMaxEntries
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] = %cfg.commandPattern.get
   if cfg.systemPrompt.isSome:
     result["systemPrompt"] = %cfg.systemPrompt.get
 
-## Parses a JSON node into a Config, falling back to defaults for any
-## missing or invalid fields.
+## Parses a JSON node into a Config.
 ##
 ## :param node: The JSON node to parse.
-## :param defaults: Default configuration used as fallback.
+## :param defaults: Fallback values for absent fields.
 ## :returns: A populated Config instance.
 proc implJsonToConfig(
   node: JsonNode,
   defaults: Config
 ): Config =
   result = Config(
-    url: implNonEmpty(
-      node{"url"}.getStr(""), defaults.url),
-    model: implNonEmpty(
-      node{"model"}.getStr(""), defaults.model),
-    manualConfirm: node{"manualConfirm"}.getBool(
-      defaults.manualConfirm),
-    doubleCheck: node{"doubleCheck"}.getBool(
-      defaults.doubleCheck),
-    instance: node{"instance"}.getBool(
-      defaults.instance),
-    timeout: node{"timeout"}.getInt(
-      defaults.timeout),
-    maxToken: node{"maxToken"}.getInt(
-      defaults.maxToken),
-    shell: implNonEmpty(
-      node{"shell"}.getStr(""), defaults.shell),
+    url: node{"url"}.getStr(""),
+    model: node{"model"}.getStr(""),
+    manualConfirm:
+      node{"manualConfirm"}.getBool(
+        defaults.manualConfirm),
+    doubleCheck:
+      node{"doubleCheck"}.getBool(
+        defaults.doubleCheck),
+    instance:
+      node{"instance"}.getBool(defaults.instance),
+    timeout:
+      node{"timeout"}.getInt(defaults.timeout),
+    maxToken:
+      node{"maxToken"}.getInt(defaults.maxToken),
+    shell: node{"shell"}.getStr(""),
     log: node{"log"}.getBool(defaults.log),
-    hideProcess: node{"hideProcess"}.getBool(
-      defaults.hideProcess)
+    hideProcess:
+      node{"hideProcess"}.getBool(
+        defaults.hideProcess),
+    cache:
+      node{"cache"}.getBool(defaults.cache),
+    cacheExpiry:
+      node{"cacheExpiry"}.getInt(
+        defaults.cacheExpiry),
+    cacheMaxEntries:
+      node{"cacheMaxEntries"}.getInt(
+        defaults.cacheMaxEntries)
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and cmdNode.kind == JString and
@@ -326,18 +343,21 @@ proc implJsonToConfig(
 ##     assert cfg.timeout == 300
 func defaultConfig*(): Config =
   result = Config(
-    url: DEFAULT_URL,
-    model: DEFAULT_MODEL,
-    manualConfirm: DEFAULT_MANUAL_CONFIRM,
-    doubleCheck: DEFAULT_DOUBLE_CHECK,
-    instance: DEFAULT_INSTANCE,
-    timeout: DEFAULT_TIMEOUT,
-    maxToken: DEFAULT_MAX_TOKEN,
-    commandPattern: none(string),
-    systemPrompt: none(string),
-    shell: implDefaultShell(),
-    log: DEFAULT_LOG,
-    hideProcess: DEFAULT_HIDE_PROCESS
+    url:             DEFAULT_URL,
+    model:           DEFAULT_MODEL,
+    manualConfirm:   DEFAULT_MANUAL_CONFIRM,
+    doubleCheck:     DEFAULT_DOUBLE_CHECK,
+    instance:        DEFAULT_INSTANCE,
+    timeout:         DEFAULT_TIMEOUT,
+    maxToken:        DEFAULT_MAX_TOKEN,
+    commandPattern:  none(string),
+    systemPrompt:    none(string),
+    shell:           implDefaultShell(),
+    log:             DEFAULT_LOG,
+    hideProcess:     DEFAULT_HIDE_PROCESS,
+    cache:           DEFAULT_CACHE,
+    cacheExpiry:     DEFAULT_CACHE_EXPIRY,
+    cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES
   )
 
 # ---------------------------------------------------------------------------
@@ -345,8 +365,6 @@ func defaultConfig*(): Config =
 # ---------------------------------------------------------------------------
 
 ## Persists the API key using platform-appropriate secure storage.
-## On Linux/macOS the key is written to a file with permission 0600.
-## On Windows the key is encrypted via DPAPI before being written.
 ## Passing none deletes any stored key.
 ##
 ## :param key: The key value to store, or none to clear.
@@ -367,11 +385,9 @@ proc saveKey*(key: Option[string]) =
     writeFile(path, encrypted)
   else:
     writeFile(path, value)
-    # Owner read/write only (0600)
     setFilePermissions(path, {fpUserRead, fpUserWrite})
 
 ## Loads the API key from platform-specific secure storage.
-## Returns none if no key file exists or if decryption fails.
 ##
 ## :returns: The stored key, or none if absent or unreadable.
 ##
@@ -391,7 +407,8 @@ proc loadKey*(): Option[string] =
       result = some(implDecryptDpapi(content))
     except GetError:
       stderr.writeLine(
-        "warning: cannot decrypt key file, treating as unset")
+        "warning: cannot decrypt key file," &
+        " treating as unset")
       result = none(string)
   else:
     result = some(content)
@@ -400,8 +417,8 @@ proc loadKey*(): Option[string] =
 # Public API — config persistence
 # ---------------------------------------------------------------------------
 
-## Loads the configuration from disk.  Returns defaults when the file
-## does not exist or cannot be parsed.
+## Loads the configuration from disk.  Returns defaults when the
+## file does not exist or cannot be parsed.
 ##
 ## :returns: The current configuration.
 ##
@@ -420,11 +437,13 @@ proc loadConfig*(): Config =
     result = implJsonToConfig(node, defaults)
   except JsonParsingError:
     stderr.writeLine(
-      "warning: config file is corrupted, using defaults")
+      "warning: config file is corrupted," &
+      " using defaults")
     result = defaults
   except IOError:
     stderr.writeLine(
-      "warning: cannot read config file, using defaults")
+      "warning: cannot read config file," &
+      " using defaults")
     result = defaults
 
 ## Writes the configuration to disk as pretty-printed JSON.
@@ -444,9 +463,8 @@ proc saveConfig*(cfg: Config) =
 # Public API — display
 # ---------------------------------------------------------------------------
 
-## Prints every configuration option to stdout.  The API key is masked
-## with asterisks matching the original length.  Option names are shown
-## in kebab-case to match CLI usage.
+## Prints every configuration option to stdout.  The API key is
+## masked with asterisks.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -476,12 +494,15 @@ proc displayConfig*() =
   echo fmt"shell = {cfg.shell}"
   echo fmt"log = {cfg.log}"
   echo fmt"hide-process = {cfg.hideProcess}"
+  echo fmt"cache = {cfg.cache}"
+  echo fmt"cache-expiry = {cfg.cacheExpiry}"
+  echo fmt"cache-max-entries = {cfg.cacheMaxEntries}"
 
 # ---------------------------------------------------------------------------
 # Public API — reset
 # ---------------------------------------------------------------------------
 
-## Resets all configuration to default values and clears the stored key.
+## Resets all configuration to defaults and clears the stored key.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -495,22 +516,17 @@ proc resetConfig*() =
 # Public API — set by name
 # ---------------------------------------------------------------------------
 
-## Sets a single configuration option identified by its CLI kebab-case
-## name.  When value is empty the option is reset to its default.
-## The key option is handled via secure storage; all other options are
-## persisted in the JSON configuration file.
+## Sets a single configuration option by its CLI kebab-case name.
 ##
-## :param name: The kebab-case option name (e.g. "manual-confirm").
-## :param value: The new value, or empty string to reset to default.
-## :raises: GetError: If the option name is unknown or the value is
-##          invalid for the option's type.
+## :param name: The kebab-case option name.
+## :param value: The new value, or empty to unset/reset.
+## :raises: GetError: If the name is unknown or value is invalid.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     # Illustrative — modifies filesystem.
 ##     discard
 proc setConfigOption*(name: string, value: string) =
-  # Key is stored separately from the JSON config file
   if name == "key":
     if value.len == 0:
       saveKey(none(string))
@@ -521,9 +537,9 @@ proc setConfigOption*(name: string, value: string) =
   var cfg = loadConfig()
   case name
   of "url":
-    cfg.url = implNonEmpty(value, DEFAULT_URL)
+    cfg.url = value
   of "model":
-    cfg.model = implNonEmpty(value, DEFAULT_MODEL)
+    cfg.model = value
   of "manual-confirm":
     cfg.manualConfirm = implParseBool(
       value, name, DEFAULT_MANUAL_CONFIRM)
@@ -550,12 +566,21 @@ proc setConfigOption*(name: string, value: string) =
     else:
       cfg.systemPrompt = none(string)
   of "shell":
-    cfg.shell = implNonEmpty(value, implDefaultShell())
+    cfg.shell = value
   of "log":
     cfg.log = implParseBool(value, name, DEFAULT_LOG)
   of "hide-process":
     cfg.hideProcess = implParseBool(
       value, name, DEFAULT_HIDE_PROCESS)
+  of "cache":
+    cfg.cache = implParseBool(
+      value, name, DEFAULT_CACHE)
+  of "cache-expiry":
+    cfg.cacheExpiry = implParsePositiveInt(
+      value, name, DEFAULT_CACHE_EXPIRY)
+  of "cache-max-entries":
+    cfg.cacheMaxEntries = implParsePositiveInt(
+      value, name, DEFAULT_CACHE_MAX_ENTRIES)
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")
@@ -565,10 +590,10 @@ proc setConfigOption*(name: string, value: string) =
 # Public API — readiness check
 # ---------------------------------------------------------------------------
 
-## Checks whether the minimum configuration required to make LLM API
-## calls is present and prints a status summary to stdout.
+## Checks whether key, url, and model are all configured and prints
+## a status summary to stdout.
 ##
-## :returns: true when key, url, and model are all configured.
+## :returns: true when all three are present.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:

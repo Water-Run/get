@@ -6,21 +6,32 @@
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
-## This file exercises the pure-function helpers and basic config
-## operations exposed by the utils and config modules.
+## This file exercises the pure-function helpers and infrastructure
+## operations exposed by utils, config, cache, sysinfo, exec, prompt,
+## and llm.  The LLM connectivity suite is skipped unless the
+## environment variables GET_TEST_KEY, GET_TEST_URL, and
+## GET_TEST_MODEL are set.
 
 {.experimental: "strictFuncs".}
 
-import std/[unittest, options]
+import std/[os, options, strutils, times, unittest]
 
 import utils
+import cache
 import config
+import exec
+import llm
+import prompt
+import sysinfo
 
 # ---------------------------------------------------------------------------
 # utils tests
 # ---------------------------------------------------------------------------
 
 suite "utils":
+  ## Tests for maskString, extractCodeBlock, defaultShell, and the
+  ## global application-identity constants.
+
   test "maskString replaces characters with asterisks":
     check maskString("hello") == "*****"
     check maskString("") == ""
@@ -34,11 +45,133 @@ suite "utils":
     check APP_LICENSE.len > 0
     check APP_GITHUB.len > 0
 
+  test "defaultShell returns a non-empty string":
+    check defaultShell().len > 0
+
+  test "extractCodeBlock extracts sh block":
+    let text = "Here:\n```sh\nls -la /etc\n```\ndone"
+    let res = extractCodeBlock(text)
+    check res.isSome
+    check res.get == "ls -la /etc"
+
+  test "extractCodeBlock extracts bare block":
+    let text = "```\necho hello\n```"
+    let res = extractCodeBlock(text)
+    check res.isSome
+    check res.get == "echo hello"
+
+  test "extractCodeBlock returns none on no block":
+    let text = "no code block here"
+    check extractCodeBlock(text).isNone
+
+  test "extractCodeBlock handles unclosed fence":
+    let text = "```sh\nls -la"
+    let res = extractCodeBlock(text)
+    check res.isSome
+    check res.get == "ls -la"
+
+  test "extractCodeBlock extracts first block only":
+    let text = "```sh\nfirst\n```\n```sh\nsecond\n```"
+    let res = extractCodeBlock(text)
+    check res.isSome
+    check res.get == "first"
+
+  test "extractCodeBlock handles multiline command":
+    let text = """```sh
+ls -la /etc && \
+  cat /etc/hostname
+```"""
+    let res = extractCodeBlock(text)
+    check res.isSome
+    check res.get.contains("ls -la")
+    check res.get.contains("cat")
+
+# ---------------------------------------------------------------------------
+# sysinfo tests
+# ---------------------------------------------------------------------------
+
+suite "sysinfo":
+  ## Tests that system information collection produces sensible data.
+
+  test "collectSysInfo returns non-empty os and arch":
+    let info = collectSysInfo(defaultShell())
+    check info.os.len > 0
+    check info.arch.len > 0
+    check info.cwd.len > 0
+
+  test "formatSysInfo produces non-empty output":
+    let info = collectSysInfo(defaultShell())
+    let formatted = formatSysInfo(info)
+    check formatted.len > 0
+    check formatted.contains("OS:")
+
+  test "formatSysInfo with minimal SysInfo":
+    let info = SysInfo(
+      os: "testOS",
+      arch: "testArch",
+      hostname: "",
+      username: "",
+      cwd: "/tmp",
+      shell: "sh",
+      shellVersion: "",
+      availableTools: @[]
+    )
+    let formatted = formatSysInfo(info)
+    check formatted.contains("testOS")
+    check formatted.contains("testArch")
+    check not formatted.contains("Hostname:")
+
+# ---------------------------------------------------------------------------
+# exec tests
+# ---------------------------------------------------------------------------
+
+suite "exec":
+  ## Tests for command-pattern validation and command execution.
+
+  test "validateCommandPattern matches":
+    check validateCommandPattern(
+      "ls -la /etc", "^ls") == true
+    check validateCommandPattern(
+      "cat /etc/hostname", "^ls") == false
+
+  test "validateCommandPattern with complex regex":
+    check validateCommandPattern(
+      "echo hello", "echo|cat") == true
+    check validateCommandPattern(
+      "rm -rf /", "echo|cat") == false
+
+  test "invalid regex raises GetError":
+    expect GetError:
+      discard validateCommandPattern("test", "[invalid")
+
+  test "executeCommand runs echo":
+    let shell = defaultShell()
+    when defined(windows):
+      let res = executeCommand(
+        "Write-Output 'hello'", shell)
+    else:
+      let res = executeCommand("echo hello", shell)
+    check res.exitCode == 0
+    check res.output.strip() == "hello"
+
+  test "executeCommand captures non-zero exit":
+    let shell = defaultShell()
+    when defined(windows):
+      let res = executeCommand(
+        "exit 42", shell)
+    else:
+      let res = executeCommand(
+        "exit 42", shell)
+    check res.exitCode == 42
+
 # ---------------------------------------------------------------------------
 # config — pure helpers via public API
 # ---------------------------------------------------------------------------
 
 suite "config defaults":
+  ## Verifies that defaultConfig returns correct compile-time
+  ## defaults.
+
   test "defaultConfig has expected values":
     let cfg = defaultConfig()
     check cfg.url == DEFAULT_URL
@@ -52,6 +185,10 @@ suite "config defaults":
     check cfg.systemPrompt.isNone
     check cfg.log == DEFAULT_LOG
     check cfg.hideProcess == DEFAULT_HIDE_PROCESS
+    check cfg.cache == DEFAULT_CACHE
+    check cfg.cacheExpiry == DEFAULT_CACHE_EXPIRY
+    check cfg.cacheMaxEntries ==
+      DEFAULT_CACHE_MAX_ENTRIES
 
   test "defaultConfig shell matches platform":
     let cfg = defaultConfig()
@@ -65,36 +202,47 @@ suite "config defaults":
 # ---------------------------------------------------------------------------
 
 suite "config persistence round-trip":
+  ## Verifies that saveConfig and loadConfig faithfully preserve
+  ## every field.
+
   test "save and load preserves values":
     let original = Config(
-      url: "https://example.com/v1",
-      model: "test-model",
-      manualConfirm: true,
-      doubleCheck: true,
-      instance: true,
-      timeout: 60,
-      maxToken: 1024,
-      commandPattern: some("^ls"),
-      systemPrompt: some("Be concise."),
-      shell: "zsh",
-      log: false,
-      hideProcess: true
+      url:             "https://example.com/v1",
+      model:           "test-model",
+      manualConfirm:   true,
+      doubleCheck:     true,
+      instance:        true,
+      timeout:         60,
+      maxToken:        1024,
+      commandPattern:  some("^ls"),
+      systemPrompt:    some("Be concise."),
+      shell:           "zsh",
+      log:             false,
+      hideProcess:     true,
+      cache:           false,
+      cacheExpiry:     7,
+      cacheMaxEntries: 500
     )
     saveConfig(original)
     let loaded = loadConfig()
     check loaded.url == original.url
     check loaded.model == original.model
-    check loaded.manualConfirm == original.manualConfirm
+    check loaded.manualConfirm ==
+      original.manualConfirm
     check loaded.doubleCheck == original.doubleCheck
     check loaded.instance == original.instance
     check loaded.timeout == original.timeout
     check loaded.maxToken == original.maxToken
-    check loaded.commandPattern == original.commandPattern
+    check loaded.commandPattern ==
+      original.commandPattern
     check loaded.systemPrompt == original.systemPrompt
     check loaded.shell == original.shell
     check loaded.log == original.log
     check loaded.hideProcess == original.hideProcess
-    # Restore defaults so other tests are not affected
+    check loaded.cache == original.cache
+    check loaded.cacheExpiry == original.cacheExpiry
+    check loaded.cacheMaxEntries ==
+      original.cacheMaxEntries
     saveConfig(defaultConfig())
 
   test "save and load with none options":
@@ -112,14 +260,27 @@ suite "config persistence round-trip":
 # ---------------------------------------------------------------------------
 
 suite "setConfigOption":
-  test "set and reset url":
+  ## Verifies the set-by-name API: string options accept empty
+  ## strings as unset; boolean/integer options reset to defaults on
+  ## empty input.
+
+  test "set and unset url":
     setConfigOption("url", "https://custom.api/v1")
     var cfg = loadConfig()
     check cfg.url == "https://custom.api/v1"
-    # Reset by providing empty value
     setConfigOption("url", "")
     cfg = loadConfig()
-    check cfg.url == DEFAULT_URL
+    check cfg.url == ""
+    saveConfig(defaultConfig())
+
+  test "set and unset model":
+    setConfigOption("model", "custom-model-x")
+    var cfg = loadConfig()
+    check cfg.model == "custom-model-x"
+    setConfigOption("model", "")
+    cfg = loadConfig()
+    check cfg.model == ""
+    saveConfig(defaultConfig())
 
   test "set boolean option":
     setConfigOption("manual-confirm", "true")
@@ -128,7 +289,6 @@ suite "setConfigOption":
     setConfigOption("manual-confirm", "false")
     cfg = loadConfig()
     check cfg.manualConfirm == false
-    # Reset
     setConfigOption("manual-confirm", "")
     cfg = loadConfig()
     check cfg.manualConfirm == DEFAULT_MANUAL_CONFIRM
@@ -156,3 +316,358 @@ suite "setConfigOption":
   test "unknown option raises GetError":
     expect GetError:
       setConfigOption("nonexistent", "value")
+
+  test "config reset restores all defaults":
+    setConfigOption("model", "")
+    setConfigOption("url", "")
+    setConfigOption("timeout", "60")
+    resetConfig()
+    let cfg = loadConfig()
+    check cfg.url == DEFAULT_URL
+    check cfg.model == DEFAULT_MODEL
+    check cfg.timeout == DEFAULT_TIMEOUT
+
+  test "set cache boolean":
+    setConfigOption("cache", "false")
+    var cfg = loadConfig()
+    check cfg.cache == false
+    setConfigOption("cache", "true")
+    cfg = loadConfig()
+    check cfg.cache == true
+    saveConfig(defaultConfig())
+
+  test "set cache-expiry":
+    setConfigOption("cache-expiry", "7")
+    var cfg = loadConfig()
+    check cfg.cacheExpiry == 7
+    setConfigOption("cache-expiry", "")
+    cfg = loadConfig()
+    check cfg.cacheExpiry == DEFAULT_CACHE_EXPIRY
+    saveConfig(defaultConfig())
+
+  test "set cache-max-entries":
+    setConfigOption("cache-max-entries", "500")
+    var cfg = loadConfig()
+    check cfg.cacheMaxEntries == 500
+    setConfigOption("cache-max-entries", "")
+    cfg = loadConfig()
+    check cfg.cacheMaxEntries ==
+      DEFAULT_CACHE_MAX_ENTRIES
+    saveConfig(defaultConfig())
+
+# ---------------------------------------------------------------------------
+# cache tests
+# ---------------------------------------------------------------------------
+
+suite "cache":
+  ## Tests for hash computation, cache persistence, lookup, eviction,
+  ## and management commands.
+
+  test "computeCacheHash is deterministic":
+    let h1 = computeCacheHash(
+      "test query", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    let h2 = computeCacheHash(
+      "test query", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    check h1 == h2
+    check h1.len == 32
+
+  test "computeCacheHash differs for different queries":
+    let h1 = computeCacheHash(
+      "query one", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    let h2 = computeCacheHash(
+      "query two", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    check h1 != h2
+
+  test "computeCacheHash differs for different cwd":
+    let h1 = computeCacheHash(
+      "test", "/home", "bash", "gpt",
+      false, none(string), none(string))
+    let h2 = computeCacheHash(
+      "test", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    check h1 != h2
+
+  test "computeCacheHash differs for instance flag":
+    let h1 = computeCacheHash(
+      "test", "/tmp", "bash", "gpt",
+      true, none(string), none(string))
+    let h2 = computeCacheHash(
+      "test", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    check h1 != h2
+
+  test "computeCacheHash normalises query case":
+    let h1 = computeCacheHash(
+      "Test Query", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    let h2 = computeCacheHash(
+      "test query", "/tmp", "bash", "gpt",
+      false, none(string), none(string))
+    check h1 == h2
+
+  test "save and load cache round-trip":
+    var store = CacheStore(entries: @[])
+    let entry = CacheEntry(
+      hash: "abc123",
+      query: "test query",
+      command: "echo hello",
+      output: "hello",
+      timestamp: getTime().toUnix()
+    )
+    addCacheEntry(store, entry, 1000, 30)
+    saveCache(store)
+    let loaded = loadCache()
+    check loaded.entries.len >= 1
+    var found = false
+    for e in loaded.entries:
+      if e.hash == "abc123":
+        check e.query == "test query"
+        check e.command == "echo hello"
+        check e.output == "hello"
+        found = true
+    check found
+    discard cleanCache()
+
+  test "lookupCache returns entry when fresh":
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "fresh1",
+        query: "q",
+        command: "cmd",
+        output: "out",
+        timestamp: getTime().toUnix()
+      )
+    ])
+    let hit = lookupCache(store, "fresh1", 30)
+    check hit.isSome
+    check hit.get.output == "out"
+
+  test "lookupCache returns none when expired":
+    let old = getTime().toUnix() - (31 * 86400)
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "old1",
+        query: "q",
+        command: "cmd",
+        output: "out",
+        timestamp: old
+      )
+    ])
+    let hit = lookupCache(store, "old1", 30)
+    check hit.isNone
+
+  test "lookupCache returns none for missing hash":
+    var store = CacheStore(entries: @[])
+    let hit = lookupCache(store, "missing", 30)
+    check hit.isNone
+
+  test "addCacheEntry replaces existing hash":
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "dup",
+        query: "old",
+        command: "old-cmd",
+        output: "old-out",
+        timestamp: getTime().toUnix() - 100
+      )
+    ])
+    let entry = CacheEntry(
+      hash: "dup",
+      query: "new",
+      command: "new-cmd",
+      output: "new-out",
+      timestamp: getTime().toUnix()
+    )
+    addCacheEntry(store, entry, 1000, 30)
+    check store.entries.len == 1
+    check store.entries[0].query == "new"
+
+  test "addCacheEntry enforces max entries":
+    var store = CacheStore(entries: @[])
+    for i in 0 ..< 5:
+      let e = CacheEntry(
+        hash: fmt"h{i}",
+        query: fmt"q{i}",
+        command: "",
+        output: "",
+        timestamp: getTime().toUnix() - (5 - i).int64
+      )
+      addCacheEntry(store, e, 3, 30)
+    check store.entries.len <= 3
+
+  test "unsetCacheEntries removes matching query":
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "a1",
+        query: "system version",
+        command: "uname -a",
+        output: "Linux",
+        timestamp: getTime().toUnix()
+      ),
+      CacheEntry(
+        hash: "b2",
+        query: "disk usage",
+        command: "df -h",
+        output: "50G",
+        timestamp: getTime().toUnix()
+      )
+    ])
+    let removed = unsetCacheEntries(
+      store, "system version")
+    check removed == 1
+    check store.entries.len == 1
+    check store.entries[0].query == "disk usage"
+
+  test "unsetCacheEntries case-insensitive":
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "ci",
+        query: "System Version",
+        command: "",
+        output: "",
+        timestamp: getTime().toUnix()
+      )
+    ])
+    let removed = unsetCacheEntries(
+      store, "system version")
+    check removed == 1
+    check store.entries.len == 0
+
+  test "cleanCache removes all entries":
+    var store = CacheStore(entries: @[
+      CacheEntry(
+        hash: "x",
+        query: "q",
+        command: "",
+        output: "",
+        timestamp: getTime().toUnix()
+      )
+    ])
+    saveCache(store)
+    let removed = cleanCache()
+    check removed == 1
+    let loaded = loadCache()
+    check loaded.entries.len == 0
+
+# ---------------------------------------------------------------------------
+# prompt tests
+# ---------------------------------------------------------------------------
+
+suite "prompt":
+  ## Tests that prompt builders produce well-formed message lists.
+
+  test "buildQueryMessages produces system+user":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "dev", username: "user",
+      cwd: "/home/user", shell: "bash",
+      shellVersion: "5.2",
+      availableTools: @["git", "curl"])
+    let msgs = buildQueryMessages(
+      info, "disk usage", "bash", true,
+      none(string), none(string))
+    check msgs.len == 2
+    check msgs[0].role == "system"
+    check msgs[1].role == "user"
+    check msgs[0].content.contains("read-only")
+    check msgs[1].content.contains("disk usage")
+
+  test "buildQueryMessages includes system info":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[])
+    let msgs = buildQueryMessages(
+      info, "test", "bash", false,
+      none(string), none(string))
+    check msgs[0].content.contains("linux")
+
+  test "buildQueryMessages includes custom prompt":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[])
+    let msgs = buildQueryMessages(
+      info, "test", "bash", false,
+      some("Custom rule here"), none(string))
+    check msgs[0].content.contains(
+      "Custom rule here")
+
+  test "buildQueryMessages includes pattern note":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[])
+    let msgs = buildQueryMessages(
+      info, "test", "bash", false,
+      none(string), some("^ls"))
+    check msgs[0].content.contains("^ls")
+
+  test "buildDoubleCheckMessages produces 2 messages":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[])
+    let msgs = buildDoubleCheckMessages(
+      "ls -la", "list files", info)
+    check msgs.len == 2
+    check msgs[0].content.contains("ls -la")
+    check msgs[0].content.contains("list files")
+
+  test "buildInterpretMessages produces 2 messages":
+    let msgs = buildInterpretMessages(
+      "disk usage", "df -h",
+      "/dev/sda1 50G 20G 30G 40%")
+    check msgs.len == 2
+    check msgs[0].content.contains("disk usage")
+    check msgs[0].content.contains("df -h")
+    check msgs[0].content.contains("50G")
+
+# ---------------------------------------------------------------------------
+# llm connectivity (optional)
+# ---------------------------------------------------------------------------
+
+suite "llm connectivity":
+  ## Sends a minimal probe request to verify end-to-end API
+  ## reachability.  Skipped when GET_TEST_KEY, GET_TEST_URL, or
+  ## GET_TEST_MODEL are absent.
+
+  test "sendLlmRequest returns a non-empty response":
+    let apiKey   = getEnv("GET_TEST_KEY", "")
+    let apiUrl   = getEnv("GET_TEST_URL", "")
+    let apiModel = getEnv("GET_TEST_MODEL", "")
+    if apiKey.len == 0 or apiUrl.len == 0 or
+        apiModel.len == 0:
+      skip()
+    let req = LlmRequest(
+      model: apiModel,
+      messages: @[
+        LlmMessage(
+          role: "system",
+          content: ISOK_SYSTEM_PROMPT),
+        LlmMessage(
+          role: "user",
+          content: ISOK_USER_PROMPT)
+      ],
+      maxTokens: ISOK_MAX_TOKENS
+    )
+    let resp = sendLlmRequest(
+      req,
+      apiUrl,
+      apiKey,
+      timeoutSec  = 30,
+      hideProcess = true
+    )
+    check resp.content.len > 0

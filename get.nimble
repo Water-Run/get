@@ -11,6 +11,7 @@ bin           = @["get"]
 # Dependencies
 
 requires "nim >= 2.2.8"
+requires "checksums >= 0.1.0"
 
 
 # Tasks
