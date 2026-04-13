@@ -33,3 +33,5 @@ desktop.ini
 .env
 .env.*
 !.env.example
+nimble.develop
+nimble.paths

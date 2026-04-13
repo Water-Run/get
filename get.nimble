@@ -11,3 +11,9 @@ bin           = @["get"]
 # Dependencies
 
 requires "nim >= 2.2.8"
+
+
+# Tasks
+
+task test, "Run all tests":
+  exec "nim c -r --path:src test.nim"
