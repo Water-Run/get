@@ -8,13 +8,15 @@
 ##
 ## This module assembles the system prompt and user prompt sent to
 ## the LLM for each command context: query generation, double-check
-## safety review, output interpretation, and isok connectivity
-## verification.  Every builder returns a seq[LlmMessage] that can
-## be passed directly to the LLM client.
+## safety review, output interpretation, cache-worthiness check,
+## and isok connectivity verification.  Every builder returns a
+## seq[LlmMessage] that can be passed directly to the LLM client.
 ##
-## The query prompt now includes descriptions of bundled tools
+## The query prompt includes descriptions of bundled tools
 ## (rg, fd, sg, pmc, treepp/tree) so the model can leverage them
-## when generating commands.
+## when generating commands.  All prompts strongly enforce the
+## read-only constraint and instruct the model to refuse generation
+## rather than produce potentially destructive commands.
 
 {.experimental: "strictFuncs".}
 
@@ -34,20 +36,25 @@ const ISOK_SYSTEM_PROMPT* =
 ## User prompt for the isok connectivity check.
 const ISOK_USER_PROMPT* = "ok"
 
-## Maximum tokens allocated for the isok response.  The expected
-## reply is a single word, so a small budget suffices.
+## Maximum tokens allocated for the isok response.
 const ISOK_MAX_TOKENS* = 32
+
+# ---------------------------------------------------------------------------
+# Constants — cache worthiness check
+# ---------------------------------------------------------------------------
+
+## Maximum tokens allocated for the cache-check response.
+const CACHE_CHECK_MAX_TOKENS* = 32
 
 # ---------------------------------------------------------------------------
 # Public API — query prompt
 # ---------------------------------------------------------------------------
 
 ## Builds the message list for the initial command-generation
-## request.  The system message contains constraints (read-only,
-## code-block formatting), system information, bundled tool
-## documentation, the configured shell, an optional custom system
-## prompt, and an optional command-pattern note.  The user message
-## contains the raw query.
+## request.  The system message contains strict read-only
+## constraints, system information, bundled tool documentation,
+## the configured shell, an optional custom system prompt, and
+## an optional command-pattern note.
 ##
 ## :param info: System information snapshot.
 ## :param query: The user's natural-language query.
@@ -85,11 +92,33 @@ func buildQueryMessages*(
     " retrieves the information the user " &
     "requested.")
   sysLines.add("")
-  sysLines.add("CONSTRAINTS:")
+  sysLines.add("STRICT READ-ONLY CONSTRAINTS " &
+    "(VIOLATION IS FORBIDDEN):")
   sysLines.add(
-    "- This tool performs read-only operations" &
-    " only. NEVER generate commands that modify," &
-    " delete, create, or write data.")
+    "- This tool performs READ-ONLY operations " &
+    "ONLY. You MUST NEVER generate commands that " &
+    "modify, delete, create, write, move, rename," &
+    " or alter ANY data, files, directories, " &
+    "system settings, or external state.")
+  sysLines.add(
+    "- If the user's query CANNOT be answered " &
+    "with a purely read-only command, respond " &
+    "with a plain text explanation instead of a " &
+    "code block. NEVER generate a destructive " &
+    "command even if the user asks for it.")
+  sysLines.add(
+    "- Commands like rm, del, mv, cp, mkdir, " &
+    "touch, chmod, chown, tee, write, " &
+    "Set-Content, New-Item, Remove-Item, " &
+    "Move-Item, redirect (>), append (>>), " &
+    "and similar are STRICTLY FORBIDDEN.")
+  sysLines.add(
+    "- For bundled tools: NEVER use flags that " &
+    "write files or modify state " &
+    "(e.g. pmc -o/-c, tree -o/--output, " &
+    "treepp /O, fd -x with write commands).")
+  sysLines.add("")
+  sysLines.add("FORMAT:")
   sysLines.add(
     "- Wrap your command in a ```sh fenced code" &
     " block.")
@@ -141,7 +170,8 @@ func buildQueryMessages*(
 
 ## Builds the message list for the double-check safety review.  The
 ## system message contains the command, the original query, and the
-## system information so that the reviewer model can assess safety.
+## system information so that the reviewer model can assess whether
+## the command is strictly read-only and safe.
 ##
 ## :param command: The generated command to review.
 ## :param query: The original user query.
@@ -165,10 +195,10 @@ func buildDoubleCheckMessages*(
 ): seq[LlmMessage] =
   var sysLines: seq[string] = @[]
   sysLines.add(
-    "You are a safety reviewer for shell commands." &
-    " Examine the command below and determine if" &
-    " it is read-only, safe, and correctly" &
-    " addresses the user's query.")
+    "You are a strict safety reviewer for shell " &
+    "commands. Your ONLY job is to determine " &
+    "whether the command below is PURELY " &
+    "READ-ONLY and safe to execute.")
   sysLines.add("")
   sysLines.add(fmt"User query: {query}")
   sysLines.add(fmt"Generated command: {command}")
@@ -182,14 +212,26 @@ func buildDoubleCheckMessages*(
     sysLines.add(bundledBlock)
   sysLines.add("")
   sysLines.add(
-    "If the command is UNSAFE or could modify" &
-    " system state, reply with exactly the word" &
-    " UNSAFE.")
+    "RULES:")
   sysLines.add(
-    "If the command is safe, reply with the" &
-    " approved command in a ```sh code block." &
-    " You may revise the command if it can be" &
-    " improved while remaining read-only.")
+    "- If the command could MODIFY, DELETE, " &
+    "CREATE, WRITE, MOVE, or ALTER any file, " &
+    "directory, system setting, or external " &
+    "state in ANY way, reply with exactly the " &
+    "word UNSAFE.")
+  sysLines.add(
+    "- Forbidden operations include but are not " &
+    "limited to: rm, del, mv, cp, mkdir, touch, " &
+    "chmod, chown, tee, redirect (>), append " &
+    "(>>), write flags on bundled tools " &
+    "(pmc -o/-c, tree -o, treepp /O, " &
+    "fd -x with write commands).")
+  sysLines.add(
+    "- If the command is safe and purely read-" &
+    "only, reply with the approved command in a " &
+    "```sh code block. You may revise the " &
+    "command to improve it while keeping it " &
+    "strictly read-only.")
   let sysContent = sysLines.join("\n")
   result = @[
     LlmMessage(role: "system", content: sysContent),
@@ -201,10 +243,7 @@ func buildDoubleCheckMessages*(
 # Public API — interpretation prompt
 # ---------------------------------------------------------------------------
 
-## Builds the message list for interpreting command output.  The
-## system message contains the original query, the command that was
-## executed, and the raw output so that the model can produce a
-## concise human-readable answer.
+## Builds the message list for interpreting command output.
 ##
 ## :param query: The original user query.
 ## :param command: The command that was executed.
@@ -240,4 +279,66 @@ func buildInterpretMessages*(
     LlmMessage(role: "user",
       content: "Answer my question based on the" &
         " command output above.")
+  ]
+
+# ---------------------------------------------------------------------------
+# Public API — cache-worthiness check prompt
+# ---------------------------------------------------------------------------
+
+## Builds the message list for the cache-worthiness check.  The
+## model evaluates whether the query result is stable enough to
+## cache for future reuse.
+##
+## :param query: The original user query.
+## :param command: The command that was executed (may be empty).
+## :param outputPreview: A truncated preview of the output.
+## :returns: A two-element seq (system, user) of LlmMessage.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     let msgs = buildCacheCheckMessages(
+##       "system version", "uname -a", "Linux 6.1")
+##     assert msgs.len == 2
+func buildCacheCheckMessages*(
+  query: string,
+  command: string,
+  outputPreview: string
+): seq[LlmMessage] =
+  var sysLines: seq[string] = @[]
+  sysLines.add(
+    "Determine if this query result should be " &
+    "cached for future reuse.")
+  sysLines.add("")
+  sysLines.add(
+    "A result SHOULD be cached (CACHE) if it is " &
+    "STABLE — the same query would produce the " &
+    "same or very similar output when run again " &
+    "in the same working directory. Examples: " &
+    "system version, installed software, project " &
+    "structure, file contents, code analysis, " &
+    "static configuration.")
+  sysLines.add("")
+  sysLines.add(
+    "A result should NOT be cached (NOCACHE) if " &
+    "it is VOLATILE — it changes frequently or " &
+    "depends on the current moment. Examples: " &
+    "current time, CPU/memory usage, running " &
+    "processes, network status, live metrics, " &
+    "disk space, recent log entries, git status " &
+    "with uncommitted changes.")
+  sysLines.add("")
+  sysLines.add(
+    "Reply with exactly CACHE or NOCACHE.")
+  let sysContent = sysLines.join("\n")
+  var userLines: seq[string] = @[]
+  userLines.add(fmt"Query: {query}")
+  if command.len > 0:
+    userLines.add(fmt"Command: {command}")
+  if outputPreview.len > 0:
+    userLines.add(
+      fmt"Output preview: {outputPreview}")
+  let userContent = userLines.join("\n")
+  result = @[
+    LlmMessage(role: "system", content: sysContent),
+    LlmMessage(role: "user", content: userContent)
   ]

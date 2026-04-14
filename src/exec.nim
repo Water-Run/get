@@ -18,6 +18,10 @@
 ## The regex engine is the pure-Nim ``regex`` package, eliminating
 ## the runtime dependency on libpcre and enabling fully static
 ## binaries.
+##
+## The manual-confirm prompt reads from the controlling terminal
+## directly (/dev/tty on Unix, CONIN$ on Windows) so that it works
+## regardless of stdin redirection or async event-loop state.
 
 {.experimental: "strictFuncs".}
 
@@ -120,8 +124,10 @@ proc validateCommandPattern*(
       fmt"invalid command-pattern regex: {pattern}")
 
 ## Displays the command on stderr and reads a single line from
-## stdin.  Returns true only when the user types "y" (case-
-## insensitive).
+## the controlling terminal.  Returns true only when the user
+## types "y" (case-insensitive).  The terminal is opened directly
+## via /dev/tty (Unix) or CONIN$ (Windows) so that the prompt
+## works correctly regardless of stdin state.
 ##
 ## :param command: The command awaiting confirmation.
 ## :returns: true if the user confirms with "y".
@@ -135,9 +141,16 @@ proc confirmExecution*(command: string): bool =
     fmt"execute: {command}" & "\nconfirm? (y/N): ")
   stderr.flushFile()
   try:
-    let response = readLine(stdin)
-    result = toLowerAscii(response.strip()) == "y"
-  except EOFError:
+    when defined(windows):
+      let tty = open("CONIN$", fmRead)
+    else:
+      let tty = open("/dev/tty", fmRead)
+    try:
+      let response = tty.readLine()
+      result = toLowerAscii(response.strip()) == "y"
+    finally:
+      tty.close()
+  except IOError, EOFError, OSError:
     result = false
 
 ## Executes a command string through the specified shell and returns

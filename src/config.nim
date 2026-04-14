@@ -14,9 +14,10 @@
 ## readiness checking.
 ##
 ## String options (url, model, shell) accept an empty string as an
-## explicit "unset" value.  Boolean and integer options reset to
-## their compile-time defaults when an empty string is supplied to
-## setConfigOption.
+## explicit "unset" value.  Boolean options reset to their compile-
+## time defaults when an empty string is supplied.  Integer options
+## accept "false" (or 0) to disable the feature, an empty string
+## to reset to the default, or a positive integer.
 
 {.experimental: "strictFuncs".}
 
@@ -41,7 +42,7 @@ const DEFAULT_MODEL* = "gpt-5.3-codex"
 const DEFAULT_MANUAL_CONFIRM* = false
 
 ## Default for double-check (second model review).
-const DEFAULT_DOUBLE_CHECK* = false
+const DEFAULT_DOUBLE_CHECK* = true
 
 ## Default for instance (fast-reply mode).
 const DEFAULT_INSTANCE* = false
@@ -76,6 +77,8 @@ const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
 ## Holds every runtime configuration option except the API key,
 ## which is stored and managed separately for security reasons.
+## Integer options that support the "false" (disabled) state use 0
+## to represent the disabled condition.
 type
   Config* = object
     url*: string                     ## LLM API endpoint URL.
@@ -83,17 +86,17 @@ type
     manualConfirm*: bool             ## Prompt before executing.
     doubleCheck*: bool               ## Second model review pass.
     instance*: bool                  ## Single-call mode.
-    timeout*: int                    ## Per-request timeout (s).
-    maxToken*: int                   ## Max tokens per request.
+    timeout*: int                    ## Per-request timeout (s). 0=disabled.
+    maxToken*: int                   ## Max tokens per request. 0=disabled.
     commandPattern*: Option[string]  ## Regex for validation.
     systemPrompt*: Option[string]    ## Custom system prompt.
     shell*: string                   ## Shell executable.
     log*: bool                       ## Log requests/executions.
     hideProcess*: bool               ## Hide intermediate output.
     cache*: bool                     ## Enable response cache.
-    cacheExpiry*: int                ## Cache expiry in days.
-    cacheMaxEntries*: int            ## Max cached entries.
-    logMaxEntries*: int              ## Max log entries retained.
+    cacheExpiry*: int                ## Cache expiry in days. 0=never.
+    cacheMaxEntries*: int            ## Max cached entries. 0=unlimited.
+    logMaxEntries*: int              ## Max log entries. 0=unlimited.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -228,31 +231,34 @@ func implParseBool(
       fmt"invalid value '{value}' for '{optName}':" &
       " expected 'true' or 'false'")
 
-## Parses a positive integer string.  When the input is empty the
-## provided default is returned.
+## Parses a positive integer string, or "false" (mapping to 0 =
+## disabled).  When the input is empty the provided default is
+## returned.
 ##
 ## :param value: Raw string from the CLI.
 ## :param optName: Option name, used in error messages.
 ## :param default: Fallback when value is empty.
-## :returns: The parsed positive integer.
-## :raises: GetError: If value is not a valid positive integer.
-func implParsePositiveInt(
+## :returns: The parsed integer, or 0 for "false".
+## :raises: GetError: If value is not valid.
+func implParseIntOrDisable(
   value: string,
   optName: string,
   default: int
 ): int =
   if value.len == 0:
     return default
+  if toLowerAscii(value) == "false":
+    return 0
   try:
     result = parseInt(value)
   except ValueError:
     raise newException(GetError,
       fmt"invalid value '{value}' for '{optName}':" &
-      " expected positive integer")
-  if result <= 0:
+      " expected positive integer or 'false'")
+  if result < 0:
     raise newException(GetError,
       fmt"invalid value '{value}' for '{optName}':" &
-      " expected positive integer")
+      " expected positive integer or 'false'")
 
 # ---------------------------------------------------------------------------
 # Private helpers — JSON serialisation
@@ -474,7 +480,8 @@ proc saveConfig*(cfg: Config) =
 # ---------------------------------------------------------------------------
 
 ## Prints every configuration option to stdout.  The API key is
-## masked with asterisks.
+## masked with asterisks.  Integer options that support disabling
+## show "false" when the value is zero.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -497,17 +504,21 @@ proc displayConfig*() =
   echo fmt"manual-confirm = {cfg.manualConfirm}"
   echo fmt"double-check = {cfg.doubleCheck}"
   echo fmt"instance = {cfg.instance}"
-  echo fmt"timeout = {cfg.timeout}"
-  echo fmt"max-token = {cfg.maxToken}"
+  echo "timeout = " & formatIntOrDisable(cfg.timeout)
+  echo "max-token = " &
+    formatIntOrDisable(cfg.maxToken)
   echo fmt"command-pattern = {cmdPat}"
   echo fmt"system-prompt = {sysPmt}"
   echo fmt"shell = {cfg.shell}"
   echo fmt"log = {cfg.log}"
   echo fmt"hide-process = {cfg.hideProcess}"
   echo fmt"cache = {cfg.cache}"
-  echo fmt"cache-expiry = {cfg.cacheExpiry}"
-  echo fmt"cache-max-entries = {cfg.cacheMaxEntries}"
-  echo fmt"log-max-entries = {cfg.logMaxEntries}"
+  echo "cache-expiry = " &
+    formatIntOrDisable(cfg.cacheExpiry)
+  echo "cache-max-entries = " &
+    formatIntOrDisable(cfg.cacheMaxEntries)
+  echo "log-max-entries = " &
+    formatIntOrDisable(cfg.logMaxEntries)
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -561,10 +572,10 @@ proc setConfigOption*(name: string, value: string) =
     cfg.instance = implParseBool(
       value, name, DEFAULT_INSTANCE)
   of "timeout":
-    cfg.timeout = implParsePositiveInt(
+    cfg.timeout = implParseIntOrDisable(
       value, name, DEFAULT_TIMEOUT)
   of "max-token":
-    cfg.maxToken = implParsePositiveInt(
+    cfg.maxToken = implParseIntOrDisable(
       value, name, DEFAULT_MAX_TOKEN)
   of "command-pattern":
     if value.len > 0:
@@ -587,13 +598,13 @@ proc setConfigOption*(name: string, value: string) =
     cfg.cache = implParseBool(
       value, name, DEFAULT_CACHE)
   of "cache-expiry":
-    cfg.cacheExpiry = implParsePositiveInt(
+    cfg.cacheExpiry = implParseIntOrDisable(
       value, name, DEFAULT_CACHE_EXPIRY)
   of "cache-max-entries":
-    cfg.cacheMaxEntries = implParsePositiveInt(
+    cfg.cacheMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_CACHE_MAX_ENTRIES)
   of "log-max-entries":
-    cfg.logMaxEntries = implParsePositiveInt(
+    cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)
   else:
     raise newException(GetError,

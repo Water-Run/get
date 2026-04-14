@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
@@ -12,10 +12,9 @@
 ## is found, the tool can return the cached result immediately
 ## without making any LLM API calls or executing commands.
 ##
-## Cache entries expire after a configurable number of days and the
-## store is capped at a configurable maximum number of entries.
-## Eviction removes expired entries first, then the oldest entries
-## until the cap is satisfied.
+## Cache entries expire after a configurable number of days (0 =
+## never expire) and the store is capped at a configurable maximum
+## number of entries (0 = unlimited).
 
 {.experimental: "strictFuncs".}
 
@@ -62,8 +61,7 @@ func implCmpTimestamp(a, b: CacheEntry): int =
 # ---------------------------------------------------------------------------
 
 ## Computes a deterministic MD5 hex hash from the query and all
-## context parameters that influence command generation.  The hash
-## is used as the cache lookup key.
+## context parameters that influence command generation.
 ##
 ## :param query: The user's natural-language query.
 ## :param cwd: Current working directory.
@@ -175,7 +173,6 @@ proc saveCache*(store: CacheStore) =
   try:
     writeFile(path, pretty(arr, 2) & "\n")
   except IOError:
-    # Cache write failure is non-fatal.
     discard
 
 # ---------------------------------------------------------------------------
@@ -183,12 +180,12 @@ proc saveCache*(store: CacheStore) =
 # ---------------------------------------------------------------------------
 
 ## Looks up a hash in the cache store.  Returns the matching entry
-## only if it has not expired according to the given expiry period.
+## only if it has not expired.  When expiryDays is 0 (disabled)
+## entries never expire.
 ##
 ## :param store: The loaded cache store.
 ## :param hash: The context hash to search for.
-## :param expiryDays: Maximum age in days; entries older than this
-##                    are treated as missing.
+## :param expiryDays: Maximum age in days (0 = never expire).
 ## :returns: The matching entry, or none if not found or expired.
 ##
 ## .. code-block:: nim
@@ -202,9 +199,12 @@ proc lookupCache*(
   expiryDays: int
 ): Option[CacheEntry] =
   let now = epochTime().int64
-  let maxAge = expiryDays.int64 * 86400'i64
   for e in store.entries:
     if e.hash == hash:
+      if expiryDays <= 0:
+        # Expiry disabled — entry never expires.
+        return some(e)
+      let maxAge = expiryDays.int64 * 86400'i64
       if (now - e.timestamp) <= maxAge:
         return some(e)
       else:
@@ -216,13 +216,13 @@ proc lookupCache*(
 # ---------------------------------------------------------------------------
 
 ## Adds or replaces a cache entry and enforces the maximum entry
-## cap.  Expired entries are purged first, then oldest entries are
-## removed until the count satisfies maxEntries.
+## cap.  When maxEntries is 0 (disabled) no cap is enforced.
+## When expiryDays is 0 (disabled) no entries are purged by age.
 ##
 ## :param store: The cache store to mutate (var).
 ## :param entry: The new cache entry to insert.
-## :param maxEntries: Maximum number of entries to retain.
-## :param expiryDays: Expiry period in days for eviction.
+## :param maxEntries: Maximum entries to retain (0 = unlimited).
+## :param expiryDays: Expiry period in days (0 = no purge).
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -241,20 +241,22 @@ proc addCacheEntry*(
       kept.add(e)
   kept.add(entry)
 
-  # Purge expired entries.
-  let now = epochTime().int64
-  let maxAge = expiryDays.int64 * 86400'i64
-  var fresh: seq[CacheEntry] = @[]
-  for e in kept:
-    if (now - e.timestamp) <= maxAge:
-      fresh.add(e)
+  # Purge expired entries (only when expiry is enabled).
+  if expiryDays > 0:
+    let now = epochTime().int64
+    let maxAge = expiryDays.int64 * 86400'i64
+    var fresh: seq[CacheEntry] = @[]
+    for e in kept:
+      if (now - e.timestamp) <= maxAge:
+        fresh.add(e)
+    kept = fresh
 
   # Enforce cap by removing oldest entries.
-  if fresh.len > maxEntries:
-    fresh.sort(implCmpTimestamp)
-    fresh = fresh[fresh.len - maxEntries .. ^1]
+  if maxEntries > 0 and kept.len > maxEntries:
+    kept.sort(implCmpTimestamp)
+    kept = kept[kept.len - maxEntries .. ^1]
 
-  store.entries = fresh
+  store.entries = kept
 
 ## Removes all cache entries whose query matches the given text
 ## (case-insensitive, trimmed comparison).
@@ -317,8 +319,8 @@ proc unsetCache*(query: string): int =
 ## Prints a summary of the cache state to stdout.
 ##
 ## :param cacheEnabled: Whether cache is enabled.
-## :param expiryDays: Configured expiry in days.
-## :param maxEntries: Configured max entry count.
+## :param expiryDays: Configured expiry in days (0 = never).
+## :param maxEntries: Configured max entry count (0 = unlimited).
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -335,8 +337,11 @@ proc displayCacheInfo*(
     if cacheEnabled: "enabled" else: "disabled"
   echo fmt"cache: {status}"
   echo fmt"entries: {store.entries.len}"
-  echo fmt"max entries: {maxEntries}"
-  echo fmt"expiry: {expiryDays} days"
+  echo "max entries: " &
+    formatIntOrDisable(maxEntries)
+  echo "expiry: " & (
+    if expiryDays <= 0: "never"
+    else: fmt"{expiryDays} days")
   echo fmt"file: {path}"
   if fileExists(path):
     let size = getFileSize(path)

@@ -11,8 +11,9 @@
 ## reporting.  The query flow supports instance (single-call) and
 ## non-instance (multi-step) modes, optional double-check safety
 ## review, manual-confirm gating, command-pattern validation,
-## response caching, structured logging, progress display, and
-## bundled tool integration.
+## response caching with LLM-driven cache-worthiness checks,
+## structured logging, model-strength warnings, progress display,
+## and bundled tool integration.
 
 {.experimental: "strictFuncs".}
 
@@ -30,6 +31,10 @@ import utils
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+## Maximum characters of output included in the cache-worthiness
+## check prompt to keep the token cost low.
+const CACHE_CHECK_PREVIEW_LEN = 200
 
 ## Comprehensive help text displayed by `get help`.
 const HELP_TEXT* = """get -- get anything from your computer
@@ -53,14 +58,14 @@ set options:
                        default: gpt-5.3-codex)
   manual-confirm     prompt before executing
                        (true/false, default: false)
-  double-check       second model review
-                       (true/false, default: false)
+  double-check       second model safety review
+                       (true/false, default: true)
   instance           faster model replies
                        (true/false, default: false)
   timeout            request timeout in seconds
-                       (integer, default: 300)
+                       (integer or false, default: 300)
   max-token          max tokens per request
-                       (integer, default: 20480)
+                       (integer or false, default: 20480)
   command-pattern    regex for command validation
                        (string, default: empty)
   system-prompt      custom system prompt
@@ -74,17 +79,18 @@ set options:
   cache              enable response caching
                        (true/false, default: true)
   cache-expiry       cache lifetime in days
-                       (integer, default: 30)
+                       (integer or false, default: 30)
   cache-max-entries  max cached entries
-                       (integer, default: 1000)
+                       (integer or false, default: 1000)
   log-max-entries    max log entries retained
-                       (integer, default: 1000)
+                       (integer or false, default: 1000)
+
+  Integer options accept 'false' to disable the limit.
 
 config flags:
   (none)             display all current settings
   --reset            reset all settings to defaults
-  --<option>         display one setting
-                       (any set option name)
+  --<option>         display one setting (any set option name)
 
 cache flags:
   (none)             display cache status
@@ -105,9 +111,10 @@ get flags:
 examples:
   get "system version"
   get "disk usage" --no-cache
-  get set model gpt-4o
+  get set model gpt-5.3-codex
   get set key sk-your-api-key
   get set url https://api.openai.com/v1
+  get set timeout false
   get config --model
   get cache --clean
   get log --clean"""
@@ -173,9 +180,9 @@ proc implHandleConfig(args: seq[string]) =
     of "instance":
       echo cfg.instance
     of "timeout":
-      echo cfg.timeout
+      echo formatIntOrDisable(cfg.timeout)
     of "max-token":
-      echo cfg.maxToken
+      echo formatIntOrDisable(cfg.maxToken)
     of "command-pattern":
       echo(
         if cfg.commandPattern.isSome:
@@ -193,11 +200,11 @@ proc implHandleConfig(args: seq[string]) =
     of "cache":
       echo cfg.cache
     of "cache-expiry":
-      echo cfg.cacheExpiry
+      echo formatIntOrDisable(cfg.cacheExpiry)
     of "cache-max-entries":
-      echo cfg.cacheMaxEntries
+      echo formatIntOrDisable(cfg.cacheMaxEntries)
     of "log-max-entries":
-      echo cfg.logMaxEntries
+      echo formatIntOrDisable(cfg.logMaxEntries)
     else:
       implUsageError(
         fmt"unknown config option '{optName}'")
@@ -380,6 +387,61 @@ proc implDoubleCheck(
   else:
     result = command
 
+## Asks the LLM whether a query result is worth caching.  Returns
+## true when the model answers "CACHE" or when the check fails
+## (fail-open so transient errors do not break caching).
+##
+## :param query: The original user query.
+## :param command: The generated command.
+## :param output: The full command output.
+## :param cfg: The loaded configuration.
+## :param key: The API key.
+## :returns: true when the result should be cached.
+proc implCheckShouldCache(
+  query: string,
+  command: string,
+  output: string,
+  cfg: Config,
+  key: string
+): bool =
+  try:
+    let preview =
+      if output.len > CACHE_CHECK_PREVIEW_LEN:
+        output[0 ..< CACHE_CHECK_PREVIEW_LEN] & "..."
+      else:
+        output
+    let msgs = buildCacheCheckMessages(
+      query, command, preview)
+    let req = LlmRequest(
+      model: cfg.model,
+      messages: msgs,
+      maxTokens: CACHE_CHECK_MAX_TOKENS
+    )
+    let resp = sendLlmRequest(
+      req,
+      cfg.url,
+      key,
+      timeoutSec = (
+        if cfg.timeout > 0: min(cfg.timeout, 30)
+        else: 30),
+      hideProcess = true
+    )
+    let answer = toUpperAscii(
+      resp.content.strip())
+    result = answer != "NOCACHE"
+  except CatchableError:
+    # Fail-open: cache on error.
+    result = true
+
+## Emits a model-strength warning on stderr when the configured
+## model is not recognised as a known high-performance model.
+##
+## :param model: The configured model name.
+proc implWarnIfWeakModel(model: string) =
+  if model.len > 0 and
+      not isKnownStrongModel(model):
+    stderr.writeLine(MODEL_STRENGTH_WARNING)
+
 ## Handles a natural-language query.
 ##
 ## :param query: The user's natural-language query.
@@ -399,6 +461,9 @@ proc implHandleQuery(query: string, noCache: bool) =
     raise newException(GetError,
       "model is not configured." &
       " Run: get set model <model>")
+
+  # Model-strength advisory.
+  implWarnIfWeakModel(cfg.model)
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
@@ -435,6 +500,7 @@ proc implHandleQuery(query: string, noCache: bool) =
   # 3. Extract command from the response.
   let maybeCmd = extractCodeBlock(genResp.content)
   if maybeCmd.isNone:
+    # Direct text answer (no command generated).
     echo genResp.content
     if useCache:
       var store = loadCache()
@@ -457,7 +523,7 @@ proc implHandleQuery(query: string, noCache: bool) =
   if not cfg.hideProcess:
     stderr.writeLine(fmt"command: {command}")
 
-  # 4. Double-check (optional).
+  # 4. Double-check (optional, default: enabled).
   if cfg.doubleCheck:
     command = implDoubleCheck(
       command, query, info, cfg, key.get)
@@ -511,19 +577,26 @@ proc implHandleQuery(query: string, noCache: bool) =
       finalOutput = interpretResp.content
       echo finalOutput
 
-  # 9. Cache the result.
+  # 9. Cache the result (with LLM cache-worthiness check).
   if useCache and finalOutput.len > 0:
-    var store = loadCache()
-    let entry = CacheEntry(
-      hash: cacheHash,
-      query: query,
-      command: command,
-      output: finalOutput,
-      timestamp: getTime().toUnix()
-    )
-    addCacheEntry(store, entry,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
+    let shouldCache = implCheckShouldCache(
+      query, command, finalOutput, cfg, key.get)
+    if shouldCache:
+      var store = loadCache()
+      let entry = CacheEntry(
+        hash: cacheHash,
+        query: query,
+        command: command,
+        output: finalOutput,
+        timestamp: getTime().toUnix()
+      )
+      addCacheEntry(store, entry,
+        cfg.cacheMaxEntries, cfg.cacheExpiry)
+      saveCache(store)
+    else:
+      if not cfg.hideProcess:
+        stderr.writeLine(
+          "(result not cached — volatile)")
 
   # 10. Log.
   if cfg.log:
@@ -541,7 +614,6 @@ proc implHandleQuery(query: string, noCache: bool) =
 
 ## Top-level CLI dispatcher.
 proc implMain() =
-  # Environment check — warn but do not block.
   let envWarning = checkEnvironment()
   if envWarning.len > 0:
     stderr.writeLine(envWarning)

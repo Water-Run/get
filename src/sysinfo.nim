@@ -73,40 +73,57 @@ const PROBE_TOOLS* = [
   "nim", "nimble"
 ]
 
-## Bundled tool definitions for Linux.
+## Bundled tool definitions for Linux.  Descriptions include
+## key flags and explicit read-only safety notes.
 const BUNDLED_DEFS_LINUX = [
   ("rg",
    "ripgrep — ultra-fast regex search in files. " &
    "Usage: rg <pattern> [path]. " &
-   "Key flags: -i (case-insensitive), -l (files only" &
-   "), -c (count), -n (line numbers), " &
+   "Key flags: -i (case-insensitive), -l (files " &
+   "only), -c (count), -n (line numbers), " &
    "--type <t> (filter by file type), " &
-   "--json (JSON output)."),
+   "--json (JSON output). Read-only tool."),
   ("fd",
    "fd — fast file/directory finder. " &
    "Usage: fd <pattern> [path]. " &
    "Key flags: -e <ext>, -t f (files), " &
-   "-t d (dirs), --hidden, -x <cmd> (exec)."),
+   "-t d (dirs), --hidden. " &
+   "NEVER use -x/--exec with write commands. " &
+   "Read-only tool."),
   ("sg",
    "ast-grep (sg) — AST-level structural code " &
    "search and lint. " &
    "Usage: sg -p '<ast-pattern>' [path]. " &
-   "Supports many languages. Use sg run --pattern " &
-   "'<pat>' for quick searches."),
+   "Supports many languages. Use sg run " &
+   "--pattern '<pat>' for quick searches. " &
+   "Read-only tool."),
   ("pmc",
    "pack-my-code — package source files into a " &
    "single text block (ideal for LLM context). " &
-   "Usage: pmc <directory>. " &
-   "Key flags: -t (prepend tree), -s (append stats" &
-   "), -m '<glob>' (include only), " &
-   "-x '<glob>' (exclude), -r (ignore .gitignore)" &
-   "."),
+   "Usage: pmc [<directory>] (defaults to '.'). " &
+   "Key flags: -t (prepend directory tree), " &
+   "-s (append statistics), " &
+   "-m '<glob>' (include only matching), " &
+   "-x '<glob>' (exclude matching), " &
+   "-r (ignore .gitignore, direct scan), " &
+   "-w <mode> (wrap: md/nil/block), " &
+   "-p <mode> (path: relative/name/absolute). " &
+   "NEVER use -o or -c flags (they write files/" &
+   "clipboard). Read-only tool."),
   ("tree",
-   "tree++ (bundled as tree) — enhanced directory " &
-   "tree listing. Usage: tree [path]. " &
-   "Key flags: -f (show files), " &
-   "-L <n> (depth limit), -I <pat> (exclude), " &
-   "-s (file sizes), -g (honour .gitignore).")
+   "tree++ (bundled as 'tree') — enhanced " &
+   "directory tree listing. " &
+   "Usage: tree [path]. " &
+   "Key flags: -f/--files (show files), " &
+   "-L/--level <n> (depth limit), " &
+   "-I/--exclude <pat> (exclude pattern), " &
+   "-s/--size (file sizes in bytes), " &
+   "-H/--human-readable (human sizes), " &
+   "-g/--gitignore (respect .gitignore), " &
+   "-N/--no-win-banner (skip header), " &
+   "-e/--report (summary statistics). " &
+   "NEVER use -o/--output (writes files). " &
+   "Read-only tool.")
 ]
 
 ## Bundled tool definitions for Windows.
@@ -115,27 +132,34 @@ const BUNDLED_DEFS_WINDOWS = [
    "ripgrep — ultra-fast regex search in files. " &
    "Usage: rg <pattern> [path]. " &
    "Key flags: -i, -l, -c, -n, --type <t>, " &
-   "--json."),
+   "--json. Read-only tool."),
   ("fd",
    "fd — fast file/directory finder. " &
    "Usage: fd <pattern> [path]. " &
-   "Key flags: -e <ext>, -t f, -t d, " &
-   "--hidden, -x <cmd>."),
+   "Key flags: -e <ext>, -t f, -t d, --hidden. " &
+   "NEVER use -x/--exec with write commands. " &
+   "Read-only tool."),
   ("sg",
    "ast-grep (sg) — AST-level structural code " &
    "search and lint. " &
-   "Usage: sg -p '<ast-pattern>' [path]."),
+   "Usage: sg -p '<ast-pattern>' [path]. " &
+   "Read-only tool."),
   ("pmc",
    "pack-my-code — package source files into a " &
-   "single text block. Usage: pmc <directory>. " &
-   "Key flags: -t, -s, -m '<glob>', -x '<glob>'" &
-   ", -r."),
+   "single text block for LLM context. " &
+   "Usage: pmc [<directory>]. " &
+   "Key flags: -t, -s, -m '<glob>', " &
+   "-x '<glob>', -r, -w <mode>, -p <mode>. " &
+   "NEVER use -o or -c flags. Read-only tool."),
   ("treepp",
    "tree++ — enhanced directory tree for Windows. " &
    "Usage: treepp [path] /F. " &
-   "Key flags: /F (files), /NB (no banner), " &
-   "/L <n> (depth), /X <pat> (exclude), " &
-   "/S (sizes), /G (.gitignore), /B (batch).")
+   "Key flags: /F (show files), /NB (no banner), " &
+   "/L <n> (depth limit), /X <pat> (exclude), " &
+   "/S (file sizes), /HR (human-readable sizes), " &
+   "/G (respect .gitignore), " &
+   "/RP (summary report), /B (batch mode). " &
+   "NEVER use /O (writes files). Read-only tool.")
 ]
 
 # ---------------------------------------------------------------------------
@@ -225,7 +249,6 @@ proc collectSysInfo*(shell: string): SysInfo =
     bundledTools: @[],
     binDir: binDir
   )
-  # Hostname
   try:
     result.hostname = getEnv("HOSTNAME",
       getEnv("COMPUTERNAME", ""))
@@ -235,18 +258,14 @@ proc collectSysInfo*(shell: string): SysInfo =
         result.hostname = h.strip()
   except OSError, IOError:
     discard
-  # Username
   when defined(windows):
     result.username = getEnv("USERNAME", "")
   else:
     result.username = getEnv("USER", "")
-  # Shell version
   result.shellVersion = implGetShellVersion(shell)
-  # Available system tools
   for tool in PROBE_TOOLS:
     if implToolAvailable(tool):
       result.availableTools.add(tool)
-  # Bundled tools
   result.bundledTools = implDetectBundledTools(binDir)
 
 ## Formats a SysInfo snapshot into a multi-line string suitable for
@@ -330,8 +349,9 @@ proc checkEnvironment*(): string =
             try:
               let major = parseInt(parts[0].strip())
               if major < 10:
-                return "warning: Windows 10+ required" &
-                  fmt" (detected major version {major})"
+                return "warning: Windows 10+ " &
+                  "required (detected major " &
+                  fmt"version {major})"
             except ValueError:
               discard
     except OSError, IOError:

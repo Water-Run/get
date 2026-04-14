@@ -13,7 +13,8 @@
 ## that they never prevent normal tool operation.
 ##
 ## It also provides log management commands: status display,
-## cleaning, and entry-count enforcement.
+## cleaning, and entry-count enforcement.  When maxEntries is 0
+## (disabled) no trimming is performed.
 
 {.experimental: "strictFuncs".}
 
@@ -26,19 +27,16 @@ import utils
 # ---------------------------------------------------------------------------
 
 ## Maximum number of output characters stored in a single log entry.
-## Longer output is truncated with a trailing ellipsis.
 const MAX_LOG_OUTPUT_LEN* = 4096
 
-## Separator that marks the boundary between log entries.  Each
-## entry ends with an empty line, so we split on double-newline.
+## Separator that marks the boundary between log entries.
 const LOG_ENTRY_SEPARATOR = "\n\n"
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
-## Counts the number of log entries in the file by looking for
-## lines that start with a timestamp-prefixed "query:" field.
+## Counts the number of log entries in the file.
 ##
 ## :param content: The full log file content.
 ## :returns: The number of entries detected.
@@ -49,8 +47,6 @@ func implCountEntries(content: string): int =
       result += 1
 
 ## Trims the log content so that at most maxEntries remain.
-## Entries are groups of lines separated by blank lines.
-## The most recent entries (at the end of the file) are kept.
 ##
 ## :param content: The full log file content.
 ## :param maxEntries: Maximum entries to retain.
@@ -60,9 +56,8 @@ func implTrimEntries(
   maxEntries: int
 ): string =
   if maxEntries <= 0:
-    return ""
+    return content
   let blocks = content.split(LOG_ENTRY_SEPARATOR)
-  # Filter out empty blocks.
   var entries: seq[string] = @[]
   for b in blocks:
     if b.strip().len > 0:
@@ -77,9 +72,9 @@ func implTrimEntries(
 # ---------------------------------------------------------------------------
 
 ## Appends a log entry for a single query execution.  Silently
-## ignores all I/O errors so that logging never interrupts the user.
-## After appending, enforces the maximum entry count by trimming
-## the oldest entries when exceeded.
+## ignores all I/O errors.  When maxEntries is positive, enforces
+## the cap by trimming oldest entries.  When maxEntries is 0
+## (disabled) no trimming is performed.
 ##
 ## :param query: The original user query text.
 ## :param command: The shell command that was executed.
@@ -116,7 +111,6 @@ proc logExecution*(
       f.writeLine(fmt"[{ts}] output: {preview}")
     f.writeLine("")
     f.close()
-    # Enforce max entries.
     if maxEntries > 0:
       let content = readFile(path)
       let count = implCountEntries(content)
@@ -125,7 +119,6 @@ proc logExecution*(
           content, maxEntries)
         writeFile(path, trimmed)
   except CatchableError:
-    # Logging must never crash the tool.
     discard
 
 ## Removes all content from the log file.
@@ -150,7 +143,7 @@ proc cleanLog*(): int =
 ## Prints a summary of the log state to stdout.
 ##
 ## :param logEnabled: Whether logging is enabled.
-## :param maxEntries: Configured max log entries.
+## :param maxEntries: Configured max log entries (0 = unlimited).
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -164,7 +157,8 @@ proc displayLogInfo*(
   let status =
     if logEnabled: "enabled" else: "disabled"
   echo fmt"log: {status}"
-  echo fmt"max entries: {maxEntries}"
+  echo "max entries: " &
+    formatIntOrDisable(maxEntries)
   echo fmt"file: {path}"
   if fileExists(path):
     let content = readFile(path)

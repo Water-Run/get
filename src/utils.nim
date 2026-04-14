@@ -10,8 +10,9 @@
 ## This module provides application-wide constants such as version,
 ## license, and GitHub URL, path resolution for configuration
 ## directories and files, shared domain types (GetError, LlmMessage),
-## bundled-tool binary directory resolution, and general-purpose
-## string utilities consumed by every other module.
+## bundled-tool binary directory resolution, model strength
+## verification, and general-purpose string utilities consumed by
+## every other module.
 
 {.experimental: "strictFuncs".}
 
@@ -58,6 +59,18 @@ const BIN_DIR_NAME* = "bin"
 ## Development-time path to the bundled binary directory, relative
 ## to the executable (project root during nimble run).
 const DEV_BIN_DIR* = "src" / "bin"
+
+## Warning text emitted when the configured model is not recognised
+## as a known high-performance model.
+const MODEL_STRENGTH_WARNING* =
+  "warning: model is not recognized as a known " &
+  "high-performance model.\n" &
+  "For operations that execute commands on your " &
+  "device, a sufficiently capable model is the " &
+  "foundation of safety.\n" &
+  "Consider using a known strong model (e.g. " &
+  "GPT-5+, Claude 3.7+, Gemini 3+, DeepSeek, " &
+  "Grok 4+, GLM 4.7+)."
 
 # ---------------------------------------------------------------------------
 # Types
@@ -233,3 +246,150 @@ func extractCodeBlock*(text: string): Option[string] =
     if content.len > 0:
       return some(content)
   return none(string)
+
+## Formats an integer option value for display.  Returns "false"
+## when the value is zero or negative (disabled), otherwise
+## returns the integer as a string.
+##
+## :param value: The integer option value.
+## :returns: "false" or the decimal string representation.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     assert formatIntOrDisable(0) == "false"
+##     assert formatIntOrDisable(300) == "300"
+func formatIntOrDisable*(value: int): string =
+  if value <= 0: "false" else: $value
+
+# ---------------------------------------------------------------------------
+# Private helpers — model version extraction
+# ---------------------------------------------------------------------------
+
+## Extracts the first version-like number that appears after the
+## family prefix in a lowercased model name.  Skips common
+## separators and an optional ``v`` prefix before the digits.
+##
+## :param model: Lowercased model name.
+## :param family: Lowercased family prefix to search for.
+## :returns: The extracted version as a float, or 0.0.
+func implExtractVersion(
+  model: string,
+  family: string
+): float =
+  let idx = model.find(family)
+  if idx < 0:
+    return 0.0
+  var pos = idx + family.len
+  # Skip separators and optional 'v' prefix.
+  while pos < model.len and
+      model[pos] in {'-', '_', ' ', '.', 'v'}:
+    pos += 1
+  var numStr = ""
+  var seenDot = false
+  while pos < model.len:
+    if model[pos] in {'0' .. '9'}:
+      numStr.add(model[pos])
+    elif model[pos] == '.' and not seenDot:
+      numStr.add('.')
+      seenDot = true
+    else:
+      break
+    pos += 1
+  if numStr.len > 0:
+    try:
+      return parseFloat(numStr)
+    except ValueError:
+      return 0.0
+  return 0.0
+
+# ---------------------------------------------------------------------------
+# Public API — model strength check
+# ---------------------------------------------------------------------------
+
+## Checks whether the configured model name corresponds to a known
+## high-performance model suitable for command generation.
+##
+## Recognised strong families and their minimum versions:
+## GPT >= 5 (including CodeX), Claude >= 3.7, Gemini >= 3,
+## Grok >= 4, MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full).
+## Models containing weak-variant keywords (mini, nano, lite,
+## haiku, flash, etc.) or belonging to unsupported families
+## (Doubao, Qwen) are always treated as weak.
+##
+## :param model: The model identifier string.
+## :returns: true when the model is recognised as strong.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     assert isKnownStrongModel("gpt-5.3-codex")
+##     assert not isKnownStrongModel("gpt-4o-mini")
+func isKnownStrongModel*(model: string): bool =
+  let m = toLowerAscii(model)
+  if m.len == 0:
+    return false
+
+  # Blocked families — never considered strong.
+  for blocked in ["doubao", "qwen", "ernie",
+      "wenxin", "hunyuan", "spark", "baichuan",
+      "yi-"]:
+    if m.contains(blocked):
+      return false
+
+  # Keywords indicating a reduced-capability variant.
+  const weakKeywords = [
+    "mini", "nano", "lite", "small", "fast",
+    "flash", "haiku", "light", "tiny", "micro",
+    "instant"]
+
+  # GPT / Codex family.
+  if m.contains("gpt") or m.contains("codex"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    let vGpt = implExtractVersion(m, "gpt")
+    let vCodex = implExtractVersion(m, "codex")
+    let v = max(vGpt, vCodex)
+    return v >= 5.0
+
+  # Claude family.
+  if m.contains("claude"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    return implExtractVersion(m, "claude") >= 3.7
+
+  # Gemini family.
+  if m.contains("gemini"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    return implExtractVersion(m, "gemini") >= 3.0
+
+  # Grok family.
+  if m.contains("grok"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    return implExtractVersion(m, "grok") >= 4.0
+
+  # MiniMax family (note: "minimax" itself contains "mini" so
+  # we must check the family BEFORE the generic weak scan).
+  if m.contains("minimax"):
+    # "mini" inside "minimax" is the brand, not a weakness.
+    for w in weakKeywords:
+      if w == "mini":
+        continue
+      if m.contains(w): return false
+    return implExtractVersion(m, "minimax") >= 2.7
+
+  # GLM / ChatGLM family.
+  if m.contains("glm"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    let v1 = implExtractVersion(m, "glm")
+    return v1 >= 4.7
+
+  # DeepSeek family — full variants are strong.
+  if m.contains("deepseek"):
+    for w in weakKeywords:
+      if m.contains(w): return false
+    return true
+
+  # Unknown family — not recognised.
+  return false

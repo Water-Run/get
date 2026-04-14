@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
@@ -12,13 +12,14 @@
 ## flight.  It uses asynchronous I/O so that a one-second timer can
 ## fire between event-loop polls without blocking the transfer.
 ##
-## The LlmRequest type accepts a generic seq[LlmMessage] so that
-## callers (prompt builders, isok, double-check) can construct
-## arbitrary conversation histories.
+## When timeout is set to 0 (disabled) the request may run
+## indefinitely.  When maxTokens is set to 0, the ``max_tokens``
+## field is omitted from the JSON body, letting the API decide.
 
 {.experimental: "strictFuncs".}
 
-import std/[asyncdispatch, httpclient, json, strformat, strutils]
+import std/[asyncdispatch, httpclient, json,
+            strformat, strutils]
 
 import utils
 
@@ -45,7 +46,7 @@ type
   LlmRequest* = object
     model*: string              ## Model identifier.
     messages*: seq[LlmMessage]  ## Conversation messages.
-    maxTokens*: int             ## Maximum tokens for the response.
+    maxTokens*: int             ## Max tokens (0 = omit).
 
 ## Encapsulates the parsed response returned by the API.
 type
@@ -58,7 +59,8 @@ type
 # ---------------------------------------------------------------------------
 
 ## Builds the JSON request body for an OpenAI-compatible
-## chat-completions endpoint from the message list.
+## chat-completions endpoint.  When maxTokens is 0 the field
+## is omitted from the payload.
 ##
 ## :param req: The LLM request parameters.
 ## :returns: A JsonNode representing the full request body.
@@ -68,12 +70,12 @@ proc implBuildRequestBody(req: LlmRequest): JsonNode =
     msgs.add(%*{"role": m.role, "content": m.content})
   result = %*{
     "model": req.model,
-    "max_tokens": req.maxTokens,
     "messages": msgs
   }
+  if req.maxTokens > 0:
+    result["max_tokens"] = %req.maxTokens
 
-## Strips any trailing slash from a URL so that appending a path
-## segment does not produce a double slash.
+## Strips any trailing slash from a URL.
 ##
 ## :param url: The raw URL string.
 ## :returns: The URL without a trailing slash.
@@ -113,13 +115,11 @@ proc implPostRequest(
 # ---------------------------------------------------------------------------
 
 ## Waits for the given future while printing elapsed-time progress
-## to stderr.  During the first nine seconds a dot is appended each
-## second.  From ten seconds onward a "waited N/Ts" line is printed
-## every ten seconds.  Raises when the elapsed time reaches the
-## timeout limit.
+## to stderr.  When timeoutSec is 0 (disabled), the request may
+## run indefinitely.
 ##
 ## :param fut: The future representing the in-flight request.
-## :param timeoutSec: Maximum wait in seconds.
+## :param timeoutSec: Maximum wait in seconds (0 = no limit).
 ## :param hideProcess: Suppress all progress output when true.
 ## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
@@ -143,14 +143,22 @@ proc implAwaitWithProgress(
         stderr.flushFile()
       elif elapsed == 10:
         stderr.writeLine("")
-        stderr.writeLine(
-          fmt"- waited {elapsed}/{timeoutSec}s")
+        if timeoutSec > 0:
+          stderr.writeLine(
+            fmt"- waited {elapsed}/{timeoutSec}s")
+        else:
+          stderr.writeLine(
+            fmt"- waited {elapsed}s (no timeout)")
         lineOpen = false
       elif elapsed mod 10 == 0:
-        stderr.writeLine(
-          fmt"- waited {elapsed}/{timeoutSec}s")
+        if timeoutSec > 0:
+          stderr.writeLine(
+            fmt"- waited {elapsed}/{timeoutSec}s")
+        else:
+          stderr.writeLine(
+            fmt"- waited {elapsed}s (no timeout)")
         lineOpen = false
-    if elapsed >= timeoutSec:
+    if timeoutSec > 0 and elapsed >= timeoutSec:
       if lineOpen:
         stderr.writeLine("")
       raise newException(LlmApiError,
@@ -200,14 +208,12 @@ proc implParseResponse(body: string): LlmResponse =
 # ---------------------------------------------------------------------------
 
 ## Sends an LlmRequest to the configured OpenAI-compatible endpoint
-## and returns the parsed LlmResponse.  While the HTTP round-trip
-## is in progress, elapsed-time information is written to stderr
-## unless hideProcess is true.
+## and returns the parsed LlmResponse.
 ##
 ## :param req: The request payload (model, messages, maxTokens).
 ## :param url: The API base URL.
 ## :param apiKey: The Bearer token.  Must not be empty.
-## :param timeoutSec: Maximum seconds to wait before aborting.
+## :param timeoutSec: Maximum seconds to wait (0 = no limit).
 ## :param hideProcess: Suppress progress output when true.
 ## :returns: A populated LlmResponse on success.
 ## :raises: LlmApiError: On timeout, HTTP error, or malformed
