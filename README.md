@@ -13,8 +13,7 @@ get "the latest get version at https://github.com/Water-Run/get"
 
 Download: [GitHub Release](https://github.com/Water-Run/get/releases)
 
-After downloading, you can use `get version` to verify the installation.  
-You can also use `get help` to get help.
+After downloading, place the `get` executable alongside the bundled `bin/` directory (which contains `rg`, `fd`, `sg`, `pmc`, and `treepp`/`tree`). You can then use `get version` to verify the installation and `get help` to get help.
 
 ## Prerequisites
 
@@ -34,6 +33,18 @@ To unset a configuration item, simply leave the value empty (i.e., omit the "you
 get set key
 ```
 
+### System Requirements
+
+`get` requires a 64-bit platform running Windows 10+ or Linux with kernel 6.0+. A startup warning is shown if the runtime environment does not meet these requirements.
+
+### Static Builds
+
+To produce a fully statically linked binary (no dynamic library dependencies), build with the `staticBuild` flag. This requires static OpenSSL libraries to be available on the system:
+
+```bash
+nim c -d:release -d:staticBuild src/get.nim
+```
+
 ## Getting Started
 
 Usage is very straightforward:
@@ -43,6 +54,20 @@ get "your query"
 ```
 
 `get` is designed to perform read-only operations only.
+
+### Bundled Tools
+
+`get` ships with several high-performance command-line tools in the `bin/` directory. These tools are automatically available to generated commands:
+
+| Tool              | Description                                           |
+|-------------------|-------------------------------------------------------|
+| `rg`              | ripgrep — ultra-fast regex search in files            |
+| `fd`              | Fast file/directory finder                            |
+| `sg`              | ast-grep — AST-level structural code search           |
+| `pmc`             | pack-my-code — code context packaging for LLM prompts |
+| `treepp` / `tree` | tree++ — enhanced directory tree listing              |
+
+The LLM is made aware of these tools and will prefer them when they fit the task.
 
 ### Skipping the Cache
 
@@ -74,6 +99,7 @@ The full list of `set` options is shown in the table below:
 | `cache`             | Whether to enable response caching                                                               | `true` / `false`            | `true`                               |
 | `cache-expiry`      | Number of days before a cache entry expires                                                      | Positive integer (days)     | `30`                                 |
 | `cache-max-entries` | Maximum number of entries retained in the cache                                                  | Positive integer            | `1000`                               |
+| `log-max-entries`   | Maximum number of entries retained in the log                                                    | Positive integer            | `1000`                               |
 
 ## Cache Management
 
@@ -118,15 +144,50 @@ get set cache-expiry 7
 get set cache-max-entries 500
 ```
 
+## Log Management
+
+`get` logs each query execution (query text, generated command, exit code, and output preview) to a local file. When the entry count exceeds the `log-max-entries` limit, the oldest entries are automatically removed.
+
+### Viewing Log Status
+
+```bash
+get log
+```
+
+Displays whether logging is enabled, the configured maximum entries, entry count, file location, and file size.
+
+### Clearing the Log
+
+```bash
+get log --clean
+```
+
+Removes all entries from the log file.
+
+### Tuning Log Parameters
+
+```bash
+get set log-max-entries 500
+```
+
+### Disabling Logging
+
+```bash
+get set log false
+```
+
+When disabled, no log writes are performed. Existing log content is preserved until explicitly cleaned.
+
 ## `config` Command Reference
 
 - `get config`: Display the current configuration (all options).
 - `get config --reset`: Reset all configuration to default values.
 - `get config --<option>`: Display the current value of a single option.
 
-The `--<option>` flag accepts every option name from the `set` table above (except `key`). Examples:
+The `--<option>` flag accepts every option name from the `set` table above. Examples:
 
 ```bash
+get config --key
 get config --url
 get config --model
 get config --manual-confirm
@@ -142,7 +203,10 @@ get config --hide-process
 get config --cache
 get config --cache-expiry
 get config --cache-max-entries
+get config --log-max-entries
 ```
+
+Note: `get config --key` displays the key status (set/not set) with the value masked for security.
 
 ## Other Command Reference
 
@@ -154,3 +218,5 @@ get config --cache-max-entries
 - `get version`: Return version for `get`
 - `get isok`: Verify whether current configuration is ready to use (checks key, url, model, and sends a probe request)
 - `get help`: Display usage help
+- `get log`: Display log status
+- `get log --clean`: Clear all log entries

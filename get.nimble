@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.0"
+version       = "0.2.0"
 author        = "Water-Run"
 description   = "get -- get anything from your computer"
 license       = "AGPL-3.0-or-later"
@@ -12,6 +12,7 @@ bin           = @["get"]
 
 requires "nim >= 2.2.8"
 requires "checksums >= 0.1.0"
+requires "regex >= 0.25.0"
 
 
 # Tasks

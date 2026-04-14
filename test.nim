@@ -2,14 +2,14 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
 ## This file exercises the pure-function helpers and infrastructure
-## operations exposed by utils, config, cache, sysinfo, exec, prompt,
-## and llm.  The LLM connectivity suite is skipped unless the
-## environment variables GET_TEST_KEY, GET_TEST_URL, and
+## operations exposed by utils, config, cache, sysinfo, exec,
+## prompt, logger, and llm.  The LLM connectivity suite is skipped
+## unless the environment variables GET_TEST_KEY, GET_TEST_URL, and
 ## GET_TEST_MODEL are set.
 
 {.experimental: "strictFuncs".}
@@ -21,6 +21,7 @@ import cache
 import config
 import exec
 import llm
+import logger
 import prompt
 import sysinfo
 
@@ -71,7 +72,8 @@ suite "utils":
     check res.get == "ls -la"
 
   test "extractCodeBlock extracts first block only":
-    let text = "```sh\nfirst\n```\n```sh\nsecond\n```"
+    let text =
+      "```sh\nfirst\n```\n```sh\nsecond\n```"
     let res = extractCodeBlock(text)
     check res.isSome
     check res.get == "first"
@@ -86,12 +88,18 @@ ls -la /etc && \
     check res.get.contains("ls -la")
     check res.get.contains("cat")
 
+  test "getBundledBinDir returns a string":
+    let d = getBundledBinDir()
+    # May be empty in CI environments.
+    discard d
+
 # ---------------------------------------------------------------------------
 # sysinfo tests
 # ---------------------------------------------------------------------------
 
 suite "sysinfo":
-  ## Tests that system information collection produces sensible data.
+  ## Tests that system information collection produces sensible
+  ## data and environment checks run without error.
 
   test "collectSysInfo returns non-empty os and arch":
     let info = collectSysInfo(defaultShell())
@@ -114,12 +122,30 @@ suite "sysinfo":
       cwd: "/tmp",
       shell: "sh",
       shellVersion: "",
-      availableTools: @[]
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: ""
     )
     let formatted = formatSysInfo(info)
     check formatted.contains("testOS")
     check formatted.contains("testArch")
     check not formatted.contains("Hostname:")
+
+  test "formatBundledTools with empty list":
+    check formatBundledTools(@[]).len == 0
+
+  test "formatBundledTools with entries":
+    let tools = @[
+      BundledTool(name: "rg",
+        description: "fast grep")]
+    let s = formatBundledTools(tools)
+    check s.contains("rg")
+    check s.contains("BUNDLED TOOLS")
+
+  test "checkEnvironment runs without crash":
+    let w = checkEnvironment()
+    # May or may not return a warning.
+    discard w
 
 # ---------------------------------------------------------------------------
 # exec tests
@@ -142,7 +168,8 @@ suite "exec":
 
   test "invalid regex raises GetError":
     expect GetError:
-      discard validateCommandPattern("test", "[invalid")
+      discard validateCommandPattern(
+        "test", "[invalid")
 
   test "executeCommand runs echo":
     let shell = defaultShell()
@@ -150,7 +177,8 @@ suite "exec":
       let res = executeCommand(
         "Write-Output 'hello'", shell)
     else:
-      let res = executeCommand("echo hello", shell)
+      let res = executeCommand(
+        "echo hello", shell)
     check res.exitCode == 0
     check res.output.strip() == "hello"
 
@@ -163,6 +191,17 @@ suite "exec":
       let res = executeCommand(
         "exit 42", shell)
     check res.exitCode == 42
+
+  test "executeCommand with empty binDir works":
+    let shell = defaultShell()
+    when defined(windows):
+      let res = executeCommand(
+        "Write-Output 'ok'", shell, "")
+    else:
+      let res = executeCommand(
+        "echo ok", shell, "")
+    check res.exitCode == 0
+    check res.output.strip() == "ok"
 
 # ---------------------------------------------------------------------------
 # config — pure helpers via public API
@@ -189,6 +228,8 @@ suite "config defaults":
     check cfg.cacheExpiry == DEFAULT_CACHE_EXPIRY
     check cfg.cacheMaxEntries ==
       DEFAULT_CACHE_MAX_ENTRIES
+    check cfg.logMaxEntries ==
+      DEFAULT_LOG_MAX_ENTRIES
 
   test "defaultConfig shell matches platform":
     let cfg = defaultConfig()
@@ -221,7 +262,8 @@ suite "config persistence round-trip":
       hideProcess:     true,
       cache:           false,
       cacheExpiry:     7,
-      cacheMaxEntries: 500
+      cacheMaxEntries: 500,
+      logMaxEntries:   200
     )
     saveConfig(original)
     let loaded = loadConfig()
@@ -243,6 +285,8 @@ suite "config persistence round-trip":
     check loaded.cacheExpiry == original.cacheExpiry
     check loaded.cacheMaxEntries ==
       original.cacheMaxEntries
+    check loaded.logMaxEntries ==
+      original.logMaxEntries
     saveConfig(defaultConfig())
 
   test "save and load with none options":
@@ -260,9 +304,7 @@ suite "config persistence round-trip":
 # ---------------------------------------------------------------------------
 
 suite "setConfigOption":
-  ## Verifies the set-by-name API: string options accept empty
-  ## strings as unset; boolean/integer options reset to defaults on
-  ## empty input.
+  ## Verifies the set-by-name API.
 
   test "set and unset url":
     setConfigOption("url", "https://custom.api/v1")
@@ -355,13 +397,23 @@ suite "setConfigOption":
       DEFAULT_CACHE_MAX_ENTRIES
     saveConfig(defaultConfig())
 
+  test "set log-max-entries":
+    setConfigOption("log-max-entries", "500")
+    var cfg = loadConfig()
+    check cfg.logMaxEntries == 500
+    setConfigOption("log-max-entries", "")
+    cfg = loadConfig()
+    check cfg.logMaxEntries ==
+      DEFAULT_LOG_MAX_ENTRIES
+    saveConfig(defaultConfig())
+
 # ---------------------------------------------------------------------------
 # cache tests
 # ---------------------------------------------------------------------------
 
 suite "cache":
-  ## Tests for hash computation, cache persistence, lookup, eviction,
-  ## and management commands.
+  ## Tests for hash computation, cache persistence, lookup,
+  ## eviction, and management commands.
 
   test "computeCacheHash is deterministic":
     let h1 = computeCacheHash(
@@ -373,7 +425,7 @@ suite "cache":
     check h1 == h2
     check h1.len == 32
 
-  test "computeCacheHash differs for different queries":
+  test "computeCacheHash differs for queries":
     let h1 = computeCacheHash(
       "query one", "/tmp", "bash", "gpt",
       false, none(string), none(string))
@@ -382,7 +434,7 @@ suite "cache":
       false, none(string), none(string))
     check h1 != h2
 
-  test "computeCacheHash differs for different cwd":
+  test "computeCacheHash differs for cwd":
     let h1 = computeCacheHash(
       "test", "/home", "bash", "gpt",
       false, none(string), none(string))
@@ -391,7 +443,7 @@ suite "cache":
       false, none(string), none(string))
     check h1 != h2
 
-  test "computeCacheHash differs for instance flag":
+  test "computeCacheHash differs for instance":
     let h1 = computeCacheHash(
       "test", "/tmp", "bash", "gpt",
       true, none(string), none(string))
@@ -494,7 +546,8 @@ suite "cache":
         query: fmt"q{i}",
         command: "",
         output: "",
-        timestamp: getTime().toUnix() - (5 - i).int64
+        timestamp:
+          getTime().toUnix() - (5 - i).int64
       )
       addCacheEntry(store, e, 3, 30)
     check store.entries.len <= 3
@@ -554,6 +607,25 @@ suite "cache":
     check loaded.entries.len == 0
 
 # ---------------------------------------------------------------------------
+# logger tests
+# ---------------------------------------------------------------------------
+
+suite "logger":
+  ## Tests for log cleaning and info display.
+
+  test "cleanLog on empty log returns 0":
+    # Ensure clean state.
+    let path = getLogFilePath()
+    if fileExists(path):
+      writeFile(path, "")
+    check cleanLog() == 0
+
+  test "logExecution and cleanLog round-trip":
+    logExecution("test q", "echo 1", "1", 0, 0)
+    let removed = cleanLog()
+    check removed >= 1
+
+# ---------------------------------------------------------------------------
 # prompt tests
 # ---------------------------------------------------------------------------
 
@@ -566,7 +638,11 @@ suite "prompt":
       hostname: "dev", username: "user",
       cwd: "/home/user", shell: "bash",
       shellVersion: "5.2",
-      availableTools: @["git", "curl"])
+      availableTools: @["git", "curl"],
+      bundledTools: @[
+        BundledTool(name: "rg",
+          description: "fast grep")],
+      binDir: "/opt/bin")
     let msgs = buildQueryMessages(
       info, "disk usage", "bash", true,
       none(string), none(string))
@@ -576,13 +652,35 @@ suite "prompt":
     check msgs[0].content.contains("read-only")
     check msgs[1].content.contains("disk usage")
 
+  test "buildQueryMessages includes bundled tools":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[],
+      bundledTools: @[
+        BundledTool(name: "rg",
+          description: "fast grep"),
+        BundledTool(name: "fd",
+          description: "fast find")],
+      binDir: "/opt/bin")
+    let msgs = buildQueryMessages(
+      info, "test", "bash", false,
+      none(string), none(string))
+    check msgs[0].content.contains("BUNDLED TOOLS")
+    check msgs[0].content.contains("rg")
+    check msgs[0].content.contains("fd")
+
   test "buildQueryMessages includes system info":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
-      availableTools: @[])
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: "")
     let msgs = buildQueryMessages(
       info, "test", "bash", false,
       none(string), none(string))
@@ -594,7 +692,9 @@ suite "prompt":
       hostname: "", username: "",
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
-      availableTools: @[])
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: "")
     let msgs = buildQueryMessages(
       info, "test", "bash", false,
       some("Custom rule here"), none(string))
@@ -607,26 +707,30 @@ suite "prompt":
       hostname: "", username: "",
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
-      availableTools: @[])
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: "")
     let msgs = buildQueryMessages(
       info, "test", "bash", false,
       none(string), some("^ls"))
     check msgs[0].content.contains("^ls")
 
-  test "buildDoubleCheckMessages produces 2 messages":
+  test "buildDoubleCheckMessages produces 2 msgs":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
-      availableTools: @[])
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: "")
     let msgs = buildDoubleCheckMessages(
       "ls -la", "list files", info)
     check msgs.len == 2
     check msgs[0].content.contains("ls -la")
     check msgs[0].content.contains("list files")
 
-  test "buildInterpretMessages produces 2 messages":
+  test "buildInterpretMessages produces 2 msgs":
     let msgs = buildInterpretMessages(
       "disk usage", "df -h",
       "/dev/sda1 50G 20G 30G 40%")
@@ -640,11 +744,10 @@ suite "prompt":
 # ---------------------------------------------------------------------------
 
 suite "llm connectivity":
-  ## Sends a minimal probe request to verify end-to-end API
-  ## reachability.  Skipped when GET_TEST_KEY, GET_TEST_URL, or
-  ## GET_TEST_MODEL are absent.
+  ## Sends a minimal probe request.  Skipped when GET_TEST_KEY,
+  ## GET_TEST_URL, or GET_TEST_MODEL are absent.
 
-  test "sendLlmRequest returns a non-empty response":
+  test "sendLlmRequest returns non-empty response":
     let apiKey   = getEnv("GET_TEST_KEY", "")
     let apiUrl   = getEnv("GET_TEST_URL", "")
     let apiModel = getEnv("GET_TEST_MODEL", "")

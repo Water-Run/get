@@ -2,19 +2,20 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
 ## This module owns the Config data type, its default values, JSON
-## serialisation, and all persistence logic including platform-specific
-## secure key storage (Linux: file permissions 0600; Windows: DPAPI).
-## It exposes high-level operations consumed by the CLI dispatcher:
-## load, save, display, reset, set-by-name, and readiness checking.
+## serialisation, and all persistence logic including platform-
+## specific secure key storage (Linux: file permissions 0600;
+## Windows: DPAPI).  It exposes high-level operations consumed by
+## the CLI dispatcher: load, save, display, reset, set-by-name, and
+## readiness checking.
 ##
 ## String options (url, model, shell) accept an empty string as an
-## explicit "unset" value.  Boolean and integer options reset to their
-## compile-time defaults when an empty string is supplied to
+## explicit "unset" value.  Boolean and integer options reset to
+## their compile-time defaults when an empty string is supplied to
 ## setConfigOption.
 
 {.experimental: "strictFuncs".}
@@ -66,6 +67,9 @@ const DEFAULT_CACHE_EXPIRY* = 30
 ## Default maximum number of cached entries.
 const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 
+## Default maximum number of log entries retained.
+const DEFAULT_LOG_MAX_ENTRIES* = 1000
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -89,6 +93,7 @@ type
     cache*: bool                     ## Enable response cache.
     cacheExpiry*: int                ## Cache expiry in days.
     cacheMaxEntries*: int            ## Max cached entries.
+    logMaxEntries*: int              ## Max log entries retained.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -271,7 +276,8 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "hideProcess":     cfg.hideProcess,
     "cache":           cfg.cache,
     "cacheExpiry":     cfg.cacheExpiry,
-    "cacheMaxEntries": cfg.cacheMaxEntries
+    "cacheMaxEntries": cfg.cacheMaxEntries,
+    "logMaxEntries":   cfg.logMaxEntries
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] = %cfg.commandPattern.get
@@ -314,7 +320,10 @@ proc implJsonToConfig(
         defaults.cacheExpiry),
     cacheMaxEntries:
       node{"cacheMaxEntries"}.getInt(
-        defaults.cacheMaxEntries)
+        defaults.cacheMaxEntries),
+    logMaxEntries:
+      node{"logMaxEntries"}.getInt(
+        defaults.logMaxEntries)
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and cmdNode.kind == JString and
@@ -357,7 +366,8 @@ func defaultConfig*(): Config =
     hideProcess:     DEFAULT_HIDE_PROCESS,
     cache:           DEFAULT_CACHE,
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
-    cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES
+    cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
+    logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES
   )
 
 # ---------------------------------------------------------------------------
@@ -497,6 +507,7 @@ proc displayConfig*() =
   echo fmt"cache = {cfg.cache}"
   echo fmt"cache-expiry = {cfg.cacheExpiry}"
   echo fmt"cache-max-entries = {cfg.cacheMaxEntries}"
+  echo fmt"log-max-entries = {cfg.logMaxEntries}"
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -581,6 +592,9 @@ proc setConfigOption*(name: string, value: string) =
   of "cache-max-entries":
     cfg.cacheMaxEntries = implParsePositiveInt(
       value, name, DEFAULT_CACHE_MAX_ENTRIES)
+  of "log-max-entries":
+    cfg.logMaxEntries = implParsePositiveInt(
+      value, name, DEFAULT_LOG_MAX_ENTRIES)
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")
@@ -590,8 +604,8 @@ proc setConfigOption*(name: string, value: string) =
 # Public API — readiness check
 # ---------------------------------------------------------------------------
 
-## Checks whether key, url, and model are all configured and prints
-## a status summary to stdout.
+## Checks whether key, url, and model are all configured.  Only
+## prints missing items; when all present prints a single "ok" line.
 ##
 ## :returns: true when all three are present.
 ##
@@ -603,23 +617,15 @@ proc checkReady*(): bool =
   let cfg = loadConfig()
   let key = loadKey()
   var allOk = true
-  if key.isSome:
-    echo "key: ok"
-  else:
+  if key.isNone:
     echo "key: not set"
     allOk = false
-  if cfg.url.len > 0:
-    echo "url: ok"
-  else:
+  if cfg.url.len == 0:
     echo "url: not set"
     allOk = false
-  if cfg.model.len > 0:
-    echo "model: ok"
-  else:
+  if cfg.model.len == 0:
     echo "model: not set"
     allOk = false
-  if allOk:
-    echo "ready."
-  else:
+  if not allOk:
     echo "not ready."
   result = allOk

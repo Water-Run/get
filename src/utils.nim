@@ -3,15 +3,15 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: utils.nim
 ## :License: AGPL-3.0
 ##
 ## This module provides application-wide constants such as version,
 ## license, and GitHub URL, path resolution for configuration
 ## directories and files, shared domain types (GetError, LlmMessage),
-## and general-purpose string utilities consumed by every other
-## module.
+## bundled-tool binary directory resolution, and general-purpose
+## string utilities consumed by every other module.
 
 {.experimental: "strictFuncs".}
 
@@ -25,7 +25,7 @@ import std/[os, options, strutils]
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "0.1.0"
+const APP_VERSION* = "0.2.0"
 
 ## One-line introduction shown by `get get --intro`.
 const APP_INTRO* = "get anything from your computer"
@@ -51,6 +51,13 @@ const CACHE_FILE_NAME* = "cache.json"
 ## Hint displayed after usage errors to direct users to the help
 ## command for detailed information.
 const HELP_HINT* = "Run 'get help' for usage information."
+
+## Name of the bundled binary directory relative to the executable.
+const BIN_DIR_NAME* = "bin"
+
+## Development-time path to the bundled binary directory, relative
+## to the executable (project root during nimble run).
+const DEV_BIN_DIR* = "src" / "bin"
 
 # ---------------------------------------------------------------------------
 # Types
@@ -134,6 +141,26 @@ proc getLogFilePath*(): string =
 proc getCacheFilePath*(): string =
   result = getAppConfigDir() / CACHE_FILE_NAME
 
+## Returns the absolute path to the bundled binary directory.
+## Checks the production layout first (``<exe>/bin``), then the
+## development layout (``<exe>/src/bin``).  Returns an empty string
+## when neither exists.
+##
+## :returns: Absolute directory path, or empty string.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard getBundledBinDir()
+proc getBundledBinDir*(): string =
+  let appDir = getAppDir()
+  let prodPath = appDir / BIN_DIR_NAME
+  if dirExists(prodPath):
+    return prodPath
+  let devPath = appDir / DEV_BIN_DIR
+  if dirExists(devPath):
+    return devPath
+  result = ""
+
 # ---------------------------------------------------------------------------
 # Public API — string utilities
 # ---------------------------------------------------------------------------
@@ -201,7 +228,6 @@ func extractCodeBlock*(text: string): Option[string] =
           return some(content)
         return none(string)
       blockLines.add(line)
-  # Unclosed fence — return accumulated content if any.
   if inBlock and blockLines.len > 0:
     let content = blockLines.join("\n").strip()
     if content.len > 0:

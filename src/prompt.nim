@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-13
+## :Date: 2026-04-14
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -11,6 +11,10 @@
 ## safety review, output interpretation, and isok connectivity
 ## verification.  Every builder returns a seq[LlmMessage] that can
 ## be passed directly to the LLM client.
+##
+## The query prompt now includes descriptions of bundled tools
+## (rg, fd, sg, pmc, treepp/tree) so the model can leverage them
+## when generating commands.
 
 {.experimental: "strictFuncs".}
 
@@ -40,9 +44,10 @@ const ISOK_MAX_TOKENS* = 32
 
 ## Builds the message list for the initial command-generation
 ## request.  The system message contains constraints (read-only,
-## code-block formatting), system information, the configured shell,
-## an optional custom system prompt, and an optional command-pattern
-## note.  The user message contains the raw query.
+## code-block formatting), system information, bundled tool
+## documentation, the configured shell, an optional custom system
+## prompt, and an optional command-pattern note.  The user message
+## contains the raw query.
 ##
 ## :param info: System information snapshot.
 ## :param query: The user's natural-language query.
@@ -60,7 +65,8 @@ const ISOK_MAX_TOKENS* = 32
 ##     let info = SysInfo(os: "linux", arch: "amd64",
 ##       hostname: "", username: "", cwd: "/tmp",
 ##       shell: "bash", shellVersion: "",
-##       availableTools: @[])
+##       availableTools: @[],
+##       bundledTools: @[], binDir: "")
 ##     let msgs = buildQueryMessages(info, "test",
 ##       "bash", false, none(string), none(string))
 ##     assert msgs.len == 2
@@ -76,7 +82,8 @@ func buildQueryMessages*(
   sysLines.add(
     "You are a command-line assistant. Your task" &
     " is to generate a single shell command that" &
-    " retrieves the information the user requested.")
+    " retrieves the information the user " &
+    "requested.")
   sysLines.add("")
   sysLines.add("CONSTRAINTS:")
   sysLines.add(
@@ -88,9 +95,14 @@ func buildQueryMessages*(
     " block.")
   sysLines.add(
     "- Generate exactly ONE command (you may use" &
-    " pipes or && to chain read-only sub-commands).")
+    " pipes or && to chain read-only " &
+    "sub-commands).")
   sysLines.add(
     fmt"- The command must work in {shell}.")
+  sysLines.add(
+    "- Prefer using bundled tools listed below" &
+    " when they fit the task; they are already" &
+    " available in PATH.")
   if instance:
     sysLines.add(
       "- The output will be shown directly to the" &
@@ -98,10 +110,16 @@ func buildQueryMessages*(
   else:
     sysLines.add(
       "- The output will be processed further." &
-      " Focus on capturing the needed information.")
+      " Focus on capturing the needed information" &
+      " as completely as possible.")
   sysLines.add("")
   sysLines.add("SYSTEM INFORMATION:")
   sysLines.add(formatSysInfo(info))
+  let bundledBlock = formatBundledTools(
+    info.bundledTools)
+  if bundledBlock.len > 0:
+    sysLines.add("")
+    sysLines.add(bundledBlock)
   if customPrompt.isSome:
     sysLines.add("")
     sysLines.add("ADDITIONAL INSTRUCTIONS:")
@@ -135,7 +153,8 @@ func buildQueryMessages*(
 ##     let info = SysInfo(os: "linux", arch: "amd64",
 ##       hostname: "", username: "", cwd: "/tmp",
 ##       shell: "bash", shellVersion: "",
-##       availableTools: @[])
+##       availableTools: @[],
+##       bundledTools: @[], binDir: "")
 ##     let msgs = buildDoubleCheckMessages(
 ##       "ls -la", "list files", info)
 ##     assert msgs.len == 2
@@ -156,6 +175,11 @@ func buildDoubleCheckMessages*(
   sysLines.add("")
   sysLines.add("SYSTEM INFORMATION:")
   sysLines.add(formatSysInfo(info))
+  let bundledBlock = formatBundledTools(
+    info.bundledTools)
+  if bundledBlock.len > 0:
+    sysLines.add("")
+    sysLines.add(bundledBlock)
   sysLines.add("")
   sysLines.add(
     "If the command is UNSAFE or could modify" &
