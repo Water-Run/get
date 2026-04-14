@@ -10,10 +10,15 @@
 ## the appropriate subcommand handler, and manages top-level error
 ## reporting.  The query flow supports instance (single-call) and
 ## non-instance (multi-step) modes, optional double-check safety
-## review, manual-confirm gating, command-pattern validation,
-## response caching with LLM-driven cache-worthiness checks,
-## structured logging, model-strength warnings, progress display,
-## and bundled tool integration.
+## review, manual-confirm gating, forbidden-command-pattern
+## validation, response caching with LLM-driven cache-worthiness
+## checks, structured logging, model-strength warnings, progress
+## display, external-display rendering (bat/mdcat), and bundled
+## tool integration.
+##
+## CLI override flags (e.g. --model, --manual-confirm, --timeout)
+## allow per-invocation overrides of any configuration option
+## without modifying the persisted config file.
 
 {.experimental: "strictFuncs".}
 
@@ -41,15 +46,30 @@ const CACHE_CHECK_PREVIEW_LEN = 200
 const HELP_TEXT* = """get -- get anything from your computer
 
 usage:
-  get "query" [--no-cache]   retrieve information via natural language
-  get set <option> [value]   set configuration (omit value to reset)
-  get config [flags]         view or reset configuration
-  get cache [flags]          view or manage response cache
-  get log [flags]            view or manage execution log
-  get get [flags]            display application information
-  get version                display version
-  get isok                   verify configuration readiness
-  get help                   display this help message
+  get "query" [flags]          retrieve information via natural language
+  get set <option> [value]     set configuration (omit value to reset)
+  get config [flags]           view or reset configuration
+  get cache [flags]            view or manage response cache
+  get log [flags]              view or manage execution log
+  get get [flags]              display application information
+  get version                  display version
+  get isok                     verify configuration readiness
+  get help                     display this help message
+
+query flags (per-invocation overrides):
+  --no-cache                   bypass cache for this query
+  --cache                      force cache for this query
+  --manual-confirm             prompt before executing
+  --no-manual-confirm          skip confirmation prompt
+  --double-check               enable safety review
+  --no-double-check            skip safety review
+  --instance                   fast single-call mode
+  --no-instance                multi-step mode
+  --hide-process               suppress intermediate output
+  --no-hide-process            show intermediate output
+  --model <name>               override LLM model
+  --style <simp|std|vivid>     override output style
+  --timeout <seconds>          override request timeout
 
 set options:
   key                LLM API key (string, default: empty)
@@ -67,8 +87,8 @@ set options:
                        (integer or false, default: 300)
   max-token          max tokens per request
                        (integer or false, default: 20480)
-  command-pattern    regex for command validation
-                       (string, default: empty)
+  command-pattern    forbidden command regex
+                       (string, default: built-in blocklist)
   system-prompt      custom system prompt
                        (string, default: empty)
   shell              shell executable
@@ -87,6 +107,8 @@ set options:
                        (integer or false, default: 1000)
   style              output style: simp, std, vivid
                        (default: std)
+  external-display   use bat/mdcat for output rendering
+                       (true/false, default: true)
 
   Integer options accept 'false' to disable the limit.
 
@@ -114,6 +136,7 @@ get flags:
 examples:
   get "system version"
   get "disk usage" --no-cache
+  get "list files" --model gpt-5.3-codex --style vivid
   get set model gpt-5.3-codex
   get set key sk-your-api-key
   get set url https://api.openai.com/v1
@@ -122,6 +145,26 @@ examples:
   get config --model
   get cache --clean
   get log --clean"""
+
+# ---------------------------------------------------------------------------
+# Types — CLI override structure
+# ---------------------------------------------------------------------------
+
+## Holds per-invocation override values extracted from query flags.
+## Fields are Option types so that ``none`` indicates the user did
+## not specify the flag and the persisted config value should be
+## used instead.
+type
+  QueryOverrides = object
+    noCache*: bool               ## Bypass cache.
+    forceCache*: Option[bool]    ## Force cache on.
+    manualConfirm*: Option[bool] ## Override manual-confirm.
+    doubleCheck*: Option[bool]   ## Override double-check.
+    instance*: Option[bool]      ## Override instance mode.
+    hideProcess*: Option[bool]   ## Override hide-process.
+    model*: Option[string]       ## Override model name.
+    style*: Option[string]       ## Override output style.
+    timeout*: Option[int]        ## Override timeout seconds.
 
 # ---------------------------------------------------------------------------
 # Private helpers — usage errors
@@ -135,6 +178,127 @@ proc implUsageError(
 ) {.noreturn.} =
   raise newException(GetError,
     msg & "\n" & HELP_HINT)
+
+# ---------------------------------------------------------------------------
+# Private helpers — override parsing
+# ---------------------------------------------------------------------------
+
+## Parses query arguments into a query string and override flags.
+##
+## :param args: All CLI arguments (after subcommand routing).
+## :returns: A tuple of (query string, QueryOverrides).
+## :raises: GetError: If a flag that requires a value is missing
+##          its argument.
+func implParseQueryArgs(
+  args: seq[string]
+): tuple[query: string, overrides: QueryOverrides] =
+  var queryParts: seq[string] = @[]
+  var ov = QueryOverrides(
+    noCache: false,
+    forceCache: none(bool),
+    manualConfirm: none(bool),
+    doubleCheck: none(bool),
+    instance: none(bool),
+    hideProcess: none(bool),
+    model: none(string),
+    style: none(string),
+    timeout: none(int)
+  )
+  var i = 0
+  while i < args.len:
+    let a = args[i]
+    case a
+    of "--no-cache":
+      ov.noCache = true
+    of "--cache":
+      ov.forceCache = some(true)
+    of "--manual-confirm":
+      ov.manualConfirm = some(true)
+    of "--no-manual-confirm":
+      ov.manualConfirm = some(false)
+    of "--double-check":
+      ov.doubleCheck = some(true)
+    of "--no-double-check":
+      ov.doubleCheck = some(false)
+    of "--instance":
+      ov.instance = some(true)
+    of "--no-instance":
+      ov.instance = some(false)
+    of "--hide-process":
+      ov.hideProcess = some(true)
+    of "--no-hide-process":
+      ov.hideProcess = some(false)
+    of "--model":
+      if i + 1 >= args.len:
+        raise newException(GetError,
+          "--model requires a value")
+      i += 1
+      ov.model = some(args[i])
+    of "--style":
+      if i + 1 >= args.len:
+        raise newException(GetError,
+          "--style requires a value")
+      i += 1
+      ov.style = some(args[i])
+    of "--timeout":
+      if i + 1 >= args.len:
+        raise newException(GetError,
+          "--timeout requires a value")
+      i += 1
+      try:
+        ov.timeout = some(parseInt(args[i]))
+      except ValueError:
+        raise newException(GetError,
+          fmt"invalid timeout value: {args[i]}")
+    else:
+      queryParts.add(a)
+    i += 1
+  result = (
+    query: queryParts.join(" "),
+    overrides: ov
+  )
+
+## Applies per-invocation overrides to a loaded config.
+##
+## :param cfg: The base configuration (var, modified in place).
+## :param ov: The override values from CLI flags.
+proc implApplyOverrides(
+  cfg: var Config,
+  ov: QueryOverrides
+) =
+  if ov.forceCache.isSome:
+    cfg.cache = ov.forceCache.get
+  if ov.manualConfirm.isSome:
+    cfg.manualConfirm = ov.manualConfirm.get
+  if ov.doubleCheck.isSome:
+    cfg.doubleCheck = ov.doubleCheck.get
+  if ov.instance.isSome:
+    cfg.instance = ov.instance.get
+  if ov.hideProcess.isSome:
+    cfg.hideProcess = ov.hideProcess.get
+  if ov.model.isSome:
+    cfg.model = ov.model.get
+  if ov.style.isSome:
+    cfg.style = ov.style.get
+  if ov.timeout.isSome:
+    cfg.timeout = ov.timeout.get
+
+# ---------------------------------------------------------------------------
+# Private helpers — style loading
+# ---------------------------------------------------------------------------
+
+## Loads the style and binDir from the config, used by subcommand
+## handlers that need styled output.
+##
+## :param cfg: The loaded configuration.
+## :returns: A tuple of (StyleKind, binDir string).
+proc implLoadStyle(
+  cfg: Config
+): tuple[sk: StyleKind, binDir: string] =
+  result = (
+    sk: parseStyle(cfg.style),
+    binDir: getBundledBinDir()
+  )
 
 # ---------------------------------------------------------------------------
 # Private helpers — subcommand handlers
@@ -156,61 +320,79 @@ proc implHandleSet(args: seq[string]) =
 ##
 ## :param args: Arguments after "config".
 proc implHandleConfig(args: seq[string]) =
+  let cfg = loadConfig()
+  let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
-    displayConfig()
+    displayConfig(sk)
     return
   if args[0] == "--reset":
     resetConfig()
-    echo "configuration reset."
+    styleSuccess(sk, "configuration reset.")
     return
   if args[0].startsWith("--"):
     let optName = args[0][2 .. ^1]
-    let cfg = loadConfig()
     case optName
     of "key":
       let key = loadKey()
       if key.isSome:
-        echo "set (" & maskString(key.get) & ")"
+        styleKeyValue(sk, "key",
+          "set (" & maskString(key.get) & ")")
       else:
-        echo "not set"
+        styleKeyValue(sk, "key", "not set")
     of "url":
-      echo cfg.url
+      styleKeyValue(sk, "url", cfg.url)
     of "model":
-      echo cfg.model
+      styleKeyValue(sk, "model", cfg.model)
     of "manual-confirm":
-      echo cfg.manualConfirm
+      styleKeyValue(sk, "manual-confirm",
+        $cfg.manualConfirm)
     of "double-check":
-      echo cfg.doubleCheck
+      styleKeyValue(sk, "double-check",
+        $cfg.doubleCheck)
     of "instance":
-      echo cfg.instance
+      styleKeyValue(sk, "instance",
+        $cfg.instance)
     of "timeout":
-      echo formatIntOrDisable(cfg.timeout)
+      styleKeyValue(sk, "timeout",
+        formatIntOrDisable(cfg.timeout))
     of "max-token":
-      echo formatIntOrDisable(cfg.maxToken)
+      styleKeyValue(sk, "max-token",
+        formatIntOrDisable(cfg.maxToken))
     of "command-pattern":
-      echo(
+      let pat =
         if cfg.commandPattern.isSome:
-          cfg.commandPattern.get else: "")
+          cfg.commandPattern.get
+        else:
+          "(default: built-in)"
+      styleKeyValue(sk, "command-pattern", pat)
     of "system-prompt":
-      echo(
+      let pmt =
         if cfg.systemPrompt.isSome:
-          cfg.systemPrompt.get else: "")
+          cfg.systemPrompt.get else: ""
+      styleKeyValue(sk, "system-prompt", pmt)
     of "shell":
-      echo cfg.shell
+      styleKeyValue(sk, "shell", cfg.shell)
     of "log":
-      echo cfg.log
+      styleKeyValue(sk, "log", $cfg.log)
     of "hide-process":
-      echo cfg.hideProcess
+      styleKeyValue(sk, "hide-process",
+        $cfg.hideProcess)
     of "cache":
-      echo cfg.cache
+      styleKeyValue(sk, "cache", $cfg.cache)
     of "cache-expiry":
-      echo formatIntOrDisable(cfg.cacheExpiry)
+      styleKeyValue(sk, "cache-expiry",
+        formatIntOrDisable(cfg.cacheExpiry))
     of "cache-max-entries":
-      echo formatIntOrDisable(cfg.cacheMaxEntries)
+      styleKeyValue(sk, "cache-max-entries",
+        formatIntOrDisable(cfg.cacheMaxEntries))
     of "log-max-entries":
-      echo formatIntOrDisable(cfg.logMaxEntries)
+      styleKeyValue(sk, "log-max-entries",
+        formatIntOrDisable(cfg.logMaxEntries))
     of "style":
-      echo cfg.style
+      styleKeyValue(sk, "style", cfg.style)
+    of "external-display":
+      styleKeyValue(sk, "external-display",
+        $cfg.externalDisplay)
     else:
       implUsageError(
         fmt"unknown config option '{optName}'")
@@ -223,16 +405,18 @@ proc implHandleConfig(args: seq[string]) =
 ##
 ## :param args: Arguments after "cache".
 proc implHandleCache(args: seq[string]) =
+  let cfg = loadConfig()
+  let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
-    let cfg = loadConfig()
     displayCacheInfo(
       cfg.cache, cfg.cacheExpiry,
-      cfg.cacheMaxEntries)
+      cfg.cacheMaxEntries, sk)
     return
   case args[0]
   of "--clean":
     let removed = cleanCache()
-    echo fmt"cache cleared. ({removed} entries removed)"
+    styleSuccess(sk,
+      fmt"cache cleared. ({removed} entries removed)")
   of "--unset":
     if args.len < 2:
       implUsageError(
@@ -240,10 +424,12 @@ proc implHandleCache(args: seq[string]) =
     let query = args[1 .. ^1].join(" ")
     let removed = unsetCache(query)
     if removed > 0:
-      echo fmt"removed {removed} cache entries" &
-        fmt" for ""{query}""."
+      styleSuccess(sk,
+        fmt"removed {removed} cache entries" &
+        fmt" for ""{query}"".")
     else:
-      echo fmt"no cache entry found for ""{query}""."
+      styleInfo(sk,
+        fmt"no cache entry found for ""{query}"".")
   else:
     implUsageError(
       fmt"unknown argument '{args[0]}' for 'cache'")
@@ -252,14 +438,16 @@ proc implHandleCache(args: seq[string]) =
 ##
 ## :param args: Arguments after "log".
 proc implHandleLog(args: seq[string]) =
+  let cfg = loadConfig()
+  let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
-    let cfg = loadConfig()
-    displayLogInfo(cfg.log, cfg.logMaxEntries)
+    displayLogInfo(cfg.log, cfg.logMaxEntries, sk)
     return
   case args[0]
   of "--clean":
     let removed = cleanLog()
-    echo fmt"log cleared. ({removed} entries removed)"
+    styleSuccess(sk,
+      fmt"log cleared. ({removed} entries removed)")
   else:
     implUsageError(
       fmt"unknown argument '{args[0]}' for 'log'")
@@ -268,11 +456,13 @@ proc implHandleLog(args: seq[string]) =
 ##
 ## :param args: Arguments after "get".
 proc implHandleGet(args: seq[string]) =
+  let cfg = loadConfig()
+  let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
-    echo fmt"version: {APP_VERSION}"
-    echo fmt"intro: {APP_INTRO}"
-    echo fmt"license: {APP_LICENSE}"
-    echo fmt"github: {APP_GITHUB}"
+    styleKeyValue(sk, "version", APP_VERSION)
+    styleKeyValue(sk, "intro", APP_INTRO)
+    styleKeyValue(sk, "license", APP_LICENSE)
+    styleKeyValue(sk, "github", APP_GITHUB)
     return
   case args[0]
   of "--intro":
@@ -290,15 +480,15 @@ proc implHandleGet(args: seq[string]) =
 ## Handles `get isok`.  Checks config readiness then sends a probe
 ## request to the LLM.
 proc implHandleIsOk() =
-  let cfgReady = checkReady()
+  let cfg = loadConfig()
+  let (sk, _) = implLoadStyle(cfg)
+  let cfgReady = checkReady(sk)
   if not cfgReady:
     quit(1)
-  let cfg = loadConfig()
   let key = loadKey()
   if key.isNone:
     raise newException(GetError,
       "API key is not configured")
-  let sk = parseStyle(cfg.style)
   let req = LlmRequest(
     model: cfg.model,
     messages: @[
@@ -320,10 +510,16 @@ proc implHandleIsOk() =
     sk = sk
   )
   let answer = resp.content.strip().toLowerAscii()
-  if answer == "ok":
-    echo "ok"
+  if answer.len == 0:
+    styleError(sk,
+      "unexpected response: (empty)")
+    quit(1)
+  elif answer == "ok" or
+      (answer.contains("ok") and answer.len < 10):
+    styleSuccess(sk, "ok")
   else:
-    echo fmt"unexpected response: {resp.content}"
+    styleError(sk,
+      fmt"unexpected response: {resp.content}")
     quit(1)
 
 # ---------------------------------------------------------------------------
@@ -338,6 +534,28 @@ proc implHandleIsOk() =
 func implEffectiveShell(cfg: Config): string =
   if cfg.shell.len > 0: cfg.shell
   else: defaultShell()
+
+## Resolves the effective forbidden-command pattern, falling back
+## to the built-in default when the user has not configured one.
+##
+## :param cfg: The loaded configuration.
+## :param sk: The active output style (for warnings).
+## :returns: The pattern string to use.
+proc implEffectivePattern(
+  cfg: Config,
+  sk: StyleKind
+): string =
+  if cfg.commandPattern.isSome:
+    let pat = cfg.commandPattern.get
+    if pat.len == 0:
+      # User explicitly cleared the pattern.
+      styleWarning(sk,
+        "warning: command-pattern is empty — " &
+        "no forbidden command filtering is active")
+      return ""
+    return pat
+  # No custom pattern — use built-in default.
+  result = DEFAULT_COMMAND_PATTERN
 
 ## Sends an LLM request built from the supplied messages and
 ## returns the response.
@@ -462,9 +680,14 @@ proc implWarnIfWeakModel(
 ## Handles a natural-language query.
 ##
 ## :param query: The user's natural-language query.
-## :param noCache: When true the cache is bypassed for this query.
-proc implHandleQuery(query: string, noCache: bool) =
-  let cfg = loadConfig()
+## :param ov: Per-invocation override flags.
+proc implHandleQuery(
+  query: string,
+  ov: QueryOverrides
+) =
+  var cfg = loadConfig()
+  implApplyOverrides(cfg, ov)
+
   let key = loadKey()
   if key.isNone:
     raise newException(GetError,
@@ -480,13 +703,11 @@ proc implHandleQuery(query: string, noCache: bool) =
       " Run: get set model <model>")
 
   let sk = parseStyle(cfg.style)
+  let binDir = getBundledBinDir()
+  let extDisplay = cfg.externalDisplay
 
-  # Vivid mode experimental notice + mdcat check.
-  styleVividNotice(sk)
-  if sk == skVivid:
-    let binDir = getBundledBinDir()
-    if not isMdcatAvailable(binDir):
-      styleMdcatWarning(sk)
+  # External display checks and warnings.
+  styleExternalDisplayCheck(sk, extDisplay, binDir)
 
   # Model-strength advisory.
   implWarnIfWeakModel(cfg.model, sk)
@@ -494,7 +715,12 @@ proc implHandleQuery(query: string, noCache: bool) =
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
 
+  # Resolve effective forbidden pattern.
+  let effectivePattern = implEffectivePattern(
+    cfg, sk)
+
   # ---- Cache lookup ----
+  let noCache = ov.noCache
   let useCache = cfg.cache and (not noCache)
   var cacheHash = ""
   if useCache:
@@ -509,7 +735,7 @@ proc implHandleQuery(query: string, noCache: bool) =
       if not cfg.hideProcess:
         styleProgress(sk, "(cached)")
       styleResult(sk, hit.get.output,
-        getBundledBinDir())
+        binDir, extDisplay)
       return
 
   # 1. Collect system information.
@@ -519,9 +745,14 @@ proc implHandleQuery(query: string, noCache: bool) =
 
   # 2. Build query prompt and call LLM.
   styleSeparator(sk, DIV_THIN)
+  let patternOpt =
+    if effectivePattern.len > 0:
+      some(effectivePattern)
+    else:
+      none(string)
   let queryMsgs = buildQueryMessages(
     info, query, shell, cfg.instance,
-    cfg.systemPrompt, cfg.commandPattern)
+    cfg.systemPrompt, patternOpt)
   let genResp = implLlmCall(
     queryMsgs, cfg, key.get, sk)
 
@@ -532,7 +763,9 @@ proc implHandleQuery(query: string, noCache: bool) =
 
   if maybeCmd.isNone:
     # Direct text answer (no command generated).
-    styleResult(sk, genResp.content, info.binDir)
+    let isMarkdown = outputMode == "INTERPRET"
+    styleResult(sk, genResp.content, binDir,
+      extDisplay, isMarkdown)
     if useCache:
       var store = loadCache()
       let entry = CacheEntry(
@@ -554,17 +787,18 @@ proc implHandleQuery(query: string, noCache: bool) =
   if not cfg.hideProcess:
     styleCommand(sk, "command", command)
 
-  # 4. Dangerous-command safety check.
-  let dangerHit = checkDangerousCommand(command)
-  if dangerHit.isSome:
-    styleError(sk,
-      fmt"error: command contains dangerous " &
-      fmt"operation '{dangerHit.get}' — rejected")
-    if cfg.log:
-      logExecution(query, command,
-        "rejected by danger check", 1,
-        cfg.logMaxEntries)
-    quit(1)
+  # 4. Forbidden-command pattern check.
+  if effectivePattern.len > 0:
+    if not validateCommandPattern(
+        command, effectivePattern):
+      styleError(sk,
+        "error: command matches forbidden " &
+        "pattern — rejected")
+      if cfg.log:
+        logExecution(query, command,
+          "rejected by forbidden pattern", 1,
+          cfg.logMaxEntries)
+      quit(1)
 
   # 5. Double-check (optional, default: enabled).
   if cfg.doubleCheck:
@@ -574,33 +808,20 @@ proc implHandleQuery(query: string, noCache: bool) =
       styleCommand(sk,
         "approved command", command)
 
-  # 6. Command-pattern validation.
-  if cfg.commandPattern.isSome:
-    if not validateCommandPattern(
-        command, cfg.commandPattern.get):
-      styleError(sk,
-        "error: command does not match" &
-        " configured pattern")
-      if cfg.log:
-        logExecution(query, command,
-          "rejected by pattern", 1,
-          cfg.logMaxEntries)
-      quit(1)
-
-  # 7. Manual confirmation (optional).
+  # 6. Manual confirmation (optional).
   if cfg.manualConfirm:
-    if not confirmExecution(command):
+    if not confirmExecution(command, sk):
       styleProgress(sk, "aborted.")
       quit(0)
 
-  # 8. Execute the command with bundled bin dir.
+  # 7. Execute the command with bundled bin dir.
   if not cfg.hideProcess:
     styleSeparator(sk, DIV_WARN)
     styleProgress(sk, "executing...")
   let execRes = executeCommand(
     command, shell, info.binDir)
 
-  # 9. Output handling (instance / DIRECT /
+  # 8. Output handling (instance / DIRECT /
   #    INTERPRET).
   styleSeparator(sk, DIV_SECTION)
   var finalOutput = ""
@@ -608,7 +829,8 @@ proc implHandleQuery(query: string, noCache: bool) =
     # Direct output — show raw command result.
     finalOutput = execRes.output.strip()
     if finalOutput.len > 0:
-      styleResult(sk, finalOutput, info.binDir)
+      styleResult(sk, finalOutput, info.binDir,
+        extDisplay, false)
     elif execRes.exitCode != 0:
       finalOutput =
         fmt"command exited with code " &
@@ -629,9 +851,10 @@ proc implHandleQuery(query: string, noCache: bool) =
       let interpretResp = implLlmCall(
         interpretMsgs, cfg, key.get, sk)
       finalOutput = interpretResp.content
-      styleResult(sk, finalOutput, info.binDir)
+      styleResult(sk, finalOutput, info.binDir,
+        extDisplay, true)
 
-  # 10. Cache the result (with LLM cache-worthiness
+  # 9. Cache the result (with LLM cache-worthiness
   #     check).
   if useCache and finalOutput.len > 0:
     let shouldCache = implCheckShouldCache(
@@ -653,13 +876,13 @@ proc implHandleQuery(query: string, noCache: bool) =
         styleProgress(sk,
           "(result not cached — volatile)")
 
-  # 11. Log.
+  # 10. Log.
   if cfg.log:
     logExecution(query, command,
       execRes.output, execRes.exitCode,
       cfg.logMaxEntries)
 
-  # 12. Propagate non-zero exit code.
+  # 11. Propagate non-zero exit code.
   if execRes.exitCode != 0:
     quit(execRes.exitCode)
 
@@ -693,19 +916,15 @@ proc implMain() =
   of "isok":
     implHandleIsOk()
   of "help", "--help", "-h":
-    echo HELP_TEXT
+    let cfg = loadConfig()
+    let (sk, binDir) = implLoadStyle(cfg)
+    styleHelp(sk, HELP_TEXT, binDir,
+      cfg.externalDisplay)
   else:
-    var queryParts: seq[string] = @[]
-    var noCache = false
-    for a in args:
-      if a == "--no-cache":
-        noCache = true
-      else:
-        queryParts.add(a)
-    let query = queryParts.join(" ")
+    let (query, ov) = implParseQueryArgs(args)
     if query.len == 0:
       implUsageError("no query provided")
-    implHandleQuery(query, noCache)
+    implHandleQuery(query, ov)
 
 # ---------------------------------------------------------------------------
 # Signal handling

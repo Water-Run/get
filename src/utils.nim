@@ -26,7 +26,7 @@ import std/[os, options, strutils]
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "0.2.0"
+const APP_VERSION* = "1.0.0"
 
 ## One-line introduction shown by `get get --intro`.
 const APP_INTRO* = "get anything from your computer"
@@ -72,30 +72,32 @@ const MODEL_STRENGTH_WARNING* =
   "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+, " &
   "DeepSeek, Grok 4+, GLM 4.7+)."
 
-## List of command names considered dangerous.  The built-in safety
-## check rejects commands containing these as whole words.
-const DANGEROUS_COMMANDS* = [
-  "rm", "rmdir", "del", "rd", "erase",
-  "mv", "move", "cp", "copy",
-  "mkdir", "md", "touch",
-  "chmod", "chown", "chgrp",
-  "mkfs", "dd", "format", "fdisk",
-  "kill", "killall", "pkill",
-  "shutdown", "reboot", "halt", "poweroff",
-  "passwd", "useradd", "userdel", "usermod",
-  "groupadd", "groupdel",
-  "Set-Content", "New-Item", "Remove-Item",
-  "Move-Item", "Rename-Item",
-  "Clear-Content", "Add-Content"
-]
+## Default forbidden command pattern regex.  Commands matching this
+## pattern are rejected before execution.  The pattern uses ``\b``
+## word boundaries to avoid false positives in paths or arguments.
+## Users may override this via ``get set command-pattern``.
+const DEFAULT_COMMAND_PATTERN* =
+  "\\b(rm|rmdir|del|rd|erase" &
+  "|mv|move|cp|copy" &
+  "|mkdir|md|touch" &
+  "|chmod|chown|chgrp" &
+  "|mkfs|dd|format|fdisk" &
+  "|kill|killall|pkill" &
+  "|shutdown|reboot|halt|poweroff" &
+  "|passwd|useradd|userdel|usermod" &
+  "|groupadd|groupdel" &
+  "|Set-Content|New-Item|Remove-Item" &
+  "|Move-Item|Rename-Item" &
+  "|Clear-Content|Add-Content)\\b"
 
-## Subset of dangerous commands whose names are common English words
-## that require exact-case matching to avoid false positives (e.g.
-## "move" appearing inside a grep pattern should not trigger when
-## it is part of "Move-Item" but a bare "move" on Windows should).
-## Commands not in this set are matched case-insensitively.
-const CASE_SENSITIVE_DANGER* = [
-  "dd", "md", "rd"]
+## Core dangerous command names used to validate whether a custom
+## command-pattern adequately covers common destructive operations.
+## When a user sets a custom pattern that fails to match any of
+## these names, a safety warning is emitted.
+const DANGEROUS_COMMAND_NAMES* = [
+  "rm", "rmdir", "del", "mv", "cp",
+  "chmod", "mkfs", "dd", "kill",
+  "shutdown", "reboot", "Remove-Item"]
 
 # ---------------------------------------------------------------------------
 # Types

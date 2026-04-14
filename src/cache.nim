@@ -23,6 +23,7 @@ import std/[algorithm, json, options, os, strformat,
 
 import checksums/md5
 
+import style
 import utils
 
 # ---------------------------------------------------------------------------
@@ -316,11 +317,13 @@ proc unsetCache*(query: string): int =
   result = unsetCacheEntries(store, query)
   saveCache(store)
 
-## Prints a summary of the cache state to stdout.
+## Prints a summary of the cache state using the active output
+## style.
 ##
 ## :param cacheEnabled: Whether cache is enabled.
 ## :param expiryDays: Configured expiry in days (0 = never).
 ## :param maxEntries: Configured max entry count (0 = unlimited).
+## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -329,29 +332,32 @@ proc unsetCache*(query: string): int =
 proc displayCacheInfo*(
   cacheEnabled: bool,
   expiryDays: int,
-  maxEntries: int
+  maxEntries: int,
+  sk: StyleKind = skSimp
 ) =
   let store = loadCache()
   let path = getCacheFilePath()
   let status =
     if cacheEnabled: "enabled" else: "disabled"
-  echo fmt"cache: {status}"
-  echo fmt"entries: {store.entries.len}"
-  echo "max entries: " &
-    formatIntOrDisable(maxEntries)
-  echo "expiry: " & (
+  styleKeyValue(sk, "cache", status)
+  styleKeyValue(sk, "entries",
+    $store.entries.len)
+  styleKeyValue(sk, "max entries",
+    formatIntOrDisable(maxEntries))
+  let expiryStr =
     if expiryDays <= 0: "never"
-    else: fmt"{expiryDays} days")
-  echo fmt"file: {path}"
+    else: fmt"{expiryDays} days"
+  styleKeyValue(sk, "expiry", expiryStr)
+  styleKeyValue(sk, "file", path)
   if fileExists(path):
     let size = getFileSize(path)
-    if size < 1024:
-      echo fmt"file size: {size} B"
-    elif size < 1024 * 1024:
-      let kb = size div 1024
-      echo fmt"file size: {kb} KB"
-    else:
-      let mb = size div (1024 * 1024)
-      echo fmt"file size: {mb} MB"
+    let sizeStr =
+      if size < 1024:
+        fmt"{size} B"
+      elif size < 1024 * 1024:
+        fmt"{size div 1024} KB"
+      else:
+        fmt"{size div (1024 * 1024)} MB"
+    styleKeyValue(sk, "file size", sizeStr)
   else:
-    echo "file size: 0 B"
+    styleKeyValue(sk, "file size", "0 B")

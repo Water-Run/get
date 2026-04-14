@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.2.0"
+version       = "1.0.0"
 author        = "Water-Run"
 description   = "get -- get anything from your computer"
 license       = "AGPL-3.0-or-later"
@@ -18,4 +18,4 @@ requires "regex >= 0.25.0"
 # Tasks
 
 task test, "Run all tests":
-  exec "nim c -r --path:src test.nim"
+  exec "nimble c -r --path:src test.nim"

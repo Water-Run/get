@@ -20,6 +20,7 @@
 
 import std/[strformat, strutils, times, os]
 
+import style
 import utils
 
 # ---------------------------------------------------------------------------
@@ -140,10 +141,11 @@ proc cleanLog*(): int =
   except CatchableError:
     result = 0
 
-## Prints a summary of the log state to stdout.
+## Prints a summary of the log state using the active output style.
 ##
 ## :param logEnabled: Whether logging is enabled.
 ## :param maxEntries: Configured max log entries (0 = unlimited).
+## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -151,28 +153,29 @@ proc cleanLog*(): int =
 ##     discard
 proc displayLogInfo*(
   logEnabled: bool,
-  maxEntries: int
+  maxEntries: int,
+  sk: StyleKind = skSimp
 ) =
   let path = getLogFilePath()
   let status =
     if logEnabled: "enabled" else: "disabled"
-  echo fmt"log: {status}"
-  echo "max entries: " &
-    formatIntOrDisable(maxEntries)
-  echo fmt"file: {path}"
+  styleKeyValue(sk, "log", status)
+  styleKeyValue(sk, "max entries",
+    formatIntOrDisable(maxEntries))
+  styleKeyValue(sk, "file", path)
   if fileExists(path):
     let content = readFile(path)
     let entries = implCountEntries(content)
-    echo fmt"entries: {entries}"
+    styleKeyValue(sk, "entries", $entries)
     let size = getFileSize(path)
-    if size < 1024:
-      echo fmt"file size: {size} B"
-    elif size < 1024 * 1024:
-      let kb = size div 1024
-      echo fmt"file size: {kb} KB"
-    else:
-      let mb = size div (1024 * 1024)
-      echo fmt"file size: {mb} MB"
+    let sizeStr =
+      if size < 1024:
+        fmt"{size} B"
+      elif size < 1024 * 1024:
+        fmt"{size div 1024} KB"
+      else:
+        fmt"{size div (1024 * 1024)} MB"
+    styleKeyValue(sk, "file size", sizeStr)
   else:
-    echo "entries: 0"
-    echo "file size: 0 B"
+    styleKeyValue(sk, "entries", "0")
+    styleKeyValue(sk, "file size", "0 B")

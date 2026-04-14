@@ -27,6 +27,7 @@ when defined(windows):
   import std/base64
 
 import exec
+import style
 import utils
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,11 @@ const DEFAULT_LOG_MAX_ENTRIES* = 1000
 ## Default output style (simp | std | vivid).
 const DEFAULT_STYLE* = "std"
 
+## Default external-display flag.  When true, bat and mdcat are
+## used for syntax-highlighted and Markdown output rendering in
+## std and vivid modes.
+const DEFAULT_EXTERNAL_DISPLAY* = true
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -102,6 +108,7 @@ type
     cacheMaxEntries*: int            ## Max cached entries. 0=unlimited.
     logMaxEntries*: int              ## Max log entries. 0=unlimited.
     style*: string                   ## Output style: simp, std, vivid.
+    externalDisplay*: bool           ## Use bat/mdcat for output rendering.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -289,7 +296,8 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
     "logMaxEntries":   cfg.logMaxEntries,
-    "style":           cfg.style
+    "style":           cfg.style,
+    "externalDisplay": cfg.externalDisplay
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] = %cfg.commandPattern.get
@@ -337,7 +345,10 @@ proc implJsonToConfig(
       node{"logMaxEntries"}.getInt(
         defaults.logMaxEntries),
     style:
-      node{"style"}.getStr(defaults.style)
+      node{"style"}.getStr(defaults.style),
+    externalDisplay:
+      node{"externalDisplay"}.getBool(
+        defaults.externalDisplay)
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and cmdNode.kind == JString and
@@ -382,7 +393,8 @@ func defaultConfig*(): Config =
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
-    style:           DEFAULT_STYLE
+    style:           DEFAULT_STYLE,
+    externalDisplay: DEFAULT_EXTERNAL_DISPLAY
   )
 
 # ---------------------------------------------------------------------------
@@ -488,47 +500,58 @@ proc saveConfig*(cfg: Config) =
 # Public API — display
 # ---------------------------------------------------------------------------
 
-## Prints every configuration option to stdout.  The API key is
-## masked with asterisks.  Integer options that support disabling
-## show "false" when the value is zero.
+## Prints every configuration option to stdout using the active
+## output style.  The API key is masked with asterisks.  Integer
+## options that support disabling show "false" when the value is
+## zero.
+##
+## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     # Illustrative — produces console output.
 ##     discard
-proc displayConfig*() =
+proc displayConfig*(sk: StyleKind = skSimp) =
   let cfg = loadConfig()
   let key = loadKey()
   let keyDisplay =
     if key.isSome: maskString(key.get) else: ""
   let cmdPat =
     if cfg.commandPattern.isSome:
-      cfg.commandPattern.get else: ""
+      cfg.commandPattern.get
+    else:
+      fmt"(default: built-in)"
   let sysPmt =
     if cfg.systemPrompt.isSome:
       cfg.systemPrompt.get else: ""
-  echo fmt"key = {keyDisplay}"
-  echo fmt"url = {cfg.url}"
-  echo fmt"model = {cfg.model}"
-  echo fmt"manual-confirm = {cfg.manualConfirm}"
-  echo fmt"double-check = {cfg.doubleCheck}"
-  echo fmt"instance = {cfg.instance}"
-  echo "timeout = " & formatIntOrDisable(cfg.timeout)
-  echo "max-token = " &
-    formatIntOrDisable(cfg.maxToken)
-  echo fmt"command-pattern = {cmdPat}"
-  echo fmt"system-prompt = {sysPmt}"
-  echo fmt"shell = {cfg.shell}"
-  echo fmt"log = {cfg.log}"
-  echo fmt"hide-process = {cfg.hideProcess}"
-  echo fmt"cache = {cfg.cache}"
-  echo "cache-expiry = " &
-    formatIntOrDisable(cfg.cacheExpiry)
-  echo "cache-max-entries = " &
-    formatIntOrDisable(cfg.cacheMaxEntries)
-  echo "log-max-entries = " &
-    formatIntOrDisable(cfg.logMaxEntries)
-  echo fmt"style = {cfg.style}"
+  styleKeyValue(sk, "key", keyDisplay)
+  styleKeyValue(sk, "url", cfg.url)
+  styleKeyValue(sk, "model", cfg.model)
+  styleKeyValue(sk, "manual-confirm",
+    $cfg.manualConfirm)
+  styleKeyValue(sk, "double-check",
+    $cfg.doubleCheck)
+  styleKeyValue(sk, "instance", $cfg.instance)
+  styleKeyValue(sk, "timeout",
+    formatIntOrDisable(cfg.timeout))
+  styleKeyValue(sk, "max-token",
+    formatIntOrDisable(cfg.maxToken))
+  styleKeyValue(sk, "command-pattern", cmdPat)
+  styleKeyValue(sk, "system-prompt", sysPmt)
+  styleKeyValue(sk, "shell", cfg.shell)
+  styleKeyValue(sk, "log", $cfg.log)
+  styleKeyValue(sk, "hide-process",
+    $cfg.hideProcess)
+  styleKeyValue(sk, "cache", $cfg.cache)
+  styleKeyValue(sk, "cache-expiry",
+    formatIntOrDisable(cfg.cacheExpiry))
+  styleKeyValue(sk, "cache-max-entries",
+    formatIntOrDisable(cfg.cacheMaxEntries))
+  styleKeyValue(sk, "log-max-entries",
+    formatIntOrDisable(cfg.logMaxEntries))
+  styleKeyValue(sk, "style", cfg.style)
+  styleKeyValue(sk, "external-display",
+    $cfg.externalDisplay)
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -594,6 +617,7 @@ proc setConfigOption*(name: string, value: string) =
       if safetyWarn.len > 0:
         stderr.writeLine(safetyWarn)
     else:
+      # Reset to none — runtime will use the default.
       cfg.commandPattern = none(string)
   of "system-prompt":
     if value.len > 0:
@@ -629,6 +653,9 @@ proc setConfigOption*(name: string, value: string) =
           fmt"invalid value '{value}' for 'style':" &
           " expected 'simp', 'std', or 'vivid'")
       cfg.style = lower
+  of "external-display":
+    cfg.externalDisplay = implParseBool(
+      value, name, DEFAULT_EXTERNAL_DISPLAY)
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")
@@ -639,27 +666,28 @@ proc setConfigOption*(name: string, value: string) =
 # ---------------------------------------------------------------------------
 
 ## Checks whether key, url, and model are all configured.  Only
-## prints missing items; when all present prints a single "ok" line.
+## prints missing items; when all present returns true.
 ##
+## :param sk: The active output style.
 ## :returns: true when all three are present.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     # Illustrative — requires filesystem and console.
 ##     discard
-proc checkReady*(): bool =
+proc checkReady*(sk: StyleKind = skSimp): bool =
   let cfg = loadConfig()
   let key = loadKey()
   var allOk = true
   if key.isNone:
-    echo "key: not set"
+    styleKeyValue(sk, "key", "not set")
     allOk = false
   if cfg.url.len == 0:
-    echo "url: not set"
+    styleKeyValue(sk, "url", "not set")
     allOk = false
   if cfg.model.len == 0:
-    echo "model: not set"
+    styleKeyValue(sk, "model", "not set")
     allOk = false
   if not allOk:
-    echo "not ready."
+    styleError(sk, "not ready.")
   result = allOk

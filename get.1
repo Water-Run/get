@@ -1,0 +1,840 @@
+.\" get.1 — manual page for get(1)
+.\"
+.\" Author:  WaterRun
+.\" GitHub:  https://github.com/Water-Run/get
+.\" License: AGPL-3.0
+.\"
+.TH GET 1 "2026-04-14" "get 1.0.0" "User Commands"
+.\"
+.\" ====================================================================
+.SH NAME
+get \- get anything from your computer using natural language
+.\"
+.\" ====================================================================
+.SH SYNOPSIS
+.B get
+.RI \(dq query \(dq
+.RI [ flags ]
+.br
+.B get set
+.I option
+.RI [ value ]
+.br
+.B get config
+.RI [ \-\-reset | \-\- option ]
+.br
+.B get cache
+.RI [ \-\-clean | "\-\-unset \(dq" query \(dq ]
+.br
+.B get log
+.RI [ \-\-clean ]
+.br
+.B get get
+.RI [ \-\-intro | \-\-version | \-\-license | \-\-github ]
+.br
+.B get version
+.br
+.B get isok
+.br
+.B get help
+.\"
+.\" ====================================================================
+.SH DESCRIPTION
+.B get
+is a small command-line tool that uses a large language model (LLM) to
+generate shell commands from natural-language queries and executes them
+to retrieve information from your device.
+It is designed to perform
+.B read-only
+operations only.
+Every generated command passes through multiple safety layers before
+execution.
+.PP
+.B get
+is compatible with any OpenAI-API-compatible endpoint and ships with
+bundled high-performance command-line tools
+.RB ( rg ,
+.BR fd ,
+.BR sg ,
+.BR pmc ,
+.BR treepp / tree ,
+.BR tokei ,
+.BR lua ,
+.BR bat ,
+.BR mdcat )
+that are automatically available to generated commands.
+A lightweight edition without the bundled
+.I bin/
+directory is also available; in that case only system-installed tools
+are used.
+.\"
+.\" ====================================================================
+.SH COMMANDS
+.\"
+.\" --------------------------------------------------------------------
+.SS "Query (default)"
+.BI "get \(dq" "query" "\(dq [" "flags" "]"
+.PP
+Sends
+.I query
+to the configured LLM, which generates a shell command.
+The command is validated, optionally double-checked and confirmed, then
+executed.
+The output is either displayed directly or interpreted by the LLM,
+depending on the model's annotation.
+.PP
+See
+.B QUERY FLAGS
+below for per-invocation overrides.
+.\"
+.\" --------------------------------------------------------------------
+.SS set
+.BI "get set " "option" " [" "value" "]"
+.PP
+Sets a single configuration option.
+Omitting
+.I value
+resets the option to its default (for booleans and integers) or clears
+it (for strings).
+See
+.B SET OPTIONS
+for the full list.
+.\"
+.\" --------------------------------------------------------------------
+.SS config
+.B get config
+.PP
+Displays all current configuration values.
+.TP
+.B \-\-reset
+Resets all configuration to default values and clears the stored API key.
+.TP
+.BI \-\- option
+Displays the current value of a single option, where
+.I option
+is any name from the
+.B SET OPTIONS
+table (e.g.\&
+.BR \-\-model ,
+.BR \-\-timeout ).
+The
+.B \-\-key
+flag shows the key status with the value masked.
+.\"
+.\" --------------------------------------------------------------------
+.SS cache
+.B get cache
+.PP
+Displays cache status: whether caching is enabled, entry count,
+configured limits, and file location.
+.TP
+.B \-\-clean
+Removes all cached entries.
+.TP
+.BI "\-\-unset \(dq" query \(dq
+Removes all cache entries whose query text matches
+.I query
+(case-insensitive).
+.\"
+.\" --------------------------------------------------------------------
+.SS log
+.B get log
+.PP
+Displays log status: whether logging is enabled, configured maximum
+entries, entry count, file location, and file size.
+.TP
+.B \-\-clean
+Removes all entries from the log file.
+.\"
+.\" --------------------------------------------------------------------
+.SS get
+.B get get
+.PP
+Displays all application information (version, introduction, license,
+GitHub URL).
+.TP
+.B \-\-intro
+Displays the one-line introduction.
+.TP
+.B \-\-version
+Displays the version string (equivalent to
+.BR "get version" ).
+.TP
+.B \-\-license
+Displays the SPDX license identifier.
+.TP
+.B \-\-github
+Displays the GitHub repository URL.
+.\"
+.\" --------------------------------------------------------------------
+.SS version
+.B get version
+.PP
+Prints the version string and exits.
+.\"
+.\" --------------------------------------------------------------------
+.SS isok
+.B get isok
+.PP
+Verifies that the current configuration is ready for use.
+Checks that the API key, URL, and model are all set, then sends a
+lightweight probe request to the LLM endpoint.
+Exits with code 0 on success, 1 on failure.
+.\"
+.\" --------------------------------------------------------------------
+.SS help
+.B get help
+.PP
+Displays comprehensive usage help.
+Also triggered by
+.B \-\-help
+and
+.BR \-h .
+.\"
+.\" ====================================================================
+.SH QUERY FLAGS
+Per-invocation flags that override the persisted configuration for a
+single query.
+These flags are placed after the query string.
+.TP
+.B \-\-no\-cache
+Bypass the cache for this query.
+.TP
+.B \-\-cache
+Force cache lookup and storage for this query.
+.TP
+.B \-\-manual\-confirm
+Prompt for confirmation before executing the generated command.
+.TP
+.B \-\-no\-manual\-confirm
+Skip the confirmation prompt.
+.TP
+.B \-\-double\-check
+Enable the second LLM safety review.
+.TP
+.B \-\-no\-double\-check
+Skip the second LLM safety review.
+.TP
+.B \-\-instance
+Use fast single-call mode; output is always shown directly.
+.TP
+.B \-\-no\-instance
+Use multi-step mode with output-mode detection.
+.TP
+.B \-\-hide\-process
+Suppress intermediate output (progress, commands).
+.TP
+.B \-\-no\-hide\-process
+Show intermediate output.
+.TP
+.BI \-\-model " name"
+Override the LLM model for this query.
+.TP
+.BI \-\-style " mode"
+Override the output style for this query.
+.I mode
+is one of
+.BR simp ,
+.BR std ,
+or
+.BR vivid .
+.TP
+.BI \-\-timeout " seconds"
+Override the request timeout for this query.
+.\"
+.\" ====================================================================
+.SH SET OPTIONS
+The following options can be configured with
+.BR "get set" .
+Integer options accept
+.B false
+to disable the feature entirely (equivalent to 0).
+An empty value resets the option to its default.
+.TP
+.BI "key " string
+LLM API key.
+Stored using platform-specific secure storage (Linux: file permissions
+0600; Windows: DPAPI).
+Default: empty.
+.TP
+.BI "url " URL
+LLM API endpoint URL.
+Default:
+.IR https://api.poe.com/v1 .
+.TP
+.BI "model " string
+LLM model name.
+Default:
+.IR gpt\-5.3\-codex .
+.TP
+.BI "manual\-confirm " bool
+Whether to require manual confirmation before executing generated
+commands.
+Default:
+.IR false .
+.TP
+.BI "double\-check " bool
+Whether to invoke the model for a second safety review of the generated
+command.
+Default:
+.IR true .
+.TP
+.BI "instance " bool
+Whether to ask the model to reply as quickly as possible (single-call
+mode; output is always shown directly).
+Default:
+.IR false .
+.TP
+.BI "timeout " "integer | false"
+Timeout for a single API request, in seconds.
+Default:
+.IR 300 .
+.TP
+.BI "max\-token " "integer | false"
+Maximum token consumption per request.
+Default:
+.IR 20480 .
+.TP
+.BI "command\-pattern " regex
+Regex pattern matching forbidden commands; execution is rejected if the
+generated command matches.
+Default: built-in blocklist (see
+.BR SAFETY ).
+.TP
+.BI "system\-prompt " string
+Custom system prompt appended to the LLM context.
+Default: empty.
+.TP
+.BI "shell " string
+The shell used to execute commands.
+Default:
+.I powershell
+on Windows;
+.I bash
+on Linux.
+.TP
+.BI "log " bool
+Whether to log each request and execution.
+Default:
+.IR true .
+.TP
+.BI "hide\-process " bool
+Whether to hide intermediate steps and only output the final result.
+Default:
+.IR false .
+.TP
+.BI "cache " bool
+Whether to enable response caching.
+Default:
+.IR true .
+.TP
+.BI "cache\-expiry " "integer | false"
+Number of days before a cache entry expires.
+Default:
+.IR 30 .
+.TP
+.BI "cache\-max\-entries " "integer | false"
+Maximum number of entries retained in the cache.
+Default:
+.IR 1000 .
+.TP
+.BI "log\-max\-entries " "integer | false"
+Maximum number of entries retained in the log.
+Default:
+.IR 1000 .
+.TP
+.BI "style " "simp | std | vivid"
+Output style.
+See
+.BR "OUTPUT STYLES" .
+Default:
+.IR std .
+.TP
+.BI "external\-display " bool
+Whether to use
+.BR bat (1)
+and
+.BR mdcat (1)
+for syntax-highlighted and Markdown output rendering in
+.B std
+and
+.B vivid
+modes.
+Default:
+.IR true .
+.\"
+.\" ====================================================================
+.SH SAFETY
+.B get
+is designed to perform read-only operations only.
+The LLM is prompted with strict read-only constraints, and every
+generated command undergoes multiple layers of validation before
+execution:
+.TP
+.B 1. Dangerous-command check
+A built-in safety check rejects commands containing known destructive
+operations before they can execute.
+This check runs independently of any
+.B command\-pattern
+configuration.
+.IP
+Blocked commands include:
+.BR rm ,
+.BR rmdir ,
+.BR del ,
+.BR rd ,
+.BR erase ,
+.BR mv ,
+.BR move ,
+.BR cp ,
+.BR copy ,
+.BR mkdir ,
+.BR md ,
+.BR touch ,
+.BR chmod ,
+.BR chown ,
+.BR chgrp ,
+.BR mkfs ,
+.BR dd ,
+.BR format ,
+.BR fdisk ,
+.BR kill ,
+.BR killall ,
+.BR pkill ,
+.BR shutdown ,
+.BR reboot ,
+.BR halt ,
+.BR poweroff ,
+.BR passwd ,
+.BR useradd ,
+.BR userdel ,
+.BR usermod ,
+.BR groupadd ,
+.BR groupdel ,
+.BR Set\-Content ,
+.BR New\-Item ,
+.BR Remove\-Item ,
+.BR Move\-Item ,
+.BR Rename\-Item ,
+.BR Clear\-Content ,
+and
+.BR Add\-Content .
+.TP
+.B 2. Double-check
+(Default: enabled.)
+A second LLM safety review of the generated command.
+The reviewer model assesses whether the command is strictly read-only
+and safe, and may revise the command or reject it outright.
+.TP
+.B 3. Command-pattern validation
+Optional regex matching via the
+.B command\-pattern
+setting.
+When a custom pattern is set,
+.B get
+checks whether the pattern adequately covers common dangerous commands
+and displays a warning if not.
+.TP
+.B 4. Manual confirmation
+Optional interactive y/N prompt via the
+.B manual\-confirm
+setting.
+.\"
+.\" ====================================================================
+.SH MODEL STRENGTH
+.B get
+executes shell commands generated by the LLM on your device.
+A sufficiently capable model is the foundation of safety.
+At startup,
+.B get
+checks the configured model name against a built-in whitelist of known
+high-performance models and displays a warning if the model is not
+recognised.
+.PP
+Known strong models include:
+GPT 5+ (including CodeX variants),
+Claude Opus/Sonnet 3.5+,
+Claude 3.7+ (by version),
+Gemini 3+,
+Grok 4+,
+GLM 4.7+,
+MiniMax 2.7+,
+DeepSeek (full versions),
+and OpenAI o-series 3+.
+Reduced-capability variants (Mini, Nano, Lite, Haiku, Flash, etc.) and
+unsupported families trigger the warning.
+The warning is advisory and does not block execution.
+.PP
+Model names are normalised before comparison \(em case differences and
+underscores vs hyphens are handled transparently
+.RB ( Claude_Opus_4.6
+and
+.B claude\-opus\-4.6
+are equivalent).
+.\"
+.\" ====================================================================
+.SH OUTPUT STYLES
+.B get
+supports three output styles, configured via
+.BR "get set style" :
+.TP
+.B simp
+Plain text, no formatting.
+Sections separated by blank lines.
+.TP
+.B std
+Dividers and basic ANSI colours (default).
+.TP
+.B vivid
+Animated spinners, bold colours, Markdown rendering via
+.BR mdcat (1).
+This mode is experimental.
+It requires the bundled
+.B mdcat
+binary for Markdown rendering; if unavailable, a warning is shown
+suggesting
+.BR "get set style std" .
+An experimental notice is displayed on each invocation.
+.PP
+When
+.B external\-display
+is enabled (default), the
+.BR bat (1)
+binary is used for syntax-highlighted output and
+.BR mdcat (1)
+is used for Markdown rendering in
+.B std
+and
+.B vivid
+modes.
+If the required binaries are not found in the bundled
+.I bin/
+directory, a warning is emitted and output falls back to plain text.
+.\"
+.\" ====================================================================
+.SH OUTPUT MODE
+By default,
+.B get
+instructs the LLM to annotate its response with either
+.B "<!-- DIRECT -->"
+or
+.BR "<!-- INTERPRET -->" .
+Most queries produce direct output \(em the raw command result is shown
+without an additional LLM call.
+Only when the output needs summarisation or analysis does
+.B get
+invoke the LLM again.
+In
+.B instance
+mode, output is always shown directly.
+.\"
+.\" ====================================================================
+.SH CACHING
+.B get
+caches the final output of each query keyed by a hash of the query
+text and execution context (working directory, shell, model, instance
+mode, system prompt, and command pattern).
+When the same query is run under the same context, the cached result is
+returned immediately without making any API calls.
+.PP
+Before storing a new cache entry,
+.B get
+sends a lightweight LLM request to determine whether the result is
+stable (cacheable) or volatile (not cacheable).
+Volatile results \(em such as current time, CPU usage, or running
+processes \(em are not cached even when caching is enabled.
+.PP
+To bypass the cache for a single query, use the
+.B \-\-no\-cache
+flag:
+.PP
+.RS
+.B get \(dqyour query\(dq \-\-no\-cache
+.RE
+.PP
+Cache parameters can be tuned with
+.BR "get set cache\-expiry" ,
+.BR "get set cache\-max\-entries" ,
+and
+.BR "get set cache" .
+See
+.B SET OPTIONS
+for details.
+.\"
+.\" ====================================================================
+.SH LOGGING
+.B get
+logs each query execution (query text, generated command, exit code,
+and output preview) to a local file.
+When the entry count exceeds the
+.B log\-max\-entries
+limit (unless disabled with
+.BR false ),
+the oldest entries are automatically removed.
+.PP
+Logging parameters can be tuned with
+.B "get set log\-max\-entries"
+and
+.BR "get set log" .
+.\"
+.\" ====================================================================
+.SH BUNDLED TOOLS
+.B get
+ships with several high-performance command-line tools in the
+.I bin/
+directory.
+These tools are automatically available to generated commands via PATH
+prepending.
+.TP
+.B rg
+ripgrep \(em ultra-fast regex search in files.
+.TP
+.B fd
+Fast file/directory finder.
+.TP
+.B sg
+ast-grep \(em AST-level structural code search.
+.TP
+.B pmc
+pack-my-code \(em code context packaging for LLM prompts.
+.TP
+.BR treepp " (Windows) / " tree " (Linux)"
+tree++ (Windows) / classic Unix tree (Linux) \(em directory tree
+listing.
+.TP
+.B tokei
+Code statistics (lines of code by language).
+.TP
+.B lua
+Lua 5.x interpreter for calculations and text processing.
+.TP
+.B bat
+Syntax-highlighting cat replacement.
+.TP
+.B mdcat
+Terminal Markdown renderer.
+.PP
+The LLM is made aware of these tools and will prefer them when they fit
+the task.
+Write-mode flags on bundled tools (e.g.\&
+.BR "pmc \-o" ,
+.BR "treepp /O" )
+are explicitly forbidden in the prompt.
+.\"
+.\" ====================================================================
+.SH SYSTEM REQUIREMENTS
+.B get
+requires a 64-bit platform (amd64 or arm64) running Windows 10+ or
+Linux with kernel 6.0+.
+A startup warning is shown if the runtime environment does not meet
+these requirements.
+.\"
+.\" ====================================================================
+.SH STATIC BUILDS
+To produce a fully statically linked binary (no dynamic library
+dependencies), build with the
+.B staticBuild
+flag.
+This requires static OpenSSL libraries to be available on the system:
+.PP
+.RS
+.B nim c \-d:release \-d:staticBuild src/get.nim
+.RE
+.\"
+.\" ====================================================================
+.SH ENVIRONMENT
+.TP
+.B GET_TEST_KEY
+API key used by the test suite for live LLM connectivity tests.
+.TP
+.B GET_TEST_URL
+API endpoint URL used by the test suite.
+.TP
+.B GET_TEST_MODEL
+Model name used by the test suite.
+.PP
+These variables are only relevant when running the test suite; they are
+not used during normal operation.
+.\"
+.\" ====================================================================
+.SH FILES
+.TP
+.I ~/.config/get/config.json
+Configuration file (Linux).
+.TP
+.I ~/.config/get/key
+API key storage file (Linux, mode 0600).
+.TP
+.I ~/.config/get/get.log
+Append-only execution log (Linux).
+.TP
+.I ~/.config/get/cache.json
+Response cache file (Linux).
+.TP
+.I %APPDATA%/get/config.json
+Configuration file (Windows).
+.TP
+.I %APPDATA%/get/key
+API key storage file (Windows, DPAPI-encrypted).
+.TP
+.I %APPDATA%/get/get.log
+Append-only execution log (Windows).
+.TP
+.I %APPDATA%/get/cache.json
+Response cache file (Windows).
+.TP
+.IR <exe>/bin/ " or " <exe>/src/bin/
+Bundled binary tools directory.
+The production layout
+.RI ( <exe>/bin/ )
+is checked first, then the development layout
+.RI ( <exe>/src/bin/ ).
+.\"
+.\" ====================================================================
+.SH EXIT STATUS
+.TP
+.B 0
+Successful completion.
+.TP
+.B 1
+Configuration error, LLM communication failure, safety check rejection,
+or general error.
+.TP
+.B 130
+Interrupted by Ctrl+C (SIGINT).
+.TP
+.I N
+When a generated command exits with a non-zero code, that code is
+propagated as the exit status of
+.BR get .
+.\"
+.\" ====================================================================
+.SH EXAMPLES
+Retrieve system version information:
+.PP
+.RS
+.B get \(dqsystem version\(dq
+.RE
+.PP
+List code files in the current directory:
+.PP
+.RS
+.B get \(dqcode in the directory\(dq
+.RE
+.PP
+Fetch information from a URL:
+.PP
+.RS
+.B get \(dqthe latest get version at https://github.com/Water\-Run/get\(dq
+.RE
+.PP
+Bypass the cache for a single query:
+.PP
+.RS
+.B get \(dqdisk usage\(dq \-\-no\-cache
+.RE
+.PP
+Override the model and style for a single query:
+.PP
+.RS
+.B get \(dqlist files\(dq \-\-model gpt\-5.3\-codex \-\-style vivid
+.RE
+.PP
+Configure the API key:
+.PP
+.RS
+.B get set key sk\-your\-api\-key
+.RE
+.PP
+Configure the API endpoint:
+.PP
+.RS
+.B get set url https://api.openai.com/v1
+.RE
+.PP
+Unset the API key:
+.PP
+.RS
+.B get set key
+.RE
+.PP
+Disable the request timeout:
+.PP
+.RS
+.B get set timeout false
+.RE
+.PP
+Change the output style:
+.PP
+.RS
+.B get set style vivid
+.RE
+.PP
+View a single configuration option:
+.PP
+.RS
+.B get config \-\-model
+.RE
+.PP
+Reset all configuration to defaults:
+.PP
+.RS
+.B get config \-\-reset
+.RE
+.PP
+Clear the cache:
+.PP
+.RS
+.B get cache \-\-clean
+.RE
+.PP
+Remove a specific cached query:
+.PP
+.RS
+.B get cache \-\-unset \(dqsystem version\(dq
+.RE
+.PP
+Clear the log:
+.PP
+.RS
+.B get log \-\-clean
+.RE
+.PP
+Verify configuration readiness:
+.PP
+.RS
+.B get isok
+.RE
+.\"
+.\" ====================================================================
+.SH BUGS
+Report bugs at
+.UR https://github.com/Water\-Run/get/issues
+.UE .
+.\"
+.\" ====================================================================
+.SH AUTHOR
+Written by WaterRun.
+.\"
+.\" ====================================================================
+.SH LICENSE
+.B get
+is free software licensed under the GNU Affero General Public License
+version 3 or later
+.RB ( AGPL\-3.0\-or\-later ).
+See
+.UR https://www.gnu.org/licenses/agpl\-3.0.html
+.UE
+for the full licence text.
+.\"
+.\" ====================================================================
+.SH SEE ALSO
+.BR bash (1),
+.BR powershell (1),
+.BR rg (1),
+.BR fd (1),
+.BR bat (1),
+.BR mdcat (1),
+.BR tokei (1),
+.BR tree (1),
+.BR lua (1)

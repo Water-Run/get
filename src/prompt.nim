@@ -192,6 +192,14 @@ func buildQueryMessages*(
     "- For AST-level code search: use `sg` " &
     "(ast-grep).")
   sysLines.add(
+    "- For syntax-highlighted file viewing: " &
+    "use `bat` (e.g. bat --style=plain " &
+    "--paging=never <file>).")
+  sysLines.add(
+    "- For Markdown rendering in terminal: " &
+    "use `mdcat` (e.g. mdcat --no-pager " &
+    "<file>).")
+  sysLines.add(
     "- If the user's request clearly requires " &
     "a third-party library or tool that is not " &
     "available, explain what is needed rather " &
@@ -211,8 +219,12 @@ func buildQueryMessages*(
   if pattern.isSome:
     sysLines.add("")
     sysLines.add(
-      "NOTE: The generated command must match the" &
-      " following regex pattern: " & pattern.get)
+      "NOTE: The generated command MUST NOT match" &
+      " the following forbidden-command regex " &
+      "pattern: " & pattern.get &
+      ". If your command would match this " &
+      "pattern, respond with a plain text " &
+      "explanation instead.")
   let sysContent = sysLines.join("\n")
   result = @[
     LlmMessage(role: "system", content: sysContent),

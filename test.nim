@@ -14,7 +14,8 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[os, options, strutils, times, unittest]
+import std/[os, options, strformat, strutils, times,
+            unittest]
 
 import utils
 import cache
@@ -23,6 +24,7 @@ import exec
 import llm
 import logger
 import prompt
+import style
 import sysinfo
 
 # ---------------------------------------------------------------------------
@@ -42,6 +44,7 @@ suite "utils":
   test "APP constants are non-empty":
     check APP_NAME.len > 0
     check APP_VERSION.len > 0
+    check APP_VERSION == "1.0.0"
     check APP_INTRO.len > 0
     check APP_LICENSE.len > 0
     check APP_GITHUB.len > 0
@@ -92,6 +95,13 @@ ls -la /etc && \
     let d = getBundledBinDir()
     # May be empty in CI environments.
     discard d
+
+  test "DEFAULT_COMMAND_PATTERN is non-empty":
+    check DEFAULT_COMMAND_PATTERN.len > 0
+    check DEFAULT_COMMAND_PATTERN.contains("rm")
+
+  test "DANGEROUS_COMMAND_NAMES has entries":
+    check DANGEROUS_COMMAND_NAMES.len > 0
 
 # ---------------------------------------------------------------------------
 # sysinfo tests
@@ -152,24 +162,58 @@ suite "sysinfo":
 # ---------------------------------------------------------------------------
 
 suite "exec":
-  ## Tests for command-pattern validation and command execution.
+  ## Tests for forbidden-command-pattern validation and command
+  ## execution.
 
-  test "validateCommandPattern matches":
+  test "validateCommandPattern allows safe command":
+    # Pattern blocks "rm", command is "ls" → allowed.
     check validateCommandPattern(
-      "ls -la /etc", "^ls") == true
-    check validateCommandPattern(
-      "cat /etc/hostname", "^ls") == false
+      "ls -la /etc", "\\brm\\b") == true
 
-  test "validateCommandPattern with complex regex":
+  test "validateCommandPattern blocks forbidden":
+    # Pattern blocks "rm", command has "rm" → blocked.
     check validateCommandPattern(
-      "echo hello", "echo|cat") == true
+      "rm -rf /", "\\brm\\b") == false
+
+  test "validateCommandPattern with default pattern":
+    # Default pattern should block "rm".
     check validateCommandPattern(
-      "rm -rf /", "echo|cat") == false
+      "rm -rf /", DEFAULT_COMMAND_PATTERN) == false
+    # Default pattern should allow "ls".
+    check validateCommandPattern(
+      "ls -la", DEFAULT_COMMAND_PATTERN) == true
+    # Default pattern should block "kill".
+    check validateCommandPattern(
+      "kill -9 1234", DEFAULT_COMMAND_PATTERN) == false
+    # Default pattern should allow "rg".
+    check validateCommandPattern(
+      "rg pattern .", DEFAULT_COMMAND_PATTERN) == true
+
+  test "validateCommandPattern complex commands":
+    check validateCommandPattern(
+      "echo hello", DEFAULT_COMMAND_PATTERN) == true
+    check validateCommandPattern(
+      "cat /etc/hostname",
+      DEFAULT_COMMAND_PATTERN) == true
+    check validateCommandPattern(
+      "shutdown -h now",
+      DEFAULT_COMMAND_PATTERN) == false
 
   test "invalid regex raises GetError":
     expect GetError:
       discard validateCommandPattern(
         "test", "[invalid")
+
+  test "checkPatternSafety reports uncovered":
+    # A very narrow pattern should miss some dangers.
+    let warn = checkPatternSafety("\\brm\\b")
+    check warn.len > 0
+    check warn.contains("warning")
+
+  test "checkPatternSafety with default pattern":
+    let warn = checkPatternSafety(
+      DEFAULT_COMMAND_PATTERN)
+    check warn.len == 0
 
   test "executeCommand runs echo":
     let shell = defaultShell()
@@ -204,6 +248,29 @@ suite "exec":
     check res.output.strip() == "ok"
 
 # ---------------------------------------------------------------------------
+# style tests
+# ---------------------------------------------------------------------------
+
+suite "style":
+  ## Tests for style parsing and name conversion.
+
+  test "parseStyle accepts valid styles":
+    check parseStyle("simp") == skSimp
+    check parseStyle("std") == skStd
+    check parseStyle("vivid") == skVivid
+    check parseStyle("STD") == skStd
+    check parseStyle(" vivid ") == skVivid
+
+  test "parseStyle rejects invalid styles":
+    expect GetError:
+      discard parseStyle("invalid")
+
+  test "styleName round-trips":
+    check styleName(skSimp) == "simp"
+    check styleName(skStd) == "std"
+    check styleName(skVivid) == "vivid"
+
+# ---------------------------------------------------------------------------
 # config — pure helpers via public API
 # ---------------------------------------------------------------------------
 
@@ -230,6 +297,8 @@ suite "config defaults":
       DEFAULT_CACHE_MAX_ENTRIES
     check cfg.logMaxEntries ==
       DEFAULT_LOG_MAX_ENTRIES
+    check cfg.externalDisplay ==
+      DEFAULT_EXTERNAL_DISPLAY
 
   test "defaultConfig shell matches platform":
     let cfg = defaultConfig()
@@ -263,7 +332,9 @@ suite "config persistence round-trip":
       cache:           false,
       cacheExpiry:     7,
       cacheMaxEntries: 500,
-      logMaxEntries:   200
+      logMaxEntries:   200,
+      style:           "std",
+      externalDisplay: false
     )
     saveConfig(original)
     let loaded = loadConfig()
@@ -287,6 +358,8 @@ suite "config persistence round-trip":
       original.cacheMaxEntries
     check loaded.logMaxEntries ==
       original.logMaxEntries
+    check loaded.externalDisplay ==
+      original.externalDisplay
     saveConfig(defaultConfig())
 
   test "save and load with none options":
@@ -405,6 +478,15 @@ suite "setConfigOption":
     cfg = loadConfig()
     check cfg.logMaxEntries ==
       DEFAULT_LOG_MAX_ENTRIES
+    saveConfig(defaultConfig())
+
+  test "set external-display":
+    setConfigOption("external-display", "false")
+    var cfg = loadConfig()
+    check cfg.externalDisplay == false
+    setConfigOption("external-display", "true")
+    cfg = loadConfig()
+    check cfg.externalDisplay == true
     saveConfig(defaultConfig())
 
 # ---------------------------------------------------------------------------
@@ -672,6 +754,21 @@ suite "prompt":
     check msgs[0].content.contains("rg")
     check msgs[0].content.contains("fd")
 
+  test "buildQueryMessages includes bat guidance":
+    let info = SysInfo(
+      os: "linux", arch: "amd64",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "bash",
+      shellVersion: "",
+      availableTools: @[],
+      bundledTools: @[],
+      binDir: "")
+    let msgs = buildQueryMessages(
+      info, "test", "bash", false,
+      none(string), none(string))
+    check msgs[0].content.contains("bat")
+    check msgs[0].content.contains("mdcat")
+
   test "buildQueryMessages includes system info":
     let info = SysInfo(
       os: "linux", arch: "amd64",
@@ -712,8 +809,10 @@ suite "prompt":
       binDir: "")
     let msgs = buildQueryMessages(
       info, "test", "bash", false,
-      none(string), some("^ls"))
-    check msgs[0].content.contains("^ls")
+      none(string), some("\\brm\\b"))
+    check msgs[0].content.contains("\\brm\\b")
+    check msgs[0].content.contains(
+      "MUST NOT match")
 
   test "buildDoubleCheckMessages produces 2 msgs":
     let info = SysInfo(
@@ -754,23 +853,24 @@ suite "llm connectivity":
     if apiKey.len == 0 or apiUrl.len == 0 or
         apiModel.len == 0:
       skip()
-    let req = LlmRequest(
-      model: apiModel,
-      messages: @[
-        LlmMessage(
-          role: "system",
-          content: ISOK_SYSTEM_PROMPT),
-        LlmMessage(
-          role: "user",
-          content: ISOK_USER_PROMPT)
-      ],
-      maxTokens: ISOK_MAX_TOKENS
-    )
-    let resp = sendLlmRequest(
-      req,
-      apiUrl,
-      apiKey,
-      timeoutSec  = 30,
-      hideProcess = true
-    )
-    check resp.content.len > 0
+    else:
+      let req = LlmRequest(
+        model: apiModel,
+        messages: @[
+          LlmMessage(
+            role: "system",
+            content: ISOK_SYSTEM_PROMPT),
+          LlmMessage(
+            role: "user",
+            content: ISOK_USER_PROMPT)
+        ],
+        maxTokens: ISOK_MAX_TOKENS
+      )
+      let resp = sendLlmRequest(
+        req,
+        apiUrl,
+        apiKey,
+        timeoutSec  = 30,
+        hideProcess = true
+      )
+      check resp.content.len > 0

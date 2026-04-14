@@ -140,7 +140,24 @@ const BUNDLED_DEFS_LINUX = [
    "text processing, and data formatting. " &
    "NEVER use io.open with write mode or " &
    "os.execute/os.rename/os.remove. " &
-   "Read-only use only.")
+   "Read-only use only."),
+  ("bat",
+   "bat — syntax-highlighting cat replacement. " &
+   "Usage: bat <file> or pipe input via stdin. " &
+   "Key flags: --style=plain (no decorations), " &
+   "--paging=never (disable pager), " &
+   "--color=always (force colour), " &
+   "-l <lang> (set language for highlighting), " &
+   "--line-range <start:end> (show line range). " &
+   "Read-only tool."),
+  ("mdcat",
+   "mdcat — terminal Markdown renderer. " &
+   "Usage: mdcat <file> or pipe Markdown via " &
+   "stdin. " &
+   "Key flags: --no-pager (disable pager). " &
+   "Renders headings, lists, code blocks, and " &
+   "emphasis with terminal formatting. " &
+   "Read-only tool.")
 ]
 
 ## Bundled tool definitions for Windows.
@@ -184,7 +201,22 @@ const BUNDLED_DEFS_WINDOWS = [
    "language). " &
    "Usage: tokei [path]. " &
    "Key flags: -e <pattern>, -t <languages>, " &
-   "-o <format> (json, yaml). Read-only tool.")
+   "-o <format> (json, yaml). Read-only tool."),
+  ("bat",
+   "bat — syntax-highlighting cat replacement. " &
+   "Usage: bat <file> or pipe input via stdin. " &
+   "Key flags: --style=plain (no decorations), " &
+   "--paging=never (disable pager), " &
+   "--color=always (force colour), " &
+   "-l <lang> (set language for highlighting), " &
+   "--line-range <start:end> (show line range). " &
+   "Read-only tool."),
+  ("mdcat",
+   "mdcat — terminal Markdown renderer. " &
+   "Usage: mdcat <file> or pipe Markdown via " &
+   "stdin. " &
+   "Key flags: --no-pager (disable pager). " &
+   "Read-only tool.")
 ]
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,14 @@
 ## warnings, commands, and results are rendered on stderr and
 ## stdout.  The simp mode produces plain unformatted text, std adds
 ## ANSI colours and divider lines, and vivid provides animated
-## spinners and Markdown rendering via the bundled mdcat binary.
+## spinners and bold colours.
+##
+## When external-display is enabled (default), bat is used for
+## syntax-highlighted output and mdcat is used for Markdown
+## rendering in std and vivid modes.  A simp-mode contradiction
+## warning is emitted when external-display is enabled but the
+## style is simp.  Missing binaries trigger a warning and graceful
+## fallback to plain text.
 ##
 ## All styled output directed at progress or status goes to stderr;
 ## final results go to stdout.  The module exposes pure or
@@ -33,7 +40,7 @@ type
   StyleKind* = enum
     skSimp  ## Plain text, no formatting.
     skStd   ## Dividers and basic ANSI colours.
-    skVivid ## Animated spinners, colours, mdcat rendering.
+    skVivid ## Animated spinners, colours, external rendering.
 
 # ---------------------------------------------------------------------------
 # Constants — ANSI escape codes
@@ -134,7 +141,7 @@ func styleName*(kind: StyleKind): string =
   of skVivid: result = "vivid"
 
 # ---------------------------------------------------------------------------
-# Public API — mdcat availability
+# Public API — external tool availability
 # ---------------------------------------------------------------------------
 
 ## Checks whether the bundled mdcat binary is available.
@@ -153,6 +160,24 @@ proc isMdcatAvailable*(binDir: string): bool =
     let path = binDir / "mdcat.exe"
   else:
     let path = binDir / "mdcat"
+  result = fileExists(path)
+
+## Checks whether the bundled bat binary is available.
+##
+## :param binDir: Absolute path to the bundled bin directory.
+## :returns: true when bat exists and is executable.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     # Illustrative — depends on filesystem.
+##     discard
+proc isBatAvailable*(binDir: string): bool =
+  if binDir.len == 0:
+    return false
+  when defined(windows):
+    let path = binDir / "bat.exe"
+  else:
+    let path = binDir / "bat"
   result = fileExists(path)
 
 ## Renders a text string through mdcat for Markdown display.
@@ -186,6 +211,76 @@ proc renderMarkdown*(
       result = text
   except OSError, IOError:
     result = text
+
+## Renders a text string through bat for syntax-highlighted
+## display.  Falls back to plain output when bat is unavailable.
+##
+## :param text: The text to render.
+## :param binDir: Absolute path to the bundled bin directory.
+## :returns: The rendered text, or the original text on failure.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     # Illustrative — requires bat binary.
+##     discard
+proc renderWithBat*(
+  text: string,
+  binDir: string
+): string =
+  if not isBatAvailable(binDir):
+    return text
+  when defined(windows):
+    let batPath = binDir / "bat.exe"
+  else:
+    let batPath = binDir / "bat"
+  try:
+    let (output, exitCode) = execCmdEx(
+      fmt"{batPath} --style=plain --paging=never" &
+      " --color=always",
+      input = text)
+    if exitCode == 0 and output.len > 0:
+      result = output
+    else:
+      result = text
+  except OSError, IOError:
+    result = text
+
+# ---------------------------------------------------------------------------
+# Public API — external display warnings
+# ---------------------------------------------------------------------------
+
+## Emits a warning when external-display is enabled in simp mode,
+## since simp mode produces plain text and external tools have no
+## effect.
+##
+## :param sk: The active output style.
+## :param extDisplay: Whether external-display is enabled.
+proc styleExternalDisplayCheck*(
+  sk: StyleKind,
+  extDisplay: bool,
+  binDir: string
+) =
+  if not extDisplay:
+    return
+  if sk == skSimp:
+    stderr.writeLine(
+      "warning: external-display has no " &
+      "effect in simp mode")
+    return
+  # Check for missing binaries and warn.
+  var missing: seq[string] = @[]
+  if not isBatAvailable(binDir):
+    missing.add("bat")
+  if not isMdcatAvailable(binDir):
+    missing.add("mdcat")
+  if missing.len > 0:
+    stderr.writeLine(
+      ANSI_YELLOW &
+      "warning: external display tool(s) " &
+      "not found in bin/: " &
+      missing.join(", ") & ". " &
+      "Falling back to plain text." &
+      ANSI_RESET)
 
 # ---------------------------------------------------------------------------
 # Public API — styled stderr output
@@ -241,6 +336,22 @@ proc styleError*(kind: StyleKind, text: string) =
     stderr.writeLine(
       ANSI_RED & ANSI_BOLD & text & ANSI_RESET)
 
+## Writes a success message to stderr with style-appropriate
+## formatting.
+##
+## :param kind: The active output style.
+## :param text: The success message text.
+proc styleSuccess*(kind: StyleKind, text: string) =
+  case kind
+  of skSimp:
+    stderr.writeLine(text)
+  of skStd:
+    stderr.writeLine(
+      ANSI_GREEN & text & ANSI_RESET)
+  of skVivid:
+    stderr.writeLine(
+      ANSI_GREEN & ANSI_BOLD & text & ANSI_RESET)
+
 ## Writes a command display to stderr with style-appropriate
 ## formatting.
 ##
@@ -284,29 +395,6 @@ proc styleSeparator*(
   of skVivid:
     discard
 
-## Writes the vivid-mode experimental warning to stderr.  Only
-## emits output when the style is vivid.
-##
-## :param kind: The active output style.
-proc styleVividNotice*(kind: StyleKind) =
-  if kind == skVivid:
-    stderr.writeLine(
-      ANSI_YELLOW & ANSI_BOLD &
-      "warning: vivid mode is experimental" &
-      ANSI_RESET)
-
-## Writes the vivid-mode mdcat-unavailable warning to stderr.
-##
-## :param kind: The active output style.
-proc styleMdcatWarning*(kind: StyleKind) =
-  if kind == skVivid:
-    stderr.writeLine(
-      ANSI_YELLOW &
-      "warning: mdcat not found in bin/, " &
-      "markdown rendering unavailable. " &
-      "Consider: get set style std" &
-      ANSI_RESET)
-
 # ---------------------------------------------------------------------------
 # Public API — vivid spinner helpers
 # ---------------------------------------------------------------------------
@@ -344,16 +432,22 @@ proc clearSpinner*() =
 # Public API — result output
 # ---------------------------------------------------------------------------
 
-## Writes the final result to stdout, optionally rendering
-## Markdown in vivid mode.
+## Writes the final result to stdout, using external display tools
+## when enabled and available.  When isMarkdown is true, mdcat is
+## used for rendering; otherwise bat is used for syntax-
+## highlighted display.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.
-## :param binDir: Bundled bin directory for mdcat lookup.
+## :param binDir: Bundled bin directory for tool lookup.
+## :param extDisplay: Whether external display is enabled.
+## :param isMarkdown: Whether the content is Markdown (use mdcat).
 proc styleResult*(
   kind: StyleKind,
   text: string,
-  binDir: string = ""
+  binDir: string = "",
+  extDisplay: bool = false,
+  isMarkdown: bool = false
 ) =
   case kind
   of skSimp:
@@ -361,12 +455,125 @@ proc styleResult*(
   of skStd:
     stderr.writeLine(
       ANSI_DIM & DIV_SECTION & ANSI_RESET)
-    echo text
+    if extDisplay and binDir.len > 0:
+      if isMarkdown and isMdcatAvailable(binDir):
+        let rendered = renderMarkdown(text, binDir)
+        stdout.write(rendered)
+        if not rendered.endsWith("\n"):
+          stdout.write("\n")
+      elif isBatAvailable(binDir):
+        let rendered = renderWithBat(text, binDir)
+        stdout.write(rendered)
+        if not rendered.endsWith("\n"):
+          stdout.write("\n")
+      else:
+        echo text
+    else:
+      echo text
     stderr.writeLine(
       ANSI_DIM & DIV_FOOTER & ANSI_RESET)
   of skVivid:
-    if binDir.len > 0 and isMdcatAvailable(binDir):
-      let rendered = renderMarkdown(text, binDir)
+    if extDisplay and binDir.len > 0:
+      if isMarkdown and isMdcatAvailable(binDir):
+        let rendered = renderMarkdown(text, binDir)
+        stdout.write(rendered)
+        if not rendered.endsWith("\n"):
+          stdout.write("\n")
+      elif isBatAvailable(binDir):
+        let rendered = renderWithBat(text, binDir)
+        stdout.write(rendered)
+        if not rendered.endsWith("\n"):
+          stdout.write("\n")
+      else:
+        echo text
+    else:
+      echo text
+
+# ---------------------------------------------------------------------------
+# Public API — unified styled output helpers
+# ---------------------------------------------------------------------------
+
+## Writes a key-value pair to stdout with style-appropriate
+## formatting.  Used by config display, cache info, log info, and
+## similar informational pages.
+##
+## :param kind: The active output style.
+## :param key: The option or field name.
+## :param value: The value to display.
+proc styleKeyValue*(
+  kind: StyleKind,
+  key: string,
+  value: string
+) =
+  case kind
+  of skSimp:
+    echo fmt"{key} = {value}"
+  of skStd:
+    echo ANSI_CYAN & key & ANSI_RESET &
+      " = " & value
+  of skVivid:
+    echo ANSI_CYAN & ANSI_BOLD & key &
+      ANSI_RESET & " = " & value
+
+## Writes a section header to stderr with style-appropriate
+## formatting.
+##
+## :param kind: The active output style.
+## :param title: The section title text.
+proc styleHeader*(
+  kind: StyleKind,
+  title: string
+) =
+  case kind
+  of skSimp:
+    stderr.writeLine(title)
+  of skStd:
+    stderr.writeLine(
+      ANSI_DIM & DIV_SECTION & ANSI_RESET)
+    stderr.writeLine(
+      ANSI_BOLD & title & ANSI_RESET)
+  of skVivid:
+    stderr.writeLine(
+      ANSI_CYAN & ANSI_BOLD & title & ANSI_RESET)
+
+## Writes informational text to stdout with style-appropriate
+## formatting.  Used for structured output in subcommand handlers.
+##
+## :param kind: The active output style.
+## :param text: The informational text to display.
+proc styleInfo*(
+  kind: StyleKind,
+  text: string
+) =
+  case kind
+  of skSimp:
+    echo text
+  of skStd:
+    echo ANSI_DIM & text & ANSI_RESET
+  of skVivid:
+    echo text
+
+## Displays help text to stdout, optionally rendered through bat
+## for syntax highlighting in std and vivid modes when external
+## display is enabled.
+##
+## :param kind: The active output style.
+## :param text: The help text content.
+## :param binDir: Bundled bin directory for bat lookup.
+## :param extDisplay: Whether external display is enabled.
+proc styleHelp*(
+  kind: StyleKind,
+  text: string,
+  binDir: string = "",
+  extDisplay: bool = false
+) =
+  case kind
+  of skSimp:
+    echo text
+  of skStd, skVivid:
+    if extDisplay and binDir.len > 0 and
+        isBatAvailable(binDir):
+      let rendered = renderWithBat(text, binDir)
       stdout.write(rendered)
       if not rendered.endsWith("\n"):
         stdout.write("\n")
