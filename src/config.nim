@@ -26,6 +26,7 @@ import std/[json, options, os, strformat, strutils]
 when defined(windows):
   import std/base64
 
+import exec
 import utils
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,9 @@ const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
+## Default output style (simp | std | vivid).
+const DEFAULT_STYLE* = "std"
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -97,6 +101,7 @@ type
     cacheExpiry*: int                ## Cache expiry in days. 0=never.
     cacheMaxEntries*: int            ## Max cached entries. 0=unlimited.
     logMaxEntries*: int              ## Max log entries. 0=unlimited.
+    style*: string                   ## Output style: simp, std, vivid.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -283,7 +288,8 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cache":           cfg.cache,
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
-    "logMaxEntries":   cfg.logMaxEntries
+    "logMaxEntries":   cfg.logMaxEntries,
+    "style":           cfg.style
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] = %cfg.commandPattern.get
@@ -329,7 +335,9 @@ proc implJsonToConfig(
         defaults.cacheMaxEntries),
     logMaxEntries:
       node{"logMaxEntries"}.getInt(
-        defaults.logMaxEntries)
+        defaults.logMaxEntries),
+    style:
+      node{"style"}.getStr(defaults.style)
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and cmdNode.kind == JString and
@@ -373,7 +381,8 @@ func defaultConfig*(): Config =
     cache:           DEFAULT_CACHE,
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
-    logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES
+    logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
+    style:           DEFAULT_STYLE
   )
 
 # ---------------------------------------------------------------------------
@@ -519,6 +528,7 @@ proc displayConfig*() =
     formatIntOrDisable(cfg.cacheMaxEntries)
   echo "log-max-entries = " &
     formatIntOrDisable(cfg.logMaxEntries)
+  echo fmt"style = {cfg.style}"
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -580,6 +590,9 @@ proc setConfigOption*(name: string, value: string) =
   of "command-pattern":
     if value.len > 0:
       cfg.commandPattern = some(value)
+      let safetyWarn = checkPatternSafety(value)
+      if safetyWarn.len > 0:
+        stderr.writeLine(safetyWarn)
     else:
       cfg.commandPattern = none(string)
   of "system-prompt":
@@ -606,6 +619,16 @@ proc setConfigOption*(name: string, value: string) =
   of "log-max-entries":
     cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)
+  of "style":
+    if value.len == 0:
+      cfg.style = DEFAULT_STYLE
+    else:
+      let lower = toLowerAscii(value)
+      if lower notin ["simp", "std", "vivid"]:
+        raise newException(GetError,
+          fmt"invalid value '{value}' for 'style':" &
+          " expected 'simp', 'std', or 'vivid'")
+      cfg.style = lower
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")

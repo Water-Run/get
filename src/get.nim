@@ -25,6 +25,7 @@ import exec
 import llm
 import logger
 import prompt
+import style
 import sysinfo
 import utils
 
@@ -84,6 +85,8 @@ set options:
                        (integer or false, default: 1000)
   log-max-entries    max log entries retained
                        (integer or false, default: 1000)
+  style              output style: simp, std, vivid
+                       (default: std)
 
   Integer options accept 'false' to disable the limit.
 
@@ -115,6 +118,7 @@ examples:
   get set key sk-your-api-key
   get set url https://api.openai.com/v1
   get set timeout false
+  get set style vivid
   get config --model
   get cache --clean
   get log --clean"""
@@ -205,6 +209,8 @@ proc implHandleConfig(args: seq[string]) =
       echo formatIntOrDisable(cfg.cacheMaxEntries)
     of "log-max-entries":
       echo formatIntOrDisable(cfg.logMaxEntries)
+    of "style":
+      echo cfg.style
     else:
       implUsageError(
         fmt"unknown config option '{optName}'")
@@ -292,6 +298,7 @@ proc implHandleIsOk() =
   if key.isNone:
     raise newException(GetError,
       "API key is not configured")
+  let sk = parseStyle(cfg.style)
   let req = LlmRequest(
     model: cfg.model,
     messages: @[
@@ -309,7 +316,8 @@ proc implHandleIsOk() =
     cfg.url,
     key.get,
     timeoutSec = cfg.timeout,
-    hideProcess = cfg.hideProcess
+    hideProcess = cfg.hideProcess,
+    sk = sk
   )
   let answer = resp.content.strip().toLowerAscii()
   if answer == "ok":
@@ -337,11 +345,13 @@ func implEffectiveShell(cfg: Config): string =
 ## :param messages: Conversation messages to send.
 ## :param cfg: The loaded configuration.
 ## :param key: The API key.
+## :param sk: The active output style.
 ## :returns: The LLM response.
 proc implLlmCall(
   messages: seq[LlmMessage],
   cfg: Config,
-  key: string
+  key: string,
+  sk: StyleKind = skSimp
 ): LlmResponse =
   let req = LlmRequest(
     model: cfg.model,
@@ -353,7 +363,8 @@ proc implLlmCall(
     cfg.url,
     key,
     timeoutSec = cfg.timeout,
-    hideProcess = cfg.hideProcess
+    hideProcess = cfg.hideProcess,
+    sk = sk
   )
 
 ## Optionally performs the double-check safety review on a command.
@@ -363,22 +374,24 @@ proc implLlmCall(
 ## :param info: System information snapshot.
 ## :param cfg: The loaded configuration.
 ## :param key: The API key.
+## :param sk: The active output style.
 ## :returns: The approved (possibly revised) command.
 proc implDoubleCheck(
   command: string,
   query: string,
   info: SysInfo,
   cfg: Config,
-  key: string
+  key: string,
+  sk: StyleKind
 ): string =
   if not cfg.hideProcess:
-    stderr.writeLine("double-checking command...")
+    styleProgress(sk, "double-checking command...")
   let msgs = buildDoubleCheckMessages(
     command, query, info)
-  let resp = implLlmCall(msgs, cfg, key)
+  let resp = implLlmCall(msgs, cfg, key, sk)
   let stripped = resp.content.strip()
   if toUpperAscii(stripped) == "UNSAFE":
-    stderr.writeLine(
+    styleError(sk,
       "error: command deemed unsafe by review")
     quit(1)
   let revised = extractCodeBlock(resp.content)
@@ -437,10 +450,14 @@ proc implCheckShouldCache(
 ## model is not recognised as a known high-performance model.
 ##
 ## :param model: The configured model name.
-proc implWarnIfWeakModel(model: string) =
+## :param sk: The active output style.
+proc implWarnIfWeakModel(
+  model: string,
+  sk: StyleKind
+) =
   if model.len > 0 and
       not isKnownStrongModel(model):
-    stderr.writeLine(MODEL_STRENGTH_WARNING)
+    styleWarning(sk, MODEL_STRENGTH_WARNING)
 
 ## Handles a natural-language query.
 ##
@@ -462,8 +479,17 @@ proc implHandleQuery(query: string, noCache: bool) =
       "model is not configured." &
       " Run: get set model <model>")
 
+  let sk = parseStyle(cfg.style)
+
+  # Vivid mode experimental notice + mdcat check.
+  styleVividNotice(sk)
+  if sk == skVivid:
+    let binDir = getBundledBinDir()
+    if not isMdcatAvailable(binDir):
+      styleMdcatWarning(sk)
+
   # Model-strength advisory.
-  implWarnIfWeakModel(cfg.model)
+  implWarnIfWeakModel(cfg.model, sk)
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
@@ -481,27 +507,32 @@ proc implHandleQuery(query: string, noCache: bool) =
       store, cacheHash, cfg.cacheExpiry)
     if hit.isSome:
       if not cfg.hideProcess:
-        stderr.writeLine("(cached)")
-      echo hit.get.output
+        styleProgress(sk, "(cached)")
+      styleResult(sk, hit.get.output,
+        getBundledBinDir())
       return
 
   # 1. Collect system information.
   if not cfg.hideProcess:
-    stderr.writeLine("collecting system info...")
+    styleProgress(sk, "collecting system info...")
   let info = collectSysInfo(shell)
 
   # 2. Build query prompt and call LLM.
+  styleSeparator(sk, DIV_THIN)
   let queryMsgs = buildQueryMessages(
     info, query, shell, cfg.instance,
     cfg.systemPrompt, cfg.commandPattern)
   let genResp = implLlmCall(
-    queryMsgs, cfg, key.get)
+    queryMsgs, cfg, key.get, sk)
 
-  # 3. Extract command from the response.
+  # 3. Extract command and output-mode marker.
   let maybeCmd = extractCodeBlock(genResp.content)
+  let outputMode = extractOutputMode(
+    genResp.content)
+
   if maybeCmd.isNone:
     # Direct text answer (no command generated).
-    echo genResp.content
+    styleResult(sk, genResp.content, info.binDir)
     if useCache:
       var store = loadCache()
       let entry = CacheEntry(
@@ -521,21 +552,33 @@ proc implHandleQuery(query: string, noCache: bool) =
 
   var command = maybeCmd.get
   if not cfg.hideProcess:
-    stderr.writeLine(fmt"command: {command}")
+    styleCommand(sk, "command", command)
 
-  # 4. Double-check (optional, default: enabled).
+  # 4. Dangerous-command safety check.
+  let dangerHit = checkDangerousCommand(command)
+  if dangerHit.isSome:
+    styleError(sk,
+      fmt"error: command contains dangerous " &
+      fmt"operation '{dangerHit.get}' — rejected")
+    if cfg.log:
+      logExecution(query, command,
+        "rejected by danger check", 1,
+        cfg.logMaxEntries)
+    quit(1)
+
+  # 5. Double-check (optional, default: enabled).
   if cfg.doubleCheck:
     command = implDoubleCheck(
-      command, query, info, cfg, key.get)
+      command, query, info, cfg, key.get, sk)
     if not cfg.hideProcess:
-      stderr.writeLine(
-        fmt"approved command: {command}")
+      styleCommand(sk,
+        "approved command", command)
 
-  # 5. Command-pattern validation.
+  # 6. Command-pattern validation.
   if cfg.commandPattern.isSome:
     if not validateCommandPattern(
         command, cfg.commandPattern.get):
-      stderr.writeLine(
+      styleError(sk,
         "error: command does not match" &
         " configured pattern")
       if cfg.log:
@@ -544,40 +587,52 @@ proc implHandleQuery(query: string, noCache: bool) =
           cfg.logMaxEntries)
       quit(1)
 
-  # 6. Manual confirmation (optional).
+  # 7. Manual confirmation (optional).
   if cfg.manualConfirm:
     if not confirmExecution(command):
-      stderr.writeLine("aborted.")
+      styleProgress(sk, "aborted.")
       quit(0)
 
-  # 7. Execute the command with bundled bin dir.
+  # 8. Execute the command with bundled bin dir.
   if not cfg.hideProcess:
-    stderr.writeLine("executing...")
+    styleSeparator(sk, DIV_WARN)
+    styleProgress(sk, "executing...")
   let execRes = executeCommand(
     command, shell, info.binDir)
 
-  # 8. Instance vs non-instance output handling.
+  # 9. Output handling (instance / DIRECT /
+  #    INTERPRET).
+  styleSeparator(sk, DIV_SECTION)
   var finalOutput = ""
-  if cfg.instance:
+  if cfg.instance or outputMode == "DIRECT":
+    # Direct output — show raw command result.
     finalOutput = execRes.output.strip()
     if finalOutput.len > 0:
-      echo finalOutput
+      styleResult(sk, finalOutput, info.binDir)
+    elif execRes.exitCode != 0:
+      finalOutput =
+        fmt"command exited with code " &
+        fmt"{execRes.exitCode}"
+      styleError(sk, finalOutput)
   else:
+    # INTERPRET — send output to LLM for
+    # summarisation.
     if execRes.exitCode != 0 and
         execRes.output.strip().len == 0:
       finalOutput =
         fmt"command exited with code " &
         fmt"{execRes.exitCode}"
-      stderr.writeLine(finalOutput)
+      styleError(sk, finalOutput)
     else:
       let interpretMsgs = buildInterpretMessages(
         query, command, execRes.output)
       let interpretResp = implLlmCall(
-        interpretMsgs, cfg, key.get)
+        interpretMsgs, cfg, key.get, sk)
       finalOutput = interpretResp.content
-      echo finalOutput
+      styleResult(sk, finalOutput, info.binDir)
 
-  # 9. Cache the result (with LLM cache-worthiness check).
+  # 10. Cache the result (with LLM cache-worthiness
+  #     check).
   if useCache and finalOutput.len > 0:
     let shouldCache = implCheckShouldCache(
       query, command, finalOutput, cfg, key.get)
@@ -595,16 +650,16 @@ proc implHandleQuery(query: string, noCache: bool) =
       saveCache(store)
     else:
       if not cfg.hideProcess:
-        stderr.writeLine(
+        styleProgress(sk,
           "(result not cached — volatile)")
 
-  # 10. Log.
+  # 11. Log.
   if cfg.log:
     logExecution(query, command,
       execRes.output, execRes.exitCode,
       cfg.logMaxEntries)
 
-  # 11. Propagate non-zero exit code.
+  # 12. Propagate non-zero exit code.
   if execRes.exitCode != 0:
     quit(execRes.exitCode)
 
@@ -653,10 +708,21 @@ proc implMain() =
     implHandleQuery(query, noCache)
 
 # ---------------------------------------------------------------------------
+# Signal handling
+# ---------------------------------------------------------------------------
+
+## Ctrl+C handler that exits gracefully instead of producing a raw
+## exception traceback.
+proc implCtrlCHandler() {.noconv.} =
+  stderr.write("\ninterrupted.\n")
+  quit(130)
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 when isMainModule:
+  setControlCHook(implCtrlCHandler)
   try:
     implMain()
   except GetError as e:

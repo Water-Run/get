@@ -69,8 +69,33 @@ const MODEL_STRENGTH_WARNING* =
   "device, a sufficiently capable model is the " &
   "foundation of safety.\n" &
   "Consider using a known strong model (e.g. " &
-  "GPT-5+, Claude 3.7+, Gemini 3+, DeepSeek, " &
-  "Grok 4+, GLM 4.7+)."
+  "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+, " &
+  "DeepSeek, Grok 4+, GLM 4.7+)."
+
+## List of command names considered dangerous.  The built-in safety
+## check rejects commands containing these as whole words.
+const DANGEROUS_COMMANDS* = [
+  "rm", "rmdir", "del", "rd", "erase",
+  "mv", "move", "cp", "copy",
+  "mkdir", "md", "touch",
+  "chmod", "chown", "chgrp",
+  "mkfs", "dd", "format", "fdisk",
+  "kill", "killall", "pkill",
+  "shutdown", "reboot", "halt", "poweroff",
+  "passwd", "useradd", "userdel", "usermod",
+  "groupadd", "groupdel",
+  "Set-Content", "New-Item", "Remove-Item",
+  "Move-Item", "Rename-Item",
+  "Clear-Content", "Add-Content"
+]
+
+## Subset of dangerous commands whose names are common English words
+## that require exact-case matching to avoid false positives (e.g.
+## "move" appearing inside a grep pattern should not trigger when
+## it is part of "Move-Item" but a bare "move" on Windows should).
+## Commands not in this set are matched case-insensitively.
+const CASE_SENSITIVE_DANGER* = [
+  "dd", "md", "rd"]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -247,6 +272,28 @@ func extractCodeBlock*(text: string): Option[string] =
       return some(content)
   return none(string)
 
+## Extracts the output-mode marker from an LLM response.  The
+## model may include ``<!-- DIRECT -->`` or ``<!-- INTERPRET -->``
+## after the code block to indicate whether the command output
+## should be shown raw or sent back for LLM interpretation.
+##
+## :param text: The full LLM response text.
+## :returns: ``"DIRECT"`` or ``"INTERPRET"``.  Defaults to
+##           ``"DIRECT"`` when no marker is found.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     assert extractOutputMode("```sh\nls\n```\n" &
+##       "<!-- DIRECT -->") == "DIRECT"
+##     assert extractOutputMode("```sh\nls\n```\n" &
+##       "<!-- INTERPRET -->") == "INTERPRET"
+##     assert extractOutputMode("no marker") == "DIRECT"
+func extractOutputMode*(text: string): string =
+  let upper = toUpperAscii(text)
+  if upper.contains("<!-- INTERPRET -->"):
+    return "INTERPRET"
+  return "DIRECT"
+
 ## Formats an integer option value for display.  Returns "false"
 ## when the value is zero or negative (disabled), otherwise
 ## returns the integer as a string.
@@ -265,11 +312,21 @@ func formatIntOrDisable*(value: int): string =
 # Private helpers — model version extraction
 # ---------------------------------------------------------------------------
 
+## Normalises a model name for comparison: lowercases and replaces
+## underscores with hyphens so that ``Claude_Opus_4.6`` and
+## ``claude-opus-4.6`` are treated identically.
+##
+## :param model: Raw model identifier string.
+## :returns: The normalised lowercase string.
+func implNormaliseModel(model: string): string =
+  result = toLowerAscii(model).replace('_', '-')
+
 ## Extracts the first version-like number that appears after the
-## family prefix in a lowercased model name.  Skips common
+## family prefix in a normalised model name.  Skips common
 ## separators and an optional ``v`` prefix before the digits.
 ##
-## :param model: Lowercased model name.
+## :param model: Normalised (lowercase, hyphen-separated) model
+##               name.
 ## :param family: Lowercased family prefix to search for.
 ## :returns: The extracted version as a float, or 0.0.
 func implExtractVersion(
@@ -302,6 +359,29 @@ func implExtractVersion(
       return 0.0
   return 0.0
 
+## Checks whether any weak-variant keyword is present in the
+## normalised model name, with special handling for the MiniMax
+## family where "mini" is part of the brand.
+##
+## :param m: Normalised model name.
+## :param skipMini: When true the keyword "mini" is not treated
+##                  as a weak indicator (for MiniMax family).
+## :returns: true when a weak keyword is found.
+func implHasWeakKeyword(
+  m: string,
+  skipMini: bool = false
+): bool =
+  const weakKeywords = [
+    "mini", "nano", "lite", "small", "fast",
+    "flash", "haiku", "light", "tiny", "micro",
+    "instant"]
+  for w in weakKeywords:
+    if skipMini and w == "mini":
+      continue
+    if m.contains(w):
+      return true
+  return false
+
 # ---------------------------------------------------------------------------
 # Public API — model strength check
 # ---------------------------------------------------------------------------
@@ -310,11 +390,16 @@ func implExtractVersion(
 ## high-performance model suitable for command generation.
 ##
 ## Recognised strong families and their minimum versions:
-## GPT >= 5 (including CodeX), Claude >= 3.7, Gemini >= 3,
-## Grok >= 4, MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full).
-## Models containing weak-variant keywords (mini, nano, lite,
-## haiku, flash, etc.) or belonging to unsupported families
-## (Doubao, Qwen) are always treated as weak.
+## GPT >= 5 (including CodeX), Claude Opus/Sonnet >= 3.5 or
+## Claude >= 3.7 by version, Gemini >= 3, Grok >= 4,
+## MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full), OpenAI o-series
+## >= 3.  Models containing weak-variant keywords (mini, nano,
+## lite, haiku, flash, etc.) or belonging to unsupported families
+## (Doubao, Qwen, etc.) are always treated as weak.
+##
+## Model names are normalised (lowercased, underscores replaced
+## with hyphens) before comparison so that ``Claude_Opus_4.6``
+## and ``claude-opus-4.6`` are equivalent.
 ##
 ## :param model: The model identifier string.
 ## :returns: true when the model is recognised as strong.
@@ -322,9 +407,13 @@ func implExtractVersion(
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     assert isKnownStrongModel("gpt-5.3-codex")
-##     assert not isKnownStrongModel("gpt-4o-mini")
+##     assert isKnownStrongModel("claude-opus-4.6")
+##     assert isKnownStrongModel("claude-sonnet-4.5")
+##     assert isKnownStrongModel("deepseek-r1")
+##     assert not isKnownStrongModel("gpt-5.4-mini")
+##     assert not isKnownStrongModel("qwen-3.6plus")
 func isKnownStrongModel*(model: string): bool =
-  let m = toLowerAscii(model)
+  let m = implNormaliseModel(model)
   if m.len == 0:
     return false
 
@@ -335,60 +424,69 @@ func isKnownStrongModel*(model: string): bool =
     if m.contains(blocked):
       return false
 
-  # Keywords indicating a reduced-capability variant.
-  const weakKeywords = [
-    "mini", "nano", "lite", "small", "fast",
-    "flash", "haiku", "light", "tiny", "micro",
-    "instant"]
-
   # GPT / Codex family.
   if m.contains("gpt") or m.contains("codex"):
-    for w in weakKeywords:
-      if m.contains(w): return false
+    if implHasWeakKeyword(m): return false
     let vGpt = implExtractVersion(m, "gpt")
     let vCodex = implExtractVersion(m, "codex")
     let v = max(vGpt, vCodex)
     return v >= 5.0
 
-  # Claude family.
+  # OpenAI o-series reasoning models (o1, o3, o4 …).
+  # Match "o" followed by a digit at word boundary.
+  if m.contains("-o") or m.startsWith("o"):
+    if implHasWeakKeyword(m): return false
+    let oIdx =
+      if m.startsWith("o"): 0
+      else: m.find("-o") + 1
+    if oIdx >= 0 and oIdx < m.len - 1 and
+        m[oIdx] == 'o' and
+        m[oIdx + 1] in {'0' .. '9'}:
+      let v = implExtractVersion(m, "o")
+      return v >= 3.0
+
+  # Claude family — supports named tiers (opus, sonnet) and
+  # plain version numbers.
   if m.contains("claude"):
-    for w in weakKeywords:
-      if m.contains(w): return false
+    if implHasWeakKeyword(m): return false
+    # Named tier: opus (strongest tier).
+    if m.contains("opus"):
+      let v = implExtractVersion(m, "opus")
+      # opus without version or with version >= 3.5.
+      return v == 0.0 or v >= 3.5
+    # Named tier: sonnet (strong tier).
+    if m.contains("sonnet"):
+      let v = implExtractVersion(m, "sonnet")
+      return v == 0.0 or v >= 3.5
+    # Fallback to plain numeric version after "claude".
     return implExtractVersion(m, "claude") >= 3.7
 
   # Gemini family.
   if m.contains("gemini"):
-    for w in weakKeywords:
-      if m.contains(w): return false
+    if implHasWeakKeyword(m): return false
     return implExtractVersion(m, "gemini") >= 3.0
 
   # Grok family.
   if m.contains("grok"):
-    for w in weakKeywords:
-      if m.contains(w): return false
+    if implHasWeakKeyword(m): return false
     return implExtractVersion(m, "grok") >= 4.0
 
   # MiniMax family (note: "minimax" itself contains "mini" so
   # we must check the family BEFORE the generic weak scan).
   if m.contains("minimax"):
     # "mini" inside "minimax" is the brand, not a weakness.
-    for w in weakKeywords:
-      if w == "mini":
-        continue
-      if m.contains(w): return false
+    if implHasWeakKeyword(m, skipMini = true):
+      return false
     return implExtractVersion(m, "minimax") >= 2.7
 
   # GLM / ChatGLM family.
   if m.contains("glm"):
-    for w in weakKeywords:
-      if m.contains(w): return false
-    let v1 = implExtractVersion(m, "glm")
-    return v1 >= 4.7
+    if implHasWeakKeyword(m): return false
+    return implExtractVersion(m, "glm") >= 4.7
 
   # DeepSeek family — full variants are strong.
   if m.contains("deepseek"):
-    for w in weakKeywords:
-      if m.contains(w): return false
+    if implHasWeakKeyword(m): return false
     return true
 
   # Unknown family — not recognised.

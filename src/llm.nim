@@ -12,6 +12,12 @@
 ## flight.  It uses asynchronous I/O so that a one-second timer can
 ## fire between event-loop polls without blocking the transfer.
 ##
+## Progress display adapts to the configured output style: simp
+## shows plain dots, std shows coloured dots, and vivid shows an
+## animated spinner.  Dots are emitted every 2 seconds during the
+## first 10 seconds; after that, waited-time messages appear every
+## 10 seconds.
+##
 ## When timeout is set to 0 (disabled) the request may run
 ## indefinitely.  When maxTokens is set to 0, the ``max_tokens``
 ## field is omitted from the JSON body, letting the API decide.
@@ -21,6 +27,7 @@
 import std/[asyncdispatch, httpclient, json,
             strformat, strutils]
 
+import style
 import utils
 
 # ---------------------------------------------------------------------------
@@ -115,56 +122,97 @@ proc implPostRequest(
 # ---------------------------------------------------------------------------
 
 ## Waits for the given future while printing elapsed-time progress
-## to stderr.  When timeoutSec is 0 (disabled), the request may
-## run indefinitely.
+## to stderr.  The progress display adapts to the configured
+## output style: simp/std print dots every 2 seconds during the
+## first 10 seconds then switch to waited-time messages; vivid
+## shows an animated spinner.  When timeoutSec is 0 (disabled),
+## the request may run indefinitely.
 ##
 ## :param fut: The future representing the in-flight request.
 ## :param timeoutSec: Maximum wait in seconds (0 = no limit).
 ## :param hideProcess: Suppress all progress output when true.
+## :param sk: The active output style.
 ## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
 proc implAwaitWithProgress(
   fut: Future[string],
   timeoutSec: int,
-  hideProcess: bool
+  hideProcess: bool,
+  sk: StyleKind
 ): Future[string] {.async.} =
   var elapsed = 0
   var lineOpen = false
   if not hideProcess:
-    stderr.write("requesting")
-    stderr.flushFile()
-    lineOpen = true
+    if sk == skVivid:
+      writeSpinner(0, "requesting...")
+    else:
+      if sk == skStd:
+        stderr.write(ANSI_DIM & "requesting" &
+          ANSI_RESET)
+      else:
+        stderr.write("requesting")
+      stderr.flushFile()
+      lineOpen = true
   while not fut.finished:
     await sleepAsync(1000)
     elapsed += 1
     if not hideProcess:
-      if elapsed < 10:
-        stderr.write(".")
-        stderr.flushFile()
-      elif elapsed == 10:
-        stderr.writeLine("")
-        if timeoutSec > 0:
-          stderr.writeLine(
-            fmt"- waited {elapsed}/{timeoutSec}s")
-        else:
-          stderr.writeLine(
-            fmt"- waited {elapsed}s (no timeout)")
-        lineOpen = false
-      elif elapsed mod 10 == 0:
-        if timeoutSec > 0:
-          stderr.writeLine(
-            fmt"- waited {elapsed}/{timeoutSec}s")
-        else:
-          stderr.writeLine(
-            fmt"- waited {elapsed}s (no timeout)")
-        lineOpen = false
+      if sk == skVivid:
+        # Vivid: animated spinner every tick.
+        let msg =
+          if timeoutSec > 0:
+            fmt"requesting... {elapsed}/{timeoutSec}s"
+          else:
+            fmt"requesting... {elapsed}s"
+        writeSpinner(elapsed, msg)
+      else:
+        # Simp / Std: dot every 2 seconds in the first 10s.
+        if elapsed <= 10:
+          if elapsed mod 2 == 0:
+            if sk == skStd:
+              stderr.write(ANSI_DIM & "." &
+                ANSI_RESET)
+            else:
+              stderr.write(".")
+            stderr.flushFile()
+        elif elapsed == 11:
+          # Transition: close the dot line.
+          if lineOpen:
+            stderr.writeLine("")
+            lineOpen = false
+          let waitMsg =
+            if timeoutSec > 0:
+              fmt"- waited 10/{timeoutSec}s"
+            else:
+              "- waited 10s (no timeout)"
+          if sk == skStd:
+            stderr.writeLine(
+              ANSI_DIM & waitMsg & ANSI_RESET)
+          else:
+            stderr.writeLine(waitMsg)
+        elif elapsed mod 10 == 0:
+          let waitMsg =
+            if timeoutSec > 0:
+              fmt"- waited {elapsed}/{timeoutSec}s"
+            else:
+              fmt"- waited {elapsed}s (no timeout)"
+          if sk == skStd:
+            stderr.writeLine(
+              ANSI_DIM & waitMsg & ANSI_RESET)
+          else:
+            stderr.writeLine(waitMsg)
     if timeoutSec > 0 and elapsed >= timeoutSec:
-      if lineOpen:
+      if sk == skVivid:
+        clearSpinner()
+      elif lineOpen:
         stderr.writeLine("")
       raise newException(LlmApiError,
         fmt"request timed out after {timeoutSec}s")
-  if not hideProcess and lineOpen:
-    stderr.writeLine("")
+  if not hideProcess:
+    if sk == skVivid:
+      clearSpinner()
+    elif lineOpen:
+      stderr.writeLine("")
   result = fut.read
 
 # ---------------------------------------------------------------------------
@@ -215,6 +263,7 @@ proc implParseResponse(body: string): LlmResponse =
 ## :param apiKey: The Bearer token.  Must not be empty.
 ## :param timeoutSec: Maximum seconds to wait (0 = no limit).
 ## :param hideProcess: Suppress progress output when true.
+## :param sk: The active output style for progress display.
 ## :returns: A populated LlmResponse on success.
 ## :raises: LlmApiError: On timeout, HTTP error, or malformed
 ##          response.
@@ -229,7 +278,8 @@ proc sendLlmRequest*(
   url: string,
   apiKey: string,
   timeoutSec: int = 300,
-  hideProcess: bool = false
+  hideProcess: bool = false,
+  sk: StyleKind = skSimp
 ): LlmResponse =
   if apiKey.len == 0:
     raise newException(GetError,
@@ -252,7 +302,7 @@ proc sendLlmRequest*(
       let fut = implPostRequest(
         client, endpoint, bodyStr)
       let respBody = await implAwaitWithProgress(
-        fut, timeoutSec, hideProcess)
+        fut, timeoutSec, hideProcess, sk)
       result = implParseResponse(respBody)
     finally:
       client.close()

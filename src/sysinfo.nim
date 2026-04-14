@@ -111,19 +111,36 @@ const BUNDLED_DEFS_LINUX = [
    "NEVER use -o or -c flags (they write files/" &
    "clipboard). Read-only tool."),
   ("tree",
-   "tree++ (bundled as 'tree') — enhanced " &
-   "directory tree listing. " &
+   "tree — classic Unix directory tree listing. " &
    "Usage: tree [path]. " &
-   "Key flags: -f/--files (show files), " &
-   "-L/--level <n> (depth limit), " &
-   "-I/--exclude <pat> (exclude pattern), " &
-   "-s/--size (file sizes in bytes), " &
-   "-H/--human-readable (human sizes), " &
-   "-g/--gitignore (respect .gitignore), " &
-   "-N/--no-win-banner (skip header), " &
-   "-e/--report (summary statistics). " &
-   "NEVER use -o/--output (writes files). " &
-   "Read-only tool.")
+   "Key flags: -L <n> (depth limit), " &
+   "-I <pattern> (exclude pattern), " &
+   "-a (show hidden files), " &
+   "-d (directories only), " &
+   "-f (full path prefix), " &
+   "-s (file sizes in bytes), " &
+   "-h (human-readable sizes), " &
+   "--gitignore (respect .gitignore), " &
+   "-J (JSON output), " &
+   "-o <file> is FORBIDDEN (writes files). " &
+   "Read-only tool."),
+  ("tokei",
+   "tokei — fast code statistics tool " &
+   "(lines of code, comments, blanks by " &
+   "language). " &
+   "Usage: tokei [path]. " &
+   "Key flags: -e <pattern> (exclude), " &
+   "-t <languages> (filter by language), " &
+   "-o <format> (output format: json, yaml). " &
+   "Read-only tool."),
+  ("lua",
+   "lua — Lua 5.x interpreter. " &
+   "Usage: lua <script.lua> or lua -e '<code>'. " &
+   "Can run small scripts for calculations, " &
+   "text processing, and data formatting. " &
+   "NEVER use io.open with write mode or " &
+   "os.execute/os.rename/os.remove. " &
+   "Read-only use only.")
 ]
 
 ## Bundled tool definitions for Windows.
@@ -159,7 +176,15 @@ const BUNDLED_DEFS_WINDOWS = [
    "/S (file sizes), /HR (human-readable sizes), " &
    "/G (respect .gitignore), " &
    "/RP (summary report), /B (batch mode). " &
-   "NEVER use /O (writes files). Read-only tool.")
+   "NEVER use /O (writes files). " &
+   "Read-only tool."),
+  ("tokei",
+   "tokei — fast code statistics tool " &
+   "(lines of code, comments, blanks by " &
+   "language). " &
+   "Usage: tokei [path]. " &
+   "Key flags: -e <pattern>, -t <languages>, " &
+   "-o <format> (json, yaml). Read-only tool.")
 ]
 
 # ---------------------------------------------------------------------------

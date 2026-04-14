@@ -13,10 +13,16 @@
 ## seq[LlmMessage] that can be passed directly to the LLM client.
 ##
 ## The query prompt includes descriptions of bundled tools
-## (rg, fd, sg, pmc, treepp/tree) so the model can leverage them
-## when generating commands.  All prompts strongly enforce the
-## read-only constraint and instruct the model to refuse generation
-## rather than produce potentially destructive commands.
+## (rg, fd, sg, pmc, treepp/tree, tokei, lua) so the model can
+## leverage them when generating commands.  All prompts strongly
+## enforce the read-only constraint and instruct the model to
+## refuse generation rather than produce potentially destructive
+## commands.
+##
+## The query prompt also instructs the model to annotate its
+## response with ``<!-- DIRECT -->`` or ``<!-- INTERPRET -->`` so
+## that the caller can decide whether to show command output raw
+## or pass it back for LLM interpretation.
 
 {.experimental: "strictFuncs".}
 
@@ -90,7 +96,9 @@ func buildQueryMessages*(
     "You are a command-line assistant. Your task" &
     " is to generate a single shell command that" &
     " retrieves the information the user " &
-    "requested.")
+    "requested. Focus on directly executing " &
+    "tools and commands to obtain the answer " &
+    "rather than relying on further processing.")
   sysLines.add("")
   sysLines.add("STRICT READ-ONLY CONSTRAINTS " &
     "(VIOLATION IS FORBIDDEN):")
@@ -127,20 +135,67 @@ func buildQueryMessages*(
     " pipes or && to chain read-only " &
     "sub-commands).")
   sysLines.add(
-    fmt"- The command must work in {shell}.")
+    fmt"- The command must work in {shell}." &
+    " Ensure correct syntax for this shell.")
   sysLines.add(
     "- Prefer using bundled tools listed below" &
     " when they fit the task; they are already" &
-    " available in PATH.")
+    " available in PATH and guaranteed to work.")
+  sysLines.add(
+    "- Verify your command mentally before " &
+    "outputting — check flag names, argument " &
+    "order, and shell quoting.")
   if instance:
     sysLines.add(
       "- The output will be shown directly to the" &
       " user. Make it clean and human-readable.")
   else:
     sysLines.add(
-      "- The output will be processed further." &
-      " Focus on capturing the needed information" &
-      " as completely as possible.")
+      "- After the code block, on a NEW line, " &
+      "add exactly ONE of these markers:")
+    sysLines.add(
+      "  <!-- DIRECT --> if the command output is " &
+      "self-explanatory and can be shown directly" &
+      " to the user (e.g. tree output, version " &
+      "info, file listings, code content, " &
+      "network info, system stats, IP addresses," &
+      " directory structures, tool output).")
+    sysLines.add(
+      "  <!-- INTERPRET --> if the command output " &
+      "needs interpretation or summarisation to " &
+      "answer the user's question (e.g. complex " &
+      "log analysis, multi-step reasoning about " &
+      "output, comparing multiple data sources).")
+    sysLines.add(
+      "  Default to <!-- DIRECT --> when " &
+      "uncertain. Most queries should use " &
+      "DIRECT.")
+  sysLines.add("")
+  sysLines.add("TOOL SELECTION GUIDANCE:")
+  sysLines.add(
+    "- For directory tree visualisation: use " &
+    "`tree` (Linux) or `treepp` (Windows).")
+  sysLines.add(
+    "- For searching file contents: use `rg` " &
+    "(ripgrep).")
+  sysLines.add(
+    "- For finding files by name: use `fd`.")
+  sysLines.add(
+    "- For packaging code context: use `pmc`.")
+  sysLines.add(
+    "- For code statistics (lines of code): " &
+    "use `tokei`.")
+  sysLines.add(
+    "- For calculations or text processing: " &
+    "use `lua -e '<code>'`.")
+  sysLines.add(
+    "- For AST-level code search: use `sg` " &
+    "(ast-grep).")
+  sysLines.add(
+    "- If the user's request clearly requires " &
+    "a third-party library or tool that is not " &
+    "available, explain what is needed rather " &
+    "than generating a command that will fail.")
   sysLines.add("")
   sysLines.add("SYSTEM INFORMATION:")
   sysLines.add(formatSysInfo(info))
@@ -266,7 +321,9 @@ func buildInterpretMessages*(
     " a question, a shell command was executed," &
     " and the output is shown below. Provide a" &
     " clear, concise answer to the user's" &
-    " question based on the command output.")
+    " question based on the command output." &
+    " Focus on extracting and presenting the" &
+    " relevant information directly.")
   sysLines.add("")
   sysLines.add(fmt"User's question: {query}")
   sysLines.add(fmt"Command executed: {command}")
