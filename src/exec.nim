@@ -26,8 +26,7 @@
 ##
 ## The manual-confirm prompt reads user input via stdin as the
 ## primary method, falling back to /dev/tty (Unix) or CONIN$
-## (Windows) when stdin is unavailable.  This ordering ensures
-## compatibility after asynchronous event loop usage.
+## (Windows) when stdin is unavailable.
 
 {.experimental: "strictFuncs".}
 
@@ -53,10 +52,10 @@ type
 # Private helpers
 # ---------------------------------------------------------------------------
 
-## Builds the argument list for invoking a command through the given
-## shell.  PowerShell/pwsh receives ``-NoProfile -NonInteractive
-## -Command <cmd>``; cmd.exe receives ``/C <cmd>``; everything else
-## (bash, zsh, sh, fish …) receives ``-c <cmd>``.
+## Builds the argument list for invoking a command through the
+## given shell.  PowerShell/pwsh receives ``-NoProfile
+## -NonInteractive -Command <cmd>``; cmd.exe receives ``/C <cmd>``;
+## everything else receives ``-c <cmd>``.
 ##
 ## :param shell: Shell executable name or path.
 ## :param command: The command string to execute.
@@ -79,8 +78,7 @@ func implBuildShellArgs(
 
 ## Creates a StringTableRef containing the current environment with
 ## binDir prepended to PATH.  Returns nil when binDir is empty or
-## does not exist, meaning the child process inherits the parent
-## environment unchanged.
+## does not exist.
 ##
 ## :param binDir: Absolute path to the bundled bin directory.
 ## :returns: A modified environment table, or nil.
@@ -103,21 +101,16 @@ proc implBuildEnv(binDir: string): StringTableRef =
   result = env
 
 ## Reads a single line of text from the controlling terminal.
-## Tries stdin first because it is the most reliable method after
-## asynchronous event loop usage (Nim's asyncdispatch may leave
-## /dev/tty or CONIN$ file descriptors in unexpected states on
-## some platforms).  Falls back to /dev/tty (Unix) or CONIN$
-## (Windows) when stdin is not available.
+## Tries stdin first, then falls back to /dev/tty (Unix) or
+## CONIN$ (Windows).
 ##
 ## :returns: The trimmed user input, or empty on failure.
 proc implReadTerminalLine(): string =
-  # Primary method: read from stdin.
   try:
     result = stdin.readLine()
     return
   except IOError, EOFError:
     discard
-  # Fallback: direct terminal device.
   try:
     when defined(windows):
       let tty = open("CONIN$", fmRead)
@@ -138,8 +131,7 @@ proc implReadTerminalLine(): string =
 
 ## Checks whether a user-provided forbidden-command-pattern regex
 ## adequately covers common dangerous commands.  Returns a warning
-## message listing uncovered commands, or an empty string when
-## all core dangerous commands are blocked.
+## message listing uncovered commands, or an empty string.
 ##
 ## :param pattern: The user's forbidden-command regex.
 ## :returns: Warning text, or empty string if adequate.
@@ -167,13 +159,11 @@ proc checkPatternSafety*(
     result = ""
 
 ## Validates a command string against a forbidden-command regex
-## pattern.  Returns true when the command does NOT match the
-## forbidden pattern (i.e. the command is allowed).  Returns false
-## when the command matches (i.e. the command is forbidden).
+## pattern.  Returns true when the command is allowed (no match).
 ##
 ## :param command: The command to validate.
 ## :param pattern: A forbidden-command regex string.
-## :returns: true if the command is allowed (no match).
+## :returns: true if the command is allowed.
 ## :raises: GetError: If the pattern is not a valid regex.
 ##
 ## .. code-block:: nim
@@ -191,11 +181,8 @@ proc validateCommandPattern*(
     raise newException(GetError,
       fmt"invalid command-pattern regex: {pattern}")
 
-## Displays the command on stderr and reads a single line from
-## the user.  Returns true only when the user types "y"
-## (case-insensitive).  Input is read from stdin first; if stdin
-## is unavailable, falls back to /dev/tty (Unix) or CONIN$
-## (Windows).
+## Displays the command and reads a y/N confirmation from the user.
+## Returns true only when the user types "y" (case-insensitive).
 ##
 ## :param command: The command awaiting confirmation.
 ## :param sk: The active output style.
@@ -219,17 +206,6 @@ proc confirmExecution*(
         "\nconfirm? (y/N): ")
     else:
       stderr.write("confirm? (y/N): ")
-  of skStd:
-    if showCommand:
-      stderr.write(
-        ANSI_CYAN & "execute: " & ANSI_BOLD &
-        command & ANSI_RESET &
-        "\n" & ANSI_YELLOW &
-        "confirm? (y/N): " & ANSI_RESET)
-    else:
-      stderr.write(
-        ANSI_YELLOW &
-        "confirm? (y/N): " & ANSI_RESET)
   of skVivid:
     if showCommand:
       stderr.write(
@@ -242,21 +218,18 @@ proc confirmExecution*(
         ANSI_YELLOW & ANSI_BOLD &
         "confirm? (y/N): " & ANSI_RESET)
   stderr.flushFile()
-  # Flush stdout as well to prevent buffering issues
-  # that could delay prompt visibility.
   stdout.flushFile()
   let response = implReadTerminalLine()
   result = toLowerAscii(response.strip()) == "y"
 
-## Executes a command string through the specified shell and returns
-## the captured combined output together with the exit code.  When
-## binDir is non-empty and exists, it is prepended to PATH so that
-## bundled tools are available to the command.
+## Executes a command string through the specified shell and
+## returns the captured combined output together with the exit
+## code.
 ##
 ## :param command: The command to execute.
 ## :param shell: Shell executable name or path.
-## :param binDir: Optional bundled-binary directory to prepend to
-##                PATH.
+## :param binDir: Optional bundled-binary directory to prepend
+##                to PATH.
 ## :returns: An ExecResult with captured output and exit code.
 ## :raises: GetError: If the shell process cannot be started.
 ##

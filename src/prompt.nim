@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -12,17 +12,10 @@
 ## and isok connectivity verification.  Every builder returns a
 ## seq[LlmMessage] that can be passed directly to the LLM client.
 ##
-## The query prompt includes descriptions of bundled tools
-## (rg, fd, sg, pmc, treepp/tree, tokei, lua) so the model can
-## leverage them when generating commands.  All prompts strongly
-## enforce the read-only constraint and instruct the model to
-## refuse generation rather than produce potentially destructive
-## commands.
-##
-## The query prompt also instructs the model to annotate its
-## response with ``<!-- DIRECT -->`` or ``<!-- INTERPRET -->`` so
-## that the caller can decide whether to show command output raw
-## or pass it back for LLM interpretation.
+## The cache-worthiness check now supports three outcomes: RESULT
+## (cache the output for immediate reuse), COMMAND (cache the
+## command for re-execution with fresh output), and NOCACHE (do
+## not cache anything).
 
 {.experimental: "strictFuncs".}
 
@@ -66,8 +59,7 @@ const CACHE_CHECK_MAX_TOKENS* = 32
 ## :param query: The user's natural-language query.
 ## :param shell: The shell that will execute the command.
 ## :param instance: When true the model is asked to produce clean
-##                  human-readable output; when false the output
-##                  will be interpreted by a follow-up LLM call.
+##                  human-readable output.
 ## :param customPrompt: Optional user-supplied system prompt.
 ## :param pattern: Optional command-pattern regex note.
 ## :returns: A two-element seq (system, user) of LlmMessage.
@@ -235,10 +227,7 @@ func buildQueryMessages*(
 # Public API — double-check prompt
 # ---------------------------------------------------------------------------
 
-## Builds the message list for the double-check safety review.  The
-## system message contains the command, the original query, and the
-## system information so that the reviewer model can assess whether
-## the command is strictly read-only and safe.
+## Builds the message list for the double-check safety review.
 ##
 ## :param command: The generated command to review.
 ## :param query: The original user query.
@@ -278,8 +267,7 @@ func buildDoubleCheckMessages*(
     sysLines.add("")
     sysLines.add(bundledBlock)
   sysLines.add("")
-  sysLines.add(
-    "RULES:")
+  sysLines.add("RULES:")
   sysLines.add(
     "- If the command could MODIFY, DELETE, " &
     "CREATE, WRITE, MOVE, or ALTER any file, " &
@@ -356,7 +344,12 @@ func buildInterpretMessages*(
 
 ## Builds the message list for the cache-worthiness check.  The
 ## model evaluates whether the query result is stable enough to
-## cache for future reuse.
+## cache and, if so, whether the output or just the command should
+## be cached.  Three possible responses:
+##   RESULT  — output is stable, cache it for direct reuse.
+##   COMMAND — command is reusable but output is volatile, cache
+##             the command for re-execution.
+##   NOCACHE — do not cache anything.
 ##
 ## :param query: The original user query.
 ## :param command: The command that was executed (may be empty).
@@ -375,29 +368,40 @@ func buildCacheCheckMessages*(
 ): seq[LlmMessage] =
   var sysLines: seq[string] = @[]
   sysLines.add(
-    "Determine if this query result should be " &
+    "Determine how this query result should be " &
     "cached for future reuse.")
   sysLines.add("")
   sysLines.add(
-    "A result SHOULD be cached (CACHE) if it is " &
-    "STABLE — the same query would produce the " &
-    "same or very similar output when run again " &
-    "in the same working directory. Examples: " &
-    "system version, installed software, project " &
-    "structure, file contents, code analysis, " &
-    "static configuration.")
+    "Reply with exactly one of: RESULT, COMMAND," &
+    " or NOCACHE.")
   sysLines.add("")
   sysLines.add(
-    "A result should NOT be cached (NOCACHE) if " &
-    "it is VOLATILE — it changes frequently or " &
-    "depends on the current moment. Examples: " &
-    "current time, CPU/memory usage, running " &
-    "processes, network status, live metrics, " &
-    "disk space, recent log entries, git status " &
-    "with uncommitted changes.")
+    "RESULT — The output is STABLE. The same " &
+    "query would produce identical or nearly " &
+    "identical output when run again in the same " &
+    "working directory. Cache the final output " &
+    "for immediate reuse. Examples: system " &
+    "version, installed software versions, " &
+    "project structure, file contents, static " &
+    "configuration, code analysis.")
   sysLines.add("")
   sysLines.add(
-    "Reply with exactly CACHE or NOCACHE.")
+    "COMMAND — The command is correct and " &
+    "reusable, but the output is VOLATILE and " &
+    "changes over time. Cache the command for " &
+    "re-execution so the LLM does not need to " &
+    "regenerate it. Examples: current time, " &
+    "CPU/memory usage, running processes, disk " &
+    "space, network status, live metrics, git " &
+    "status with uncommitted changes.")
+  sysLines.add("")
+  sysLines.add(
+    "NOCACHE — Neither the command nor the output" &
+    " should be cached. The query is too context-" &
+    "dependent or ephemeral for caching to be " &
+    "useful. Examples: queries about transient " &
+    "errors, ambiguous requests that may require " &
+    "different commands next time.")
   let sysContent = sysLines.join("\n")
   var userLines: seq[string] = @[]
   userLines.add(fmt"Query: {query}")

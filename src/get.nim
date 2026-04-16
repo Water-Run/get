@@ -11,18 +11,16 @@
 ## reporting.  The query flow supports instance (single-call) and
 ## non-instance (multi-step) modes, optional double-check safety
 ## review, manual-confirm gating, forbidden-command-pattern
-## validation, response caching with LLM-driven cache-worthiness
-## checks, structured logging, model-strength warnings, progress
-## display, external-display rendering (bat/mdcat), and bundled
-## tool integration.
+## validation, response caching with three-way LLM-driven
+## cache-worthiness decisions (RESULT / COMMAND / NOCACHE),
+## structured logging, model-strength warnings, progress display,
+## external-display rendering (bat/mdcat), and bundled tool
+## integration.
 ##
-## CLI override flags (e.g. --model, --manual-confirm, --timeout)
-## allow per-invocation overrides of any configuration option
-## without modifying the persisted config file.
-##
-## ANSI virtual terminal processing is initialised at startup via
-## initAnsi so that styled output works correctly on all platforms
-## including Windows.
+## The output mode is controlled by a single ``vivid`` boolean
+## (default: true).  When vivid is enabled, output uses animated
+## spinners, ANSI colours, and optional external rendering.  When
+## disabled, plain unformatted text is produced.
 
 {.experimental: "strictFuncs".}
 
@@ -71,8 +69,9 @@ query flags (per-invocation overrides):
   --no-instance                multi-step mode
   --hide-process               suppress intermediate output
   --no-hide-process            show intermediate output
+  --vivid                      enable vivid output mode
+  --no-vivid                   plain text output mode
   --model <name>               override LLM model
-  --style <simp|std|vivid>     override output style
   --timeout <seconds>          override request timeout
 
 set options:
@@ -109,8 +108,8 @@ set options:
                        (integer or false, default: 1000)
   log-max-entries    max log entries retained
                        (integer or false, default: 1000)
-  style              output style: simp, std, vivid
-                       (default: std)
+  vivid              vivid output mode with colours and animation
+                       (true/false, default: true)
   external-display   use bat/mdcat for output rendering
                        (true/false, default: true)
 
@@ -140,12 +139,12 @@ get flags:
 examples:
   get "system version"
   get "disk usage" --no-cache
-  get "list files" --model gpt-5.3-codex --style vivid
+  get "list files" --model gpt-5.3-codex --vivid
   get set model gpt-5.3-codex
   get set key sk-your-api-key
   get set url https://api.openai.com/v1
   get set timeout false
-  get set style vivid
+  get set vivid false
   get config --model
   get cache --clean
   get log --clean"""
@@ -155,9 +154,6 @@ examples:
 # ---------------------------------------------------------------------------
 
 ## Holds per-invocation override values extracted from query flags.
-## Fields are Option types so that ``none`` indicates the user did
-## not specify the flag and the persisted config value should be
-## used instead.
 type
   QueryOverrides = object
     noCache*: bool               ## Bypass cache.
@@ -166,8 +162,8 @@ type
     doubleCheck*: Option[bool]   ## Override double-check.
     instance*: Option[bool]      ## Override instance mode.
     hideProcess*: Option[bool]   ## Override hide-process.
+    vivid*: Option[bool]         ## Override vivid mode.
     model*: Option[string]       ## Override model name.
-    style*: Option[string]       ## Override output style.
     timeout*: Option[int]        ## Override timeout seconds.
 
 # ---------------------------------------------------------------------------
@@ -191,8 +187,7 @@ proc implUsageError(
 ##
 ## :param args: All CLI arguments (after subcommand routing).
 ## :returns: A tuple of (query string, QueryOverrides).
-## :raises: GetError: If a flag that requires a value is missing
-##          its argument.
+## :raises: GetError: If a flag that requires a value is missing.
 func implParseQueryArgs(
   args: seq[string]
 ): tuple[query: string, overrides: QueryOverrides] =
@@ -204,8 +199,8 @@ func implParseQueryArgs(
     doubleCheck: none(bool),
     instance: none(bool),
     hideProcess: none(bool),
+    vivid: none(bool),
     model: none(string),
-    style: none(string),
     timeout: none(int)
   )
   var i = 0
@@ -232,18 +227,16 @@ func implParseQueryArgs(
       ov.hideProcess = some(true)
     of "--no-hide-process":
       ov.hideProcess = some(false)
+    of "--vivid":
+      ov.vivid = some(true)
+    of "--no-vivid":
+      ov.vivid = some(false)
     of "--model":
       if i + 1 >= args.len:
         raise newException(GetError,
           "--model requires a value")
       i += 1
       ov.model = some(args[i])
-    of "--style":
-      if i + 1 >= args.len:
-        raise newException(GetError,
-          "--style requires a value")
-      i += 1
-      ov.style = some(args[i])
     of "--timeout":
       if i + 1 >= args.len:
         raise newException(GetError,
@@ -280,10 +273,10 @@ proc implApplyOverrides(
     cfg.instance = ov.instance.get
   if ov.hideProcess.isSome:
     cfg.hideProcess = ov.hideProcess.get
+  if ov.vivid.isSome:
+    cfg.vivid = ov.vivid.get
   if ov.model.isSome:
     cfg.model = ov.model.get
-  if ov.style.isSome:
-    cfg.style = ov.style.get
   if ov.timeout.isSome:
     cfg.timeout = ov.timeout.get
 
@@ -291,8 +284,7 @@ proc implApplyOverrides(
 # Private helpers — style loading
 # ---------------------------------------------------------------------------
 
-## Loads the style and binDir from the config, used by subcommand
-## handlers that need styled output.
+## Loads the style and binDir from the config.
 ##
 ## :param cfg: The loaded configuration.
 ## :returns: A tuple of (StyleKind, binDir string).
@@ -300,7 +292,7 @@ proc implLoadStyle(
   cfg: Config
 ): tuple[sk: StyleKind, binDir: string] =
   result = (
-    sk: parseStyle(cfg.style),
+    sk: toStyleKind(cfg.vivid),
     binDir: getBundledBinDir()
   )
 
@@ -392,8 +384,8 @@ proc implHandleConfig(args: seq[string]) =
     of "log-max-entries":
       styleKeyValue(sk, "log-max-entries",
         formatIntOrDisable(cfg.logMaxEntries))
-    of "style":
-      styleKeyValue(sk, "style", cfg.style)
+    of "vivid":
+      styleKeyValue(sk, "vivid", $cfg.vivid)
     of "external-display":
       styleKeyValue(sk, "external-display",
         $cfg.externalDisplay)
@@ -456,16 +448,13 @@ proc implHandleLog(args: seq[string]) =
     implUsageError(
       fmt"unknown argument '{args[0]}' for 'log'")
 
-## Handles `get get` and its sub-flags.  All output is routed
-## through the style system so that simp, std, and vivid modes
-## produce visually distinct results.
+## Handles `get get` and its sub-flags.
 ##
 ## :param args: Arguments after "get".
 proc implHandleGet(args: seq[string]) =
   let cfg = loadConfig()
   let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
-    # Display all application metadata.
     styleSeparator(sk, DIV_SECTION)
     styleKeyValue(sk, "name", APP_NAME)
     styleKeyValue(sk, "version", APP_VERSION)
@@ -487,8 +476,7 @@ proc implHandleGet(args: seq[string]) =
     implUsageError(
       fmt"unknown option '{args[0]}' for 'get get'")
 
-## Handles `get isok`.  Checks config readiness then sends a probe
-## request to the LLM.
+## Handles `get isok`.
 proc implHandleIsOk() =
   let cfg = loadConfig()
   let (sk, _) = implLoadStyle(cfg)
@@ -536,8 +524,7 @@ proc implHandleIsOk() =
 # Private helpers — query flow
 # ---------------------------------------------------------------------------
 
-## Resolves the effective shell, falling back to the platform
-## default when the configured value is empty.
+## Resolves the effective shell.
 ##
 ## :param cfg: The loaded configuration.
 ## :returns: A non-empty shell name.
@@ -545,8 +532,7 @@ func implEffectiveShell(cfg: Config): string =
   if cfg.shell.len > 0: cfg.shell
   else: defaultShell()
 
-## Resolves the effective forbidden-command pattern, falling back
-## to the built-in default when the user has not configured one.
+## Resolves the effective forbidden-command pattern.
 ##
 ## :param cfg: The loaded configuration.
 ## :param sk: The active output style (for warnings).
@@ -558,17 +544,14 @@ proc implEffectivePattern(
   if cfg.commandPattern.isSome:
     let pat = cfg.commandPattern.get
     if pat.len == 0:
-      # User explicitly cleared the pattern.
       styleWarning(sk,
         "warning: command-pattern is empty — " &
         "no forbidden command filtering is active")
       return ""
     return pat
-  # No custom pattern — use built-in default.
   result = DEFAULT_COMMAND_PATTERN
 
-## Sends an LLM request built from the supplied messages and
-## returns the response.
+## Sends an LLM request and returns the response.
 ##
 ## :param messages: Conversation messages to send.
 ## :param cfg: The loaded configuration.
@@ -595,7 +578,7 @@ proc implLlmCall(
     sk = sk
   )
 
-## Optionally performs the double-check safety review on a command.
+## Performs the double-check safety review on a command.
 ##
 ## :param command: The command to review.
 ## :param query: The original user query.
@@ -628,23 +611,23 @@ proc implDoubleCheck(
   else:
     result = command
 
-## Asks the LLM whether a query result is worth caching.  Returns
-## true when the model answers "CACHE" or when the check fails
-## (fail-open so transient errors do not break caching).
+## Asks the LLM whether a query result should be cached and how.
+## Returns cdResult, cdCommand, or cdNoCache.  Defaults to
+## cdResult on transient errors (fail-open).
 ##
 ## :param query: The original user query.
 ## :param command: The generated command.
 ## :param output: The full command output.
 ## :param cfg: The loaded configuration.
 ## :param key: The API key.
-## :returns: true when the result should be cached.
+## :returns: The cache decision.
 proc implCheckShouldCache(
   query: string,
   command: string,
   output: string,
   cfg: Config,
   key: string
-): bool =
+): CacheDecision =
   try:
     let preview =
       if output.len > CACHE_CHECK_PREVIEW_LEN:
@@ -669,13 +652,18 @@ proc implCheckShouldCache(
     )
     let answer = toUpperAscii(
       resp.content.strip())
-    result = answer != "NOCACHE"
+    if answer.contains("NOCACHE"):
+      result = cdNoCache
+    elif answer.contains("COMMAND"):
+      result = cdCommand
+    else:
+      result = cdResult
   except CatchableError:
-    # Fail-open: cache on error.
-    result = true
+    # Fail-open: cache result on error.
+    result = cdResult
 
-## Emits a model-strength warning on stderr when the configured
-## model is not recognised as a known high-performance model.
+## Emits a model-strength warning when the configured model is
+## not recognised as a known high-performance model.
 ##
 ## :param model: The configured model name.
 ## :param sk: The active output style.
@@ -712,7 +700,7 @@ proc implHandleQuery(
       "model is not configured." &
       " Run: get set model <model>")
 
-  let sk = parseStyle(cfg.style)
+  let sk = toStyleKind(cfg.vivid)
   let binDir = getBundledBinDir()
   let extDisplay = cfg.externalDisplay
 
@@ -742,11 +730,39 @@ proc implHandleQuery(
     let hit = lookupCache(
       store, cacheHash, cfg.cacheExpiry)
     if hit.isSome:
-      if not cfg.hideProcess:
-        styleProgress(sk, "(cached)")
-      styleResult(sk, hit.get.output,
-        binDir, extDisplay)
-      return
+      case hit.get.cacheMode
+      of cmResult:
+        # Direct output reuse — no API call, no
+        # execution.
+        if not cfg.hideProcess:
+          styleProgress(sk, "(cached result)")
+        styleResult(sk, hit.get.output,
+          binDir, extDisplay)
+        return
+      of cmCommand:
+        # Re-execute the cached command for fresh
+        # output.
+        if not cfg.hideProcess:
+          styleProgress(sk, "(cached command)")
+          styleCommand(sk, "command",
+            hit.get.command)
+        let execRes = executeCommand(
+          hit.get.command, shell, binDir)
+        let output = execRes.output.strip()
+        if output.len > 0:
+          styleResult(sk, output, binDir,
+            extDisplay, false)
+        elif execRes.exitCode != 0:
+          styleError(sk,
+            fmt"command exited with code " &
+            fmt"{execRes.exitCode}")
+        if cfg.log:
+          logExecution(query, hit.get.command,
+            execRes.output, execRes.exitCode,
+            cfg.logMaxEntries)
+        if execRes.exitCode != 0:
+          quit(execRes.exitCode)
+        return
 
   # 1. Collect system information.
   if not cfg.hideProcess:
@@ -777,17 +793,21 @@ proc implHandleQuery(
     styleResult(sk, genResp.content, binDir,
       extDisplay, isMarkdown)
     if useCache:
-      var store = loadCache()
-      let entry = CacheEntry(
-        hash: cacheHash,
-        query: query,
-        command: "",
-        output: genResp.content,
-        timestamp: getTime().toUnix()
-      )
-      addCacheEntry(store, entry,
-        cfg.cacheMaxEntries, cfg.cacheExpiry)
-      saveCache(store)
+      let decision = implCheckShouldCache(
+        query, "", genResp.content, cfg, key.get)
+      if decision == cdResult:
+        var store = loadCache()
+        let entry = CacheEntry(
+          hash: cacheHash,
+          query: query,
+          command: "",
+          output: genResp.content,
+          cacheMode: cmResult,
+          timestamp: getTime().toUnix()
+        )
+        addCacheEntry(store, entry,
+          cfg.cacheMaxEntries, cfg.cacheExpiry)
+        saveCache(store)
     if cfg.log:
       logExecution(query, "(none)",
         genResp.content, 0, cfg.logMaxEntries)
@@ -812,21 +832,21 @@ proc implHandleQuery(
 
   # 5. Double-check (optional, default: enabled).
   if cfg.doubleCheck:
-      let reviewedCommand = implDoubleCheck(
-        command, query, info, cfg, key.get, sk)
-      let commandChanged = reviewedCommand != command
-      command = reviewedCommand
-      if not cfg.hideProcess and commandChanged:
-        styleCommand(sk,
-          "approved command", command)
+    let reviewedCommand = implDoubleCheck(
+      command, query, info, cfg, key.get, sk)
+    let commandChanged = reviewedCommand != command
+    command = reviewedCommand
+    if not cfg.hideProcess and commandChanged:
+      styleCommand(sk,
+        "approved command", command)
 
   # 6. Manual confirmation (optional).
   if cfg.manualConfirm:
-      let showCommandInPrompt = cfg.hideProcess
-      if not confirmExecution(
-          command, sk, showCommandInPrompt):
-        styleProgress(sk, "aborted.")
-        quit(0)
+    let showCommandInPrompt = cfg.hideProcess
+    if not confirmExecution(
+        command, sk, showCommandInPrompt):
+      styleProgress(sk, "aborted.")
+      quit(0)
 
   # 7. Execute the command with bundled bin dir.
   if not cfg.hideProcess:
@@ -840,7 +860,6 @@ proc implHandleQuery(
   styleSeparator(sk, DIV_SECTION)
   var finalOutput = ""
   if cfg.instance or outputMode == "DIRECT":
-    # Direct output — show raw command result.
     finalOutput = execRes.output.strip()
     if finalOutput.len > 0:
       styleResult(sk, finalOutput, info.binDir,
@@ -851,8 +870,6 @@ proc implHandleQuery(
         fmt"{execRes.exitCode}"
       styleError(sk, finalOutput)
   else:
-    # INTERPRET — send output to LLM for
-    # summarisation.
     if execRes.exitCode != 0 and
         execRes.output.strip().len == 0:
       finalOutput =
@@ -868,27 +885,43 @@ proc implHandleQuery(
       styleResult(sk, finalOutput, info.binDir,
         extDisplay, true)
 
-  # 9. Cache the result (with LLM cache-worthiness
-  #     check).
-  if useCache and finalOutput.len > 0:
-    let shouldCache = implCheckShouldCache(
+  # 9. Cache decision (three-way: RESULT / COMMAND
+  #    / NOCACHE).
+  if useCache and
+      (finalOutput.len > 0 or command.len > 0):
+    let decision = implCheckShouldCache(
       query, command, finalOutput, cfg, key.get)
-    if shouldCache:
+    case decision
+    of cdResult:
       var store = loadCache()
       let entry = CacheEntry(
         hash: cacheHash,
         query: query,
         command: command,
         output: finalOutput,
+        cacheMode: cmResult,
         timestamp: getTime().toUnix()
       )
       addCacheEntry(store, entry,
         cfg.cacheMaxEntries, cfg.cacheExpiry)
       saveCache(store)
-    else:
+    of cdCommand:
+      var store = loadCache()
+      let entry = CacheEntry(
+        hash: cacheHash,
+        query: query,
+        command: command,
+        output: "",
+        cacheMode: cmCommand,
+        timestamp: getTime().toUnix()
+      )
+      addCacheEntry(store, entry,
+        cfg.cacheMaxEntries, cfg.cacheExpiry)
+      saveCache(store)
+    of cdNoCache:
       if not cfg.hideProcess:
         styleProgress(sk,
-          "(result not cached — volatile)")
+          "(result not cached)")
 
   # 10. Log.
   if cfg.log:
@@ -906,8 +939,6 @@ proc implHandleQuery(
 
 ## Top-level CLI dispatcher.
 proc implMain() =
-  # Enable ANSI escape sequences on Windows before
-  # any styled output is written.
   initAnsi()
 
   let envWarning = checkEnvironment()
@@ -931,7 +962,7 @@ proc implMain() =
     implHandleGet(args[1 .. ^1])
   of "version":
     let cfg = loadConfig()
-    let sk = parseStyle(cfg.style)
+    let sk = toStyleKind(cfg.vivid)
     styleValue(sk, APP_VERSION)
   of "isok":
     implHandleIsOk()
@@ -950,8 +981,7 @@ proc implMain() =
 # Signal handling
 # ---------------------------------------------------------------------------
 
-## Ctrl+C handler that exits gracefully instead of producing a raw
-## exception traceback.
+## Ctrl+C handler that exits gracefully.
 proc implCtrlCHandler() {.noconv.} =
   stderr.write("\ninterrupted.\n")
   quit(130)

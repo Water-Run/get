@@ -2,21 +2,21 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
 ## This module sends requests to an OpenAI-compatible
-## chat-completions endpoint, parses the JSON response, and displays
-## elapsed-time progress on stderr while the HTTP round-trip is in
-## flight.  It uses asynchronous I/O so that a one-second timer can
-## fire between event-loop polls without blocking the transfer.
+## chat-completions endpoint, parses the JSON response, and
+## displays elapsed-time progress on stderr while the HTTP
+## round-trip is in flight.  It uses asynchronous I/O so that a
+## one-second timer can fire between event-loop polls without
+## blocking the transfer.
 ##
-## Progress display adapts to the configured output style: simp
-## shows plain dots, std shows coloured dots, and vivid shows an
-## animated spinner.  Dots are emitted every 2 seconds during the
-## first 10 seconds; after that, waited-time messages appear every
-## 10 seconds.
+## Progress display adapts to the configured output style: plain
+## shows dots, vivid shows an animated spinner.  Dots are emitted
+## every 2 seconds during the first 10 seconds; after that,
+## waited-time messages appear every 10 seconds.
 ##
 ## When timeout is set to 0 (disabled) the request may run
 ## indefinitely.  When maxTokens is set to 0, the ``max_tokens``
@@ -66,8 +66,7 @@ type
 # ---------------------------------------------------------------------------
 
 ## Builds the JSON request body for an OpenAI-compatible
-## chat-completions endpoint.  When maxTokens is 0 the field
-## is omitted from the payload.
+## chat-completions endpoint.
 ##
 ## :param req: The LLM request parameters.
 ## :returns: A JsonNode representing the full request body.
@@ -122,11 +121,8 @@ proc implPostRequest(
 # ---------------------------------------------------------------------------
 
 ## Waits for the given future while printing elapsed-time progress
-## to stderr.  The progress display adapts to the configured
-## output style: simp/std print dots every 2 seconds during the
-## first 10 seconds then switch to waited-time messages; vivid
-## shows an animated spinner.  When timeoutSec is 0 (disabled),
-## the request may run indefinitely.
+## to stderr.  Plain mode prints dots; vivid mode shows an
+## animated spinner.
 ##
 ## :param fut: The future representing the in-flight request.
 ## :param timeoutSec: Maximum wait in seconds (0 = no limit).
@@ -146,11 +142,7 @@ proc implAwaitWithProgress(
     if sk == skVivid:
       writeSpinner(0, "requesting...")
     else:
-      if sk == skStd:
-        stderr.write(ANSI_DIM & "requesting" &
-          ANSI_RESET)
-      else:
-        stderr.write("requesting")
+      stderr.write("requesting")
       stderr.flushFile()
       lineOpen = true
   while not fut.finished:
@@ -158,7 +150,6 @@ proc implAwaitWithProgress(
     elapsed += 1
     if not hideProcess:
       if sk == skVivid:
-        # Vivid: animated spinner every tick.
         let msg =
           if timeoutSec > 0:
             fmt"requesting... {elapsed}/{timeoutSec}s"
@@ -166,17 +157,11 @@ proc implAwaitWithProgress(
             fmt"requesting... {elapsed}s"
         writeSpinner(elapsed, msg)
       else:
-        # Simp / Std: dot every 2 seconds in the first 10s.
         if elapsed <= 10:
           if elapsed mod 2 == 0:
-            if sk == skStd:
-              stderr.write(ANSI_DIM & "." &
-                ANSI_RESET)
-            else:
-              stderr.write(".")
+            stderr.write(".")
             stderr.flushFile()
         elif elapsed == 11:
-          # Transition: close the dot line.
           if lineOpen:
             stderr.writeLine("")
             lineOpen = false
@@ -185,22 +170,14 @@ proc implAwaitWithProgress(
               fmt"- waited 10/{timeoutSec}s"
             else:
               "- waited 10s (no timeout)"
-          if sk == skStd:
-            stderr.writeLine(
-              ANSI_DIM & waitMsg & ANSI_RESET)
-          else:
-            stderr.writeLine(waitMsg)
+          stderr.writeLine(waitMsg)
         elif elapsed mod 10 == 0:
           let waitMsg =
             if timeoutSec > 0:
               fmt"- waited {elapsed}/{timeoutSec}s"
             else:
               fmt"- waited {elapsed}s (no timeout)"
-          if sk == skStd:
-            stderr.writeLine(
-              ANSI_DIM & waitMsg & ANSI_RESET)
-          else:
-            stderr.writeLine(waitMsg)
+          stderr.writeLine(waitMsg)
     if timeoutSec > 0 and elapsed >= timeoutSec:
       if sk == skVivid:
         clearSpinner()

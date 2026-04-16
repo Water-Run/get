@@ -6,12 +6,11 @@
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
-## This module provides three output style modes — simp, std, and
-## vivid — that control how progress indicators, separators,
-## warnings, commands, and results are rendered on stderr and
-## stdout.  The simp mode produces plain unformatted text, std adds
-## ANSI colours and divider lines, and vivid provides animated
-## spinners and bold colours.
+## This module provides two output modes — plain and vivid — that
+## control how progress indicators, separators, warnings, commands,
+## and results are rendered on stderr and stdout.  Plain mode
+## produces unformatted text; vivid mode provides animated spinners,
+## ANSI colours, and optional external rendering via bat and mdcat.
 ##
 ## On Windows, ANSI virtual terminal processing must be explicitly
 ## enabled via initAnsi before any styled output is written.
@@ -19,12 +18,9 @@
 ##
 ## When external-display is enabled (default), bat is used for
 ## syntax-highlighted output and mdcat is used for Markdown
-## rendering in std and vivid modes.  When external tools are
-## unavailable, std and vivid modes fall back to built-in ANSI
-## colorisation rather than plain text.  A simp-mode contradiction
-## warning is emitted when external-display is enabled but the
-## style is simp.  Missing binaries trigger a warning and graceful
-## fallback.
+## rendering in vivid mode.  When external tools are unavailable,
+## vivid mode falls back to built-in ANSI colourisation.  Missing
+## binaries trigger a warning and graceful fallback.
 ##
 ## All styled output directed at progress or status goes to stderr;
 ## final results go to stdout.  The module exposes pure or
@@ -41,11 +37,10 @@ import utils
 # Types
 # ---------------------------------------------------------------------------
 
-## Enumerates the three supported output styles.
+## Enumerates the two supported output styles.
 type
   StyleKind* = enum
     skSimp  ## Plain text, no formatting.
-    skStd   ## Dividers and basic ANSI colours.
     skVivid ## Animated spinners, colours, external rendering.
 
 # ---------------------------------------------------------------------------
@@ -77,7 +72,7 @@ const ANSI_CYAN* = "\e[36m"
 const ANSI_MAGENTA* = "\e[35m"
 
 # ---------------------------------------------------------------------------
-# Constants — dividers used by std mode
+# Constants — dividers (passed by callers, used only for vivid)
 # ---------------------------------------------------------------------------
 
 ## Thin separator for minor boundaries.
@@ -169,43 +164,20 @@ proc initAnsi*() =
           handle, mode or IMPL_ENABLE_VTP)
 
 # ---------------------------------------------------------------------------
-# Public API — style parsing
+# Public API — style conversion
 # ---------------------------------------------------------------------------
 
-## Parses a style name string into a StyleKind.
+## Converts a vivid boolean flag to the corresponding StyleKind.
 ##
-## :param s: One of ``"simp"``, ``"std"``, or ``"vivid"``
-##           (case-insensitive).
-## :returns: The corresponding StyleKind.
-## :raises: GetError: If the string is not a recognised style.
+## :param vivid: true for vivid mode, false for plain mode.
+## :returns: skVivid or skSimp.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert parseStyle("std") == skStd
-##     assert parseStyle("VIVID") == skVivid
-func parseStyle*(s: string): StyleKind =
-  case toLowerAscii(s.strip())
-  of "simp":  result = skSimp
-  of "std":   result = skStd
-  of "vivid": result = skVivid
-  else:
-    raise newException(GetError,
-      fmt"invalid style '{s}': expected " &
-      "'simp', 'std', or 'vivid'")
-
-## Returns the string representation of a StyleKind.
-##
-## :param kind: The style kind to convert.
-## :returns: ``"simp"``, ``"std"``, or ``"vivid"``.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert styleName(skStd) == "std"
-func styleName*(kind: StyleKind): string =
-  case kind
-  of skSimp:  result = "simp"
-  of skStd:   result = "std"
-  of skVivid: result = "vivid"
+##     assert toStyleKind(true) == skVivid
+##     assert toStyleKind(false) == skSimp
+func toStyleKind*(vivid: bool): StyleKind =
+  if vivid: skVivid else: skSimp
 
 # ---------------------------------------------------------------------------
 # Public API — external tool availability
@@ -317,44 +289,30 @@ proc renderWithBat*(
 # ---------------------------------------------------------------------------
 
 ## Applies lightweight ANSI colouring to a help text string so
-## that std and vivid modes produce readable styled output even
-## when the external bat binary is not available.
+## that vivid mode produces readable styled output even when the
+## external bat binary is not available.
 ##
 ## Colouring rules:
-##   - The first line (title) is rendered in bold.
+##   - The first line (title) is rendered in bold cyan.
 ##   - Lines that do not start with a space and end with a colon
-##     are treated as section headers and coloured in cyan.
+##     are treated as section headers and coloured in cyan bold.
 ##   - Lines starting with ``"  get "`` are treated as example
-##     commands and coloured in green.
+##     commands and coloured in green bold.
 ##   - Lines starting with ``"  --"`` are treated as flag
-##     descriptions and coloured in yellow.
+##     descriptions and coloured in yellow bold.
 ##   - All other lines are left unchanged.
 ##
 ## :param text: The full help text to colourise.
-## :param sk: The target output style (only skStd and skVivid
-##            produce coloured output).
 ## :returns: The colourised string.
-func implColorizeHelp(
-  text: string,
-  sk: StyleKind
-): string =
-  if sk == skSimp:
-    return text
+func implColorizeHelp(text: string): string =
   var lines: seq[string] = @[]
   var isFirst = true
   for rawLine in text.splitLines():
     if isFirst:
       isFirst = false
-      case sk
-      of skStd:
-        lines.add(
-          ANSI_BOLD & rawLine & ANSI_RESET)
-      of skVivid:
-        lines.add(
-          ANSI_CYAN & ANSI_BOLD &
-          rawLine & ANSI_RESET)
-      else:
-        lines.add(rawLine)
+      lines.add(
+        ANSI_CYAN & ANSI_BOLD &
+        rawLine & ANSI_RESET)
       continue
     let stripped = rawLine.strip()
     if stripped.len == 0:
@@ -363,65 +321,35 @@ func implColorizeHelp(
     # Section headers: not indented and ends with ':'
     if not rawLine.startsWith(" ") and
         stripped.endsWith(":"):
-      case sk
-      of skStd:
-        lines.add(
-          ANSI_CYAN & rawLine & ANSI_RESET)
-      of skVivid:
-        lines.add(
-          ANSI_CYAN & ANSI_BOLD &
-          rawLine & ANSI_RESET)
-      else:
-        lines.add(rawLine)
+      lines.add(
+        ANSI_CYAN & ANSI_BOLD &
+        rawLine & ANSI_RESET)
     # Example commands: indented "get ..."
     elif rawLine.startsWith("  get "):
-      case sk
-      of skStd:
-        lines.add(
-          ANSI_GREEN & rawLine & ANSI_RESET)
-      of skVivid:
-        lines.add(
-          ANSI_GREEN & ANSI_BOLD &
-          rawLine & ANSI_RESET)
-      else:
-        lines.add(rawLine)
+      lines.add(
+        ANSI_GREEN & ANSI_BOLD &
+        rawLine & ANSI_RESET)
     # Flags: indented "--..."
     elif rawLine.startsWith("  --"):
-      case sk
-      of skStd:
-        lines.add(
-          ANSI_YELLOW & rawLine & ANSI_RESET)
-      of skVivid:
-        lines.add(
-          ANSI_YELLOW & ANSI_BOLD &
-          rawLine & ANSI_RESET)
-      else:
-        lines.add(rawLine)
-    # Option names: 2-space indent, word followed
-    # by many spaces (set option table).
+      lines.add(
+        ANSI_YELLOW & ANSI_BOLD &
+        rawLine & ANSI_RESET)
+    # Option names: 2-space indent, word then spaces
     elif rawLine.startsWith("  ") and
         not rawLine.startsWith("    ") and
         stripped.len > 0 and
         stripped[0] in {'a' .. 'z', 'A' .. 'Z'}:
-      # Colour the option name (first word).
-      let trimmed = rawLine.strip(leading = true, trailing = false)
+      let trimmed = rawLine.strip(
+        leading = true, trailing = false)
       let spIdx = trimmed.find(' ')
       if spIdx > 0:
         let name = trimmed[0 ..< spIdx]
         let rest = trimmed[spIdx .. ^1]
         let indent = rawLine.len - trimmed.len
         let pad = repeat(' ', indent)
-        case sk
-        of skStd:
-          lines.add(
-            pad & ANSI_CYAN & name &
-            ANSI_RESET & rest)
-        of skVivid:
-          lines.add(
-            pad & ANSI_CYAN & ANSI_BOLD &
-            name & ANSI_RESET & rest)
-        else:
-          lines.add(rawLine)
+        lines.add(
+          pad & ANSI_CYAN & ANSI_BOLD &
+          name & ANSI_RESET & rest)
       else:
         lines.add(rawLine)
     else:
@@ -448,9 +376,9 @@ proc styleExternalDisplayCheck*(
   if sk == skSimp:
     stderr.writeLine(
       "warning: external-display has no " &
-      "effect in simp mode")
+      "effect in plain mode")
     return
-  # Check for missing binaries and warn.
+  # Vivid mode: check for missing binaries.
   var missing: seq[string] = @[]
   if not isBatAvailable(binDir):
     missing.add("bat")
@@ -478,8 +406,6 @@ proc styleProgress*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     stderr.writeLine(text)
-  of skStd:
-    stderr.writeLine(ANSI_DIM & text & ANSI_RESET)
   of skVivid:
     stderr.writeLine(
       ANSI_CYAN & ANSI_BOLD & text & ANSI_RESET)
@@ -493,11 +419,6 @@ proc styleWarning*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     stderr.writeLine(text)
-  of skStd:
-    stderr.writeLine(DIV_WARN)
-    stderr.writeLine(
-      ANSI_YELLOW & text & ANSI_RESET)
-    stderr.writeLine(DIV_WARN)
   of skVivid:
     stderr.writeLine(
       ANSI_YELLOW & ANSI_BOLD &
@@ -512,9 +433,6 @@ proc styleError*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     stderr.writeLine(text)
-  of skStd:
-    stderr.writeLine(
-      ANSI_RED & text & ANSI_RESET)
   of skVivid:
     stderr.writeLine(
       ANSI_RED & ANSI_BOLD & text & ANSI_RESET)
@@ -528,9 +446,6 @@ proc styleSuccess*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     stderr.writeLine(text)
-  of skStd:
-    stderr.writeLine(
-      ANSI_GREEN & text & ANSI_RESET)
   of skVivid:
     stderr.writeLine(
       ANSI_GREEN & ANSI_BOLD & text & ANSI_RESET)
@@ -549,22 +464,18 @@ proc styleCommand*(
   case kind
   of skSimp:
     stderr.writeLine(fmt"{label}: {command}")
-  of skStd:
-    stderr.writeLine(DIV_THIN)
-    stderr.writeLine(
-      ANSI_CYAN & fmt"{label}: " &
-      ANSI_BOLD & command & ANSI_RESET)
   of skVivid:
     stderr.writeLine(
       ANSI_MAGENTA & "❯ " & ANSI_BOLD &
       command & ANSI_RESET)
 
-## Writes a section separator to stderr.  Only emits visible
-## output in std mode; simp uses a blank line; vivid uses nothing
-## (the formatting itself provides visual separation).
+## Writes a section separator to stderr.  Simp emits a blank
+## line; vivid emits nothing (visual structure comes from
+## coloured text).
 ##
 ## :param kind: The active output style.
-## :param separator: The divider string (from DIV_* constants).
+## :param separator: The divider string (ignored in both modes
+##                   but kept for API stability).
 proc styleSeparator*(
   kind: StyleKind,
   separator: string
@@ -572,9 +483,6 @@ proc styleSeparator*(
   case kind
   of skSimp:
     stderr.writeLine("")
-  of skStd:
-    stderr.writeLine(
-      ANSI_DIM & separator & ANSI_RESET)
   of skVivid:
     discard
 
@@ -635,26 +543,6 @@ proc styleResult*(
   case kind
   of skSimp:
     echo text
-  of skStd:
-    stderr.writeLine(
-      ANSI_DIM & DIV_SECTION & ANSI_RESET)
-    if extDisplay and binDir.len > 0:
-      if isMarkdown and isMdcatAvailable(binDir):
-        let rendered = renderMarkdown(text, binDir)
-        stdout.write(rendered)
-        if not rendered.endsWith("\n"):
-          stdout.write("\n")
-      elif isBatAvailable(binDir):
-        let rendered = renderWithBat(text, binDir)
-        stdout.write(rendered)
-        if not rendered.endsWith("\n"):
-          stdout.write("\n")
-      else:
-        echo text
-    else:
-      echo text
-    stderr.writeLine(
-      ANSI_DIM & DIV_FOOTER & ANSI_RESET)
   of skVivid:
     if extDisplay and binDir.len > 0:
       if isMarkdown and isMdcatAvailable(binDir):
@@ -677,8 +565,8 @@ proc styleResult*(
 # ---------------------------------------------------------------------------
 
 ## Writes a key-value pair to stdout with style-appropriate
-## formatting.  Used by config display, cache info, log info, and
-## similar informational pages.
+## formatting.  Used by config display, cache info, log info,
+## and similar informational pages.
 ##
 ## :param kind: The active output style.
 ## :param key: The option or field name.
@@ -691,17 +579,13 @@ proc styleKeyValue*(
   case kind
   of skSimp:
     echo fmt"{key} = {value}"
-  of skStd:
-    echo ANSI_CYAN & key & ANSI_RESET &
-      " = " & value
   of skVivid:
     echo ANSI_CYAN & ANSI_BOLD & key &
       ANSI_RESET & " = " & value
 
 ## Writes a single value to stdout with style-appropriate
 ## formatting.  Used for simple value displays such as
-## ``get version`` and ``get get --version`` where only the
-## value itself is shown without a key label.
+## ``get version`` and ``get get --version``.
 ##
 ## :param kind: The active output style.
 ## :param text: The value text to display.
@@ -717,8 +601,6 @@ proc styleValue*(
   case kind
   of skSimp:
     echo text
-  of skStd:
-    echo ANSI_BOLD & text & ANSI_RESET
   of skVivid:
     echo ANSI_CYAN & ANSI_BOLD &
       text & ANSI_RESET
@@ -735,17 +617,12 @@ proc styleHeader*(
   case kind
   of skSimp:
     stderr.writeLine(title)
-  of skStd:
-    stderr.writeLine(
-      ANSI_DIM & DIV_SECTION & ANSI_RESET)
-    stderr.writeLine(
-      ANSI_BOLD & title & ANSI_RESET)
   of skVivid:
     stderr.writeLine(
       ANSI_CYAN & ANSI_BOLD & title & ANSI_RESET)
 
 ## Writes informational text to stdout with style-appropriate
-## formatting.  Used for structured output in subcommand handlers.
+## formatting.
 ##
 ## :param kind: The active output style.
 ## :param text: The informational text to display.
@@ -756,16 +633,13 @@ proc styleInfo*(
   case kind
   of skSimp:
     echo text
-  of skStd:
-    echo ANSI_DIM & text & ANSI_RESET
   of skVivid:
     echo text
 
-## Displays help text to stdout.  In simp mode the text is
-## printed unmodified.  In std and vivid modes, bat is used when
-## available (via external-display); otherwise the built-in ANSI
-## colouriser highlights section headers, example commands, and
-## option flags.
+## Displays help text to stdout.  In plain mode the text is
+## printed unmodified.  In vivid mode, bat is used when available
+## (via external-display); otherwise the built-in ANSI colouriser
+## highlights section headers, example commands, and option flags.
 ##
 ## :param kind: The active output style.
 ## :param text: The help text content.
@@ -780,7 +654,7 @@ proc styleHelp*(
   case kind
   of skSimp:
     echo text
-  of skStd, skVivid:
+  of skVivid:
     if extDisplay and binDir.len > 0 and
         isBatAvailable(binDir):
       let rendered = renderWithBat(text, binDir)
@@ -788,5 +662,4 @@ proc styleHelp*(
       if not rendered.endsWith("\n"):
         stdout.write("\n")
     else:
-      # Fall back to built-in ANSI colourisation.
-      echo implColorizeHelp(text, kind)
+      echo implColorizeHelp(text)

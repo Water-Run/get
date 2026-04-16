@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
@@ -93,7 +93,6 @@ ls -la /etc && \
 
   test "getBundledBinDir returns a string":
     let d = getBundledBinDir()
-    # May be empty in CI environments.
     discard d
 
   test "DEFAULT_COMMAND_PATTERN is non-empty":
@@ -154,7 +153,6 @@ suite "sysinfo":
 
   test "checkEnvironment runs without crash":
     let w = checkEnvironment()
-    # May or may not return a warning.
     discard w
 
 # ---------------------------------------------------------------------------
@@ -166,26 +164,20 @@ suite "exec":
   ## execution.
 
   test "validateCommandPattern allows safe command":
-    # Pattern blocks "rm", command is "ls" → allowed.
     check validateCommandPattern(
       "ls -la /etc", "\\brm\\b") == true
 
   test "validateCommandPattern blocks forbidden":
-    # Pattern blocks "rm", command has "rm" → blocked.
     check validateCommandPattern(
       "rm -rf /", "\\brm\\b") == false
 
   test "validateCommandPattern with default pattern":
-    # Default pattern should block "rm".
     check validateCommandPattern(
       "rm -rf /", DEFAULT_COMMAND_PATTERN) == false
-    # Default pattern should allow "ls".
     check validateCommandPattern(
       "ls -la", DEFAULT_COMMAND_PATTERN) == true
-    # Default pattern should block "kill".
     check validateCommandPattern(
       "kill -9 1234", DEFAULT_COMMAND_PATTERN) == false
-    # Default pattern should allow "rg".
     check validateCommandPattern(
       "rg pattern .", DEFAULT_COMMAND_PATTERN) == true
 
@@ -205,7 +197,6 @@ suite "exec":
         "test", "[invalid")
 
   test "checkPatternSafety reports uncovered":
-    # A very narrow pattern should miss some dangers.
     let warn = checkPatternSafety("\\brm\\b")
     check warn.len > 0
     check warn.contains("warning")
@@ -252,23 +243,11 @@ suite "exec":
 # ---------------------------------------------------------------------------
 
 suite "style":
-  ## Tests for style parsing and name conversion.
+  ## Tests for style conversion.
 
-  test "parseStyle accepts valid styles":
-    check parseStyle("simp") == skSimp
-    check parseStyle("std") == skStd
-    check parseStyle("vivid") == skVivid
-    check parseStyle("STD") == skStd
-    check parseStyle(" vivid ") == skVivid
-
-  test "parseStyle rejects invalid styles":
-    expect GetError:
-      discard parseStyle("invalid")
-
-  test "styleName round-trips":
-    check styleName(skSimp) == "simp"
-    check styleName(skStd) == "std"
-    check styleName(skVivid) == "vivid"
+  test "toStyleKind converts correctly":
+    check toStyleKind(true) == skVivid
+    check toStyleKind(false) == skSimp
 
 # ---------------------------------------------------------------------------
 # config — pure helpers via public API
@@ -297,6 +276,7 @@ suite "config defaults":
       DEFAULT_CACHE_MAX_ENTRIES
     check cfg.logMaxEntries ==
       DEFAULT_LOG_MAX_ENTRIES
+    check cfg.vivid == DEFAULT_VIVID
     check cfg.externalDisplay ==
       DEFAULT_EXTERNAL_DISPLAY
 
@@ -333,7 +313,7 @@ suite "config persistence round-trip":
       cacheExpiry:     7,
       cacheMaxEntries: 500,
       logMaxEntries:   200,
-      style:           "std",
+      vivid:           false,
       externalDisplay: false
     )
     saveConfig(original)
@@ -358,6 +338,7 @@ suite "config persistence round-trip":
       original.cacheMaxEntries
     check loaded.logMaxEntries ==
       original.logMaxEntries
+    check loaded.vivid == original.vivid
     check loaded.externalDisplay ==
       original.externalDisplay
     saveConfig(defaultConfig())
@@ -480,6 +461,15 @@ suite "setConfigOption":
       DEFAULT_LOG_MAX_ENTRIES
     saveConfig(defaultConfig())
 
+  test "set vivid":
+    setConfigOption("vivid", "false")
+    var cfg = loadConfig()
+    check cfg.vivid == false
+    setConfigOption("vivid", "true")
+    cfg = loadConfig()
+    check cfg.vivid == true
+    saveConfig(defaultConfig())
+
   test "set external-display":
     setConfigOption("external-display", "false")
     var cfg = loadConfig()
@@ -495,7 +485,7 @@ suite "setConfigOption":
 
 suite "cache":
   ## Tests for hash computation, cache persistence, lookup,
-  ## eviction, and management commands.
+  ## eviction, cache modes, and management commands.
 
   test "computeCacheHash is deterministic":
     let h1 = computeCacheHash(
@@ -543,13 +533,14 @@ suite "cache":
       false, none(string), none(string))
     check h1 == h2
 
-  test "save and load cache round-trip":
+  test "save and load cache round-trip cmResult":
     var store = CacheStore(entries: @[])
     let entry = CacheEntry(
       hash: "abc123",
       query: "test query",
       command: "echo hello",
       output: "hello",
+      cacheMode: cmResult,
       timestamp: getTime().toUnix()
     )
     addCacheEntry(store, entry, 1000, 30)
@@ -562,6 +553,30 @@ suite "cache":
         check e.query == "test query"
         check e.command == "echo hello"
         check e.output == "hello"
+        check e.cacheMode == cmResult
+        found = true
+    check found
+    discard cleanCache()
+
+  test "save and load cache round-trip cmCommand":
+    var store = CacheStore(entries: @[])
+    let entry = CacheEntry(
+      hash: "cmd456",
+      query: "cpu usage",
+      command: "top -bn1",
+      output: "",
+      cacheMode: cmCommand,
+      timestamp: getTime().toUnix()
+    )
+    addCacheEntry(store, entry, 1000, 30)
+    saveCache(store)
+    let loaded = loadCache()
+    var found = false
+    for e in loaded.entries:
+      if e.hash == "cmd456":
+        check e.cacheMode == cmCommand
+        check e.command == "top -bn1"
+        check e.output == ""
         found = true
     check found
     discard cleanCache()
@@ -573,12 +588,14 @@ suite "cache":
         query: "q",
         command: "cmd",
         output: "out",
+        cacheMode: cmResult,
         timestamp: getTime().toUnix()
       )
     ])
     let hit = lookupCache(store, "fresh1", 30)
     check hit.isSome
     check hit.get.output == "out"
+    check hit.get.cacheMode == cmResult
 
   test "lookupCache returns none when expired":
     let old = getTime().toUnix() - (31 * 86400)
@@ -588,6 +605,7 @@ suite "cache":
         query: "q",
         command: "cmd",
         output: "out",
+        cacheMode: cmResult,
         timestamp: old
       )
     ])
@@ -606,6 +624,7 @@ suite "cache":
         query: "old",
         command: "old-cmd",
         output: "old-out",
+        cacheMode: cmResult,
         timestamp: getTime().toUnix() - 100
       )
     ])
@@ -614,11 +633,13 @@ suite "cache":
       query: "new",
       command: "new-cmd",
       output: "new-out",
+      cacheMode: cmCommand,
       timestamp: getTime().toUnix()
     )
     addCacheEntry(store, entry, 1000, 30)
     check store.entries.len == 1
     check store.entries[0].query == "new"
+    check store.entries[0].cacheMode == cmCommand
 
   test "addCacheEntry enforces max entries":
     var store = CacheStore(entries: @[])
@@ -628,6 +649,7 @@ suite "cache":
         query: fmt"q{i}",
         command: "",
         output: "",
+        cacheMode: cmResult,
         timestamp:
           getTime().toUnix() - (5 - i).int64
       )
@@ -641,6 +663,7 @@ suite "cache":
         query: "system version",
         command: "uname -a",
         output: "Linux",
+        cacheMode: cmResult,
         timestamp: getTime().toUnix()
       ),
       CacheEntry(
@@ -648,6 +671,7 @@ suite "cache":
         query: "disk usage",
         command: "df -h",
         output: "50G",
+        cacheMode: cmCommand,
         timestamp: getTime().toUnix()
       )
     ])
@@ -664,6 +688,7 @@ suite "cache":
         query: "System Version",
         command: "",
         output: "",
+        cacheMode: cmResult,
         timestamp: getTime().toUnix()
       )
     ])
@@ -679,6 +704,7 @@ suite "cache":
         query: "q",
         command: "",
         output: "",
+        cacheMode: cmResult,
         timestamp: getTime().toUnix()
       )
     ])
@@ -688,6 +714,26 @@ suite "cache":
     let loaded = loadCache()
     check loaded.entries.len == 0
 
+  test "backward compat: missing cacheMode defaults to cmResult":
+    # Simulate an old-format cache entry by writing JSON
+    # directly without cacheMode.
+    let path = getCacheFilePath()
+    let content = """[
+  {
+    "hash": "compat1",
+    "query": "old query",
+    "command": "old cmd",
+    "output": "old out",
+    "timestamp": 1000000
+  }
+]
+"""
+    writeFile(path, content)
+    let loaded = loadCache()
+    check loaded.entries.len == 1
+    check loaded.entries[0].cacheMode == cmResult
+    discard cleanCache()
+
 # ---------------------------------------------------------------------------
 # logger tests
 # ---------------------------------------------------------------------------
@@ -696,7 +742,6 @@ suite "logger":
   ## Tests for log cleaning and info display.
 
   test "cleanLog on empty log returns 0":
-    # Ensure clean state.
     let path = getLogFilePath()
     if fileExists(path):
       writeFile(path, "")
@@ -769,20 +814,6 @@ suite "prompt":
     check msgs[0].content.contains("bat")
     check msgs[0].content.contains("mdcat")
 
-  test "buildQueryMessages includes system info":
-    let info = SysInfo(
-      os: "linux", arch: "amd64",
-      hostname: "", username: "",
-      cwd: "/tmp", shell: "bash",
-      shellVersion: "",
-      availableTools: @[],
-      bundledTools: @[],
-      binDir: "")
-    let msgs = buildQueryMessages(
-      info, "test", "bash", false,
-      none(string), none(string))
-    check msgs[0].content.contains("linux")
-
   test "buildQueryMessages includes custom prompt":
     let info = SysInfo(
       os: "linux", arch: "amd64",
@@ -837,6 +868,14 @@ suite "prompt":
     check msgs[0].content.contains("disk usage")
     check msgs[0].content.contains("df -h")
     check msgs[0].content.contains("50G")
+
+  test "buildCacheCheckMessages mentions COMMAND":
+    let msgs = buildCacheCheckMessages(
+      "cpu usage", "top -bn1", "50%")
+    check msgs.len == 2
+    check msgs[0].content.contains("RESULT")
+    check msgs[0].content.contains("COMMAND")
+    check msgs[0].content.contains("NOCACHE")
 
 # ---------------------------------------------------------------------------
 # llm connectivity (optional)

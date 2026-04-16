@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -10,8 +10,8 @@
 ## serialisation, and all persistence logic including platform-
 ## specific secure key storage (Linux: file permissions 0600;
 ## Windows: DPAPI).  It exposes high-level operations consumed by
-## the CLI dispatcher: load, save, display, reset, set-by-name, and
-## readiness checking.
+## the CLI dispatcher: load, save, display, reset, set-by-name,
+## and readiness checking.
 ##
 ## String options (url, model, shell) accept an empty string as an
 ## explicit "unset" value.  Boolean options reset to their compile-
@@ -73,12 +73,14 @@ const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
-## Default output style (simp | std | vivid).
-const DEFAULT_STYLE* = "std"
+## Default vivid mode flag.  When true, output uses animated
+## spinners, ANSI colours, and optional external rendering.
+## When false, plain unformatted text is used.
+const DEFAULT_VIVID* = true
 
 ## Default external-display flag.  When true, bat and mdcat are
 ## used for syntax-highlighted and Markdown output rendering in
-## std and vivid modes.
+## vivid mode.
 const DEFAULT_EXTERNAL_DISPLAY* = true
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ type
     cacheExpiry*: int                ## Cache expiry in days. 0=never.
     cacheMaxEntries*: int            ## Max cached entries. 0=unlimited.
     logMaxEntries*: int              ## Max log entries. 0=unlimited.
-    style*: string                   ## Output style: simp, std, vivid.
+    vivid*: bool                     ## Vivid output mode.
     externalDisplay*: bool           ## Use bat/mdcat for output rendering.
 
 # ---------------------------------------------------------------------------
@@ -296,7 +298,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
     "logMaxEntries":   cfg.logMaxEntries,
-    "style":           cfg.style,
+    "vivid":           cfg.vivid,
     "externalDisplay": cfg.externalDisplay
   }
   if cfg.commandPattern.isSome:
@@ -344,8 +346,8 @@ proc implJsonToConfig(
     logMaxEntries:
       node{"logMaxEntries"}.getInt(
         defaults.logMaxEntries),
-    style:
-      node{"style"}.getStr(defaults.style),
+    vivid:
+      node{"vivid"}.getBool(defaults.vivid),
     externalDisplay:
       node{"externalDisplay"}.getBool(
         defaults.externalDisplay)
@@ -393,7 +395,7 @@ func defaultConfig*(): Config =
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
-    style:           DEFAULT_STYLE,
+    vivid:           DEFAULT_VIVID,
     externalDisplay: DEFAULT_EXTERNAL_DISPLAY
   )
 
@@ -549,7 +551,7 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     formatIntOrDisable(cfg.cacheMaxEntries))
   styleKeyValue(sk, "log-max-entries",
     formatIntOrDisable(cfg.logMaxEntries))
-  styleKeyValue(sk, "style", cfg.style)
+  styleKeyValue(sk, "vivid", $cfg.vivid)
   styleKeyValue(sk, "external-display",
     $cfg.externalDisplay)
 
@@ -617,7 +619,6 @@ proc setConfigOption*(name: string, value: string) =
       if safetyWarn.len > 0:
         stderr.writeLine(safetyWarn)
     else:
-      # Reset to none — runtime will use the default.
       cfg.commandPattern = none(string)
   of "system-prompt":
     if value.len > 0:
@@ -643,16 +644,9 @@ proc setConfigOption*(name: string, value: string) =
   of "log-max-entries":
     cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)
-  of "style":
-    if value.len == 0:
-      cfg.style = DEFAULT_STYLE
-    else:
-      let lower = toLowerAscii(value)
-      if lower notin ["simp", "std", "vivid"]:
-        raise newException(GetError,
-          fmt"invalid value '{value}' for 'style':" &
-          " expected 'simp', 'std', or 'vivid'")
-      cfg.style = lower
+  of "vivid":
+    cfg.vivid = implParseBool(
+      value, name, DEFAULT_VIVID)
   of "external-display":
     cfg.externalDisplay = implParseBool(
       value, name, DEFAULT_EXTERNAL_DISPLAY)

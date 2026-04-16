@@ -2,19 +2,16 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: logger.nim
 ## :License: AGPL-3.0
 ##
 ## This module appends timestamped entries to the get.log file in
 ## the application configuration directory.  Each entry records the
-## user query, generated command, exit code, and a truncated preview
-## of the command output.  Logging failures are silently ignored so
-## that they never prevent normal tool operation.
-##
-## It also provides log management commands: status display,
-## cleaning, and entry-count enforcement.  When maxEntries is 0
-## (disabled) no trimming is performed.
+## user query, generated command, exit code, and a truncated
+## preview of the command output.  Logging failures are silently
+## ignored.  It also provides log management commands: status
+## display, cleaning, and entry-count enforcement.
 
 {.experimental: "strictFuncs".}
 
@@ -72,10 +69,7 @@ func implTrimEntries(
 # Public API
 # ---------------------------------------------------------------------------
 
-## Appends a log entry for a single query execution.  Silently
-## ignores all I/O errors.  When maxEntries is positive, enforces
-## the cap by trimming oldest entries.  When maxEntries is 0
-## (disabled) no trimming is performed.
+## Appends a log entry for a single query execution.
 ##
 ## :param query: The original user query text.
 ## :param command: The shell command that was executed.

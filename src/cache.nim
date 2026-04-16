@@ -2,19 +2,23 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
 ## This module implements a disk-backed cache that maps
 ## (query + context) hashes to previously generated commands and
-## their final output.  When the cache is enabled and a hash match
-## is found, the tool can return the cached result immediately
-## without making any LLM API calls or executing commands.
+## their final output.  Each entry carries a cache mode that
+## determines behaviour on a subsequent hit: cmResult entries
+## return their stored output immediately; cmCommand entries
+## re-execute the stored command to produce fresh output.
 ##
 ## Cache entries expire after a configurable number of days (0 =
 ## never expire) and the store is capped at a configurable maximum
 ## number of entries (0 = unlimited).
+##
+## The cache-worthiness check performed by the caller yields a
+## CacheDecision that drives which mode (or none) is stored.
 
 {.experimental: "strictFuncs".}
 
@@ -30,14 +34,28 @@ import utils
 # Types
 # ---------------------------------------------------------------------------
 
+## Describes how a cache entry should be used on a subsequent hit.
+type
+  CacheMode* = enum
+    cmCommand  ## Re-execute the cached command to get fresh output.
+    cmResult   ## Return the cached output immediately.
+
+## Describes the outcome of a cache-worthiness check.
+type
+  CacheDecision* = enum
+    cdNoCache  ## Do not cache anything.
+    cdCommand  ## Cache the command for re-execution.
+    cdResult   ## Cache the final output for direct reuse.
+
 ## A single cached result mapping a context hash to the generated
-## command and final displayed output.
+## command and optionally the final displayed output.
 type
   CacheEntry* = object
     hash*: string       ## MD5 hex digest of the context.
     query*: string      ## Original user query text.
     command*: string     ## Generated shell command (may be empty).
-    output*: string     ## Final displayed output.
+    output*: string     ## Final output (populated for cmResult, empty for cmCommand).
+    cacheMode*: CacheMode ## Behaviour on a cache hit.
     timestamp*: int64   ## Unix epoch seconds when entry was created.
 
 ## In-memory representation of the entire cache file.
@@ -56,6 +74,31 @@ type
 ## :returns: Negative if a is older, positive if newer, 0 if equal.
 func implCmpTimestamp(a, b: CacheEntry): int =
   result = cmp(a.timestamp, b.timestamp)
+
+# ---------------------------------------------------------------------------
+# Private helpers — CacheMode serialisation
+# ---------------------------------------------------------------------------
+
+## Converts a CacheMode to its JSON string representation.
+##
+## :param mode: The cache mode to serialise.
+## :returns: "command" or "result".
+func implCacheModeToStr(mode: CacheMode): string =
+  case mode
+  of cmCommand: result = "command"
+  of cmResult:  result = "result"
+
+## Parses a string into a CacheMode.  Returns cmResult for any
+## unrecognised value (backward-compatible with old entries that
+## lack the field).
+##
+## :param s: The string to parse.
+## :returns: The corresponding CacheMode.
+func implStrToCacheMode(s: string): CacheMode =
+  if toLowerAscii(s) == "command":
+    result = cmCommand
+  else:
+    result = cmResult
 
 # ---------------------------------------------------------------------------
 # Public API — hash computation
@@ -114,8 +157,8 @@ proc computeCacheHash*(
 # Public API — persistence
 # ---------------------------------------------------------------------------
 
-## Loads the cache store from disk.  Returns an empty store when the
-## file does not exist or cannot be parsed.
+## Loads the cache store from disk.  Returns an empty store when
+## the file does not exist or cannot be parsed.
 ##
 ## :returns: The current cache store.
 ##
@@ -143,6 +186,9 @@ proc loadCache*(): CacheStore =
           item{"command"}.getStr(""),
         output:
           item{"output"}.getStr(""),
+        cacheMode:
+          implStrToCacheMode(
+            item{"cacheMode"}.getStr("result")),
         timestamp:
           item{"timestamp"}.getBiggestInt(0).int64
       )
@@ -169,6 +215,7 @@ proc saveCache*(store: CacheStore) =
       "query":     e.query,
       "command":   e.command,
       "output":    e.output,
+      "cacheMode": implCacheModeToStr(e.cacheMode),
       "timestamp": e.timestamp
     })
   try:
@@ -203,7 +250,6 @@ proc lookupCache*(
   for e in store.entries:
     if e.hash == hash:
       if expiryDays <= 0:
-        # Expiry disabled — entry never expires.
         return some(e)
       let maxAge = expiryDays.int64 * 86400'i64
       if (now - e.timestamp) <= maxAge:
@@ -235,14 +281,12 @@ proc addCacheEntry*(
   maxEntries: int,
   expiryDays: int
 ) =
-  # Remove any existing entry with the same hash.
   var kept: seq[CacheEntry] = @[]
   for e in store.entries:
     if e.hash != entry.hash:
       kept.add(e)
   kept.add(entry)
 
-  # Purge expired entries (only when expiry is enabled).
   if expiryDays > 0:
     let now = epochTime().int64
     let maxAge = expiryDays.int64 * 86400'i64
@@ -252,7 +296,6 @@ proc addCacheEntry*(
         fresh.add(e)
     kept = fresh
 
-  # Enforce cap by removing oldest entries.
   if maxEntries > 0 and kept.len > maxEntries:
     kept.sort(implCmpTimestamp)
     kept = kept[kept.len - maxEntries .. ^1]
@@ -342,6 +385,17 @@ proc displayCacheInfo*(
   styleKeyValue(sk, "cache", status)
   styleKeyValue(sk, "entries",
     $store.entries.len)
+  # Count by mode.
+  var cmdCount = 0
+  var resCount = 0
+  for e in store.entries:
+    case e.cacheMode
+    of cmCommand: cmdCount += 1
+    of cmResult:  resCount += 1
+  styleKeyValue(sk, "command entries",
+    $cmdCount)
+  styleKeyValue(sk, "result entries",
+    $resCount)
   styleKeyValue(sk, "max entries",
     formatIntOrDisable(maxEntries))
   let expiryStr =
