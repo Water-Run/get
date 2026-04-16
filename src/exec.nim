@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: exec.nim
 ## :License: AGPL-3.0
 ##
@@ -24,9 +24,10 @@
 ## the runtime dependency on libpcre and enabling fully static
 ## binaries.
 ##
-## The manual-confirm prompt reads from the controlling terminal
-## directly (/dev/tty on Unix, CONIN$ on Windows) so that it works
-## regardless of stdin redirection or async event-loop state.
+## The manual-confirm prompt reads user input via stdin as the
+## primary method, falling back to /dev/tty (Unix) or CONIN$
+## (Windows) when stdin is unavailable.  This ordering ensures
+## compatibility after asynchronous event loop usage.
 
 {.experimental: "strictFuncs".}
 
@@ -101,6 +102,36 @@ proc implBuildEnv(binDir: string): StringTableRef =
     env["PATH"] = binDir & ":" & curPath
   result = env
 
+## Reads a single line of text from the controlling terminal.
+## Tries stdin first because it is the most reliable method after
+## asynchronous event loop usage (Nim's asyncdispatch may leave
+## /dev/tty or CONIN$ file descriptors in unexpected states on
+## some platforms).  Falls back to /dev/tty (Unix) or CONIN$
+## (Windows) when stdin is not available.
+##
+## :returns: The trimmed user input, or empty on failure.
+proc implReadTerminalLine(): string =
+  # Primary method: read from stdin.
+  try:
+    result = stdin.readLine()
+    return
+  except IOError, EOFError:
+    discard
+  # Fallback: direct terminal device.
+  try:
+    when defined(windows):
+      let tty = open("CONIN$", fmRead)
+    else:
+      let tty = open("/dev/tty", fmRead)
+    try:
+      result = tty.readLine()
+    finally:
+      tty.close()
+    return
+  except IOError, EOFError, OSError:
+    discard
+  result = ""
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -161,13 +192,14 @@ proc validateCommandPattern*(
       fmt"invalid command-pattern regex: {pattern}")
 
 ## Displays the command on stderr and reads a single line from
-## the controlling terminal.  Returns true only when the user
-## types "y" (case-insensitive).  The terminal is opened directly
-## via /dev/tty (Unix) or CONIN$ (Windows) so that the prompt
-## works correctly regardless of stdin state.
+## the user.  Returns true only when the user types "y"
+## (case-insensitive).  Input is read from stdin first; if stdin
+## is unavailable, falls back to /dev/tty (Unix) or CONIN$
+## (Windows).
 ##
 ## :param command: The command awaiting confirmation.
 ## :param sk: The active output style.
+## :param showCommand: Whether to display the command in the prompt.
 ## :returns: true if the user confirms with "y".
 ##
 ## .. code-block:: nim
@@ -176,38 +208,45 @@ proc validateCommandPattern*(
 ##     discard
 proc confirmExecution*(
   command: string,
-  sk: StyleKind = skSimp
+  sk: StyleKind = skSimp,
+  showCommand: bool = true
 ): bool =
   case sk
   of skSimp:
-    stderr.write(
-      fmt"execute: {command}" &
-      "\nconfirm? (y/N): ")
-  of skStd:
-    stderr.write(
-      ANSI_CYAN & "execute: " & ANSI_BOLD &
-      command & ANSI_RESET &
-      "\n" & ANSI_YELLOW &
-      "confirm? (y/N): " & ANSI_RESET)
-  of skVivid:
-    stderr.write(
-      ANSI_MAGENTA & "❯ " & ANSI_BOLD &
-      command & ANSI_RESET &
-      "\n" & ANSI_YELLOW & ANSI_BOLD &
-      "confirm? (y/N): " & ANSI_RESET)
-  stderr.flushFile()
-  try:
-    when defined(windows):
-      let tty = open("CONIN$", fmRead)
+    if showCommand:
+      stderr.write(
+        "execute: " & command &
+        "\nconfirm? (y/N): ")
     else:
-      let tty = open("/dev/tty", fmRead)
-    try:
-      let response = tty.readLine()
-      result = toLowerAscii(response.strip()) == "y"
-    finally:
-      tty.close()
-  except IOError, EOFError, OSError:
-    result = false
+      stderr.write("confirm? (y/N): ")
+  of skStd:
+    if showCommand:
+      stderr.write(
+        ANSI_CYAN & "execute: " & ANSI_BOLD &
+        command & ANSI_RESET &
+        "\n" & ANSI_YELLOW &
+        "confirm? (y/N): " & ANSI_RESET)
+    else:
+      stderr.write(
+        ANSI_YELLOW &
+        "confirm? (y/N): " & ANSI_RESET)
+  of skVivid:
+    if showCommand:
+      stderr.write(
+        ANSI_MAGENTA & "❯ " & ANSI_BOLD &
+        command & ANSI_RESET &
+        "\n" & ANSI_YELLOW & ANSI_BOLD &
+        "confirm? (y/N): " & ANSI_RESET)
+    else:
+      stderr.write(
+        ANSI_YELLOW & ANSI_BOLD &
+        "confirm? (y/N): " & ANSI_RESET)
+  stderr.flushFile()
+  # Flush stdout as well to prevent buffering issues
+  # that could delay prompt visibility.
+  stdout.flushFile()
+  let response = implReadTerminalLine()
+  result = toLowerAscii(response.strip()) == "y"
 
 ## Executes a command string through the specified shell and returns
 ## the captured combined output together with the exit code.  When

@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
@@ -13,12 +13,18 @@
 ## ANSI colours and divider lines, and vivid provides animated
 ## spinners and bold colours.
 ##
+## On Windows, ANSI virtual terminal processing must be explicitly
+## enabled via initAnsi before any styled output is written.
+## initAnsi is a no-op on non-Windows platforms.
+##
 ## When external-display is enabled (default), bat is used for
 ## syntax-highlighted output and mdcat is used for Markdown
-## rendering in std and vivid modes.  A simp-mode contradiction
+## rendering in std and vivid modes.  When external tools are
+## unavailable, std and vivid modes fall back to built-in ANSI
+## colorisation rather than plain text.  A simp-mode contradiction
 ## warning is emitted when external-display is enabled but the
 ## style is simp.  Missing binaries trigger a warning and graceful
-## fallback to plain text.
+## fallback.
 ##
 ## All styled output directed at progress or status goes to stderr;
 ## final results go to stdout.  The module exposes pure or
@@ -100,6 +106,67 @@ const SPINNER_FRAMES* = [
   "\xe2\xa0\xbc", "\xe2\xa0\xb4",
   "\xe2\xa0\xa6", "\xe2\xa0\xa7",
   "\xe2\xa0\x87", "\xe2\xa0\x8f"]
+
+# ---------------------------------------------------------------------------
+# Platform-specific ANSI enabling (Windows)
+# ---------------------------------------------------------------------------
+
+when defined(windows):
+  ## Win32 standard output handle constant.
+  const IMPL_STD_OUTPUT_HANDLE = -11'i32
+
+  ## Win32 standard error handle constant.
+  const IMPL_STD_ERROR_HANDLE = -12'i32
+
+  ## Enables ANSI escape sequence processing on a
+  ## Windows console handle.
+  const IMPL_ENABLE_VTP = 0x0004'u32
+
+  ## Retrieves a handle for the specified standard device.
+  proc implGetStdHandle(
+    nStdHandle: int32
+  ): int {.importc: "GetStdHandle",
+    stdcall, dynlib: "kernel32".}
+
+  ## Retrieves the current input mode of a console's
+  ## input buffer or output screen buffer.
+  proc implGetConsoleMode(
+    hConsole: int,
+    lpMode: ptr uint32
+  ): int32 {.importc: "GetConsoleMode",
+    stdcall, dynlib: "kernel32".}
+
+  ## Sets the input mode of a console's input buffer or
+  ## output screen buffer.
+  proc implSetConsoleMode(
+    hConsole: int,
+    dwMode: uint32
+  ): int32 {.importc: "SetConsoleMode",
+    stdcall, dynlib: "kernel32".}
+
+# ---------------------------------------------------------------------------
+# Public API — ANSI initialisation
+# ---------------------------------------------------------------------------
+
+## Enables ANSI virtual terminal processing on Windows so that
+## escape sequences produce colours and formatting rather than
+## appearing as raw text.  Must be called before any styled
+## output is written.  This is a no-op on non-Windows platforms.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     initAnsi()  # safe to call on any platform
+proc initAnsi*() =
+  when defined(windows):
+    for h in [IMPL_STD_OUTPUT_HANDLE,
+              IMPL_STD_ERROR_HANDLE]:
+      let handle = implGetStdHandle(h)
+      if handle == -1 or handle == 0:
+        continue
+      var mode: uint32
+      if implGetConsoleMode(handle, addr mode) != 0:
+        discard implSetConsoleMode(
+          handle, mode or IMPL_ENABLE_VTP)
 
 # ---------------------------------------------------------------------------
 # Public API — style parsing
@@ -246,15 +313,131 @@ proc renderWithBat*(
     result = text
 
 # ---------------------------------------------------------------------------
+# Private helpers — built-in help colourisation
+# ---------------------------------------------------------------------------
+
+## Applies lightweight ANSI colouring to a help text string so
+## that std and vivid modes produce readable styled output even
+## when the external bat binary is not available.
+##
+## Colouring rules:
+##   - The first line (title) is rendered in bold.
+##   - Lines that do not start with a space and end with a colon
+##     are treated as section headers and coloured in cyan.
+##   - Lines starting with ``"  get "`` are treated as example
+##     commands and coloured in green.
+##   - Lines starting with ``"  --"`` are treated as flag
+##     descriptions and coloured in yellow.
+##   - All other lines are left unchanged.
+##
+## :param text: The full help text to colourise.
+## :param sk: The target output style (only skStd and skVivid
+##            produce coloured output).
+## :returns: The colourised string.
+func implColorizeHelp(
+  text: string,
+  sk: StyleKind
+): string =
+  if sk == skSimp:
+    return text
+  var lines: seq[string] = @[]
+  var isFirst = true
+  for rawLine in text.splitLines():
+    if isFirst:
+      isFirst = false
+      case sk
+      of skStd:
+        lines.add(
+          ANSI_BOLD & rawLine & ANSI_RESET)
+      of skVivid:
+        lines.add(
+          ANSI_CYAN & ANSI_BOLD &
+          rawLine & ANSI_RESET)
+      else:
+        lines.add(rawLine)
+      continue
+    let stripped = rawLine.strip()
+    if stripped.len == 0:
+      lines.add("")
+      continue
+    # Section headers: not indented and ends with ':'
+    if not rawLine.startsWith(" ") and
+        stripped.endsWith(":"):
+      case sk
+      of skStd:
+        lines.add(
+          ANSI_CYAN & rawLine & ANSI_RESET)
+      of skVivid:
+        lines.add(
+          ANSI_CYAN & ANSI_BOLD &
+          rawLine & ANSI_RESET)
+      else:
+        lines.add(rawLine)
+    # Example commands: indented "get ..."
+    elif rawLine.startsWith("  get "):
+      case sk
+      of skStd:
+        lines.add(
+          ANSI_GREEN & rawLine & ANSI_RESET)
+      of skVivid:
+        lines.add(
+          ANSI_GREEN & ANSI_BOLD &
+          rawLine & ANSI_RESET)
+      else:
+        lines.add(rawLine)
+    # Flags: indented "--..."
+    elif rawLine.startsWith("  --"):
+      case sk
+      of skStd:
+        lines.add(
+          ANSI_YELLOW & rawLine & ANSI_RESET)
+      of skVivid:
+        lines.add(
+          ANSI_YELLOW & ANSI_BOLD &
+          rawLine & ANSI_RESET)
+      else:
+        lines.add(rawLine)
+    # Option names: 2-space indent, word followed
+    # by many spaces (set option table).
+    elif rawLine.startsWith("  ") and
+        not rawLine.startsWith("    ") and
+        stripped.len > 0 and
+        stripped[0] in {'a' .. 'z', 'A' .. 'Z'}:
+      # Colour the option name (first word).
+      let trimmed = rawLine.strip(leading = true, trailing = false)
+      let spIdx = trimmed.find(' ')
+      if spIdx > 0:
+        let name = trimmed[0 ..< spIdx]
+        let rest = trimmed[spIdx .. ^1]
+        let indent = rawLine.len - trimmed.len
+        let pad = repeat(' ', indent)
+        case sk
+        of skStd:
+          lines.add(
+            pad & ANSI_CYAN & name &
+            ANSI_RESET & rest)
+        of skVivid:
+          lines.add(
+            pad & ANSI_CYAN & ANSI_BOLD &
+            name & ANSI_RESET & rest)
+        else:
+          lines.add(rawLine)
+      else:
+        lines.add(rawLine)
+    else:
+      lines.add(rawLine)
+  result = lines.join("\n")
+
+# ---------------------------------------------------------------------------
 # Public API — external display warnings
 # ---------------------------------------------------------------------------
 
-## Emits a warning when external-display is enabled in simp mode,
-## since simp mode produces plain text and external tools have no
-## effect.
+## Emits warnings when external-display settings conflict with the
+## active style or when required binaries are missing.
 ##
 ## :param sk: The active output style.
 ## :param extDisplay: Whether external-display is enabled.
+## :param binDir: Path to the bundled bin directory.
 proc styleExternalDisplayCheck*(
   sk: StyleKind,
   extDisplay: bool,
@@ -279,7 +462,7 @@ proc styleExternalDisplayCheck*(
       "warning: external display tool(s) " &
       "not found in bin/: " &
       missing.join(", ") & ". " &
-      "Falling back to plain text." &
+      "Falling back to built-in styling." &
       ANSI_RESET)
 
 # ---------------------------------------------------------------------------
@@ -515,6 +698,31 @@ proc styleKeyValue*(
     echo ANSI_CYAN & ANSI_BOLD & key &
       ANSI_RESET & " = " & value
 
+## Writes a single value to stdout with style-appropriate
+## formatting.  Used for simple value displays such as
+## ``get version`` and ``get get --version`` where only the
+## value itself is shown without a key label.
+##
+## :param kind: The active output style.
+## :param text: The value text to display.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     # Illustrative — produces console output.
+##     discard
+proc styleValue*(
+  kind: StyleKind,
+  text: string
+) =
+  case kind
+  of skSimp:
+    echo text
+  of skStd:
+    echo ANSI_BOLD & text & ANSI_RESET
+  of skVivid:
+    echo ANSI_CYAN & ANSI_BOLD &
+      text & ANSI_RESET
+
 ## Writes a section header to stderr with style-appropriate
 ## formatting.
 ##
@@ -553,9 +761,11 @@ proc styleInfo*(
   of skVivid:
     echo text
 
-## Displays help text to stdout, optionally rendered through bat
-## for syntax highlighting in std and vivid modes when external
-## display is enabled.
+## Displays help text to stdout.  In simp mode the text is
+## printed unmodified.  In std and vivid modes, bat is used when
+## available (via external-display); otherwise the built-in ANSI
+## colouriser highlights section headers, example commands, and
+## option flags.
 ##
 ## :param kind: The active output style.
 ## :param text: The help text content.
@@ -578,4 +788,5 @@ proc styleHelp*(
       if not rendered.endsWith("\n"):
         stdout.write("\n")
     else:
-      echo text
+      # Fall back to built-in ANSI colourisation.
+      echo implColorizeHelp(text, kind)

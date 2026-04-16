@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-16
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
@@ -19,6 +19,10 @@
 ## CLI override flags (e.g. --model, --manual-confirm, --timeout)
 ## allow per-invocation overrides of any configuration option
 ## without modifying the persisted config file.
+##
+## ANSI virtual terminal processing is initialised at startup via
+## initAnsi so that styled output works correctly on all platforms
+## including Windows.
 
 {.experimental: "strictFuncs".}
 
@@ -452,27 +456,33 @@ proc implHandleLog(args: seq[string]) =
     implUsageError(
       fmt"unknown argument '{args[0]}' for 'log'")
 
-## Handles `get get` and its sub-flags.
+## Handles `get get` and its sub-flags.  All output is routed
+## through the style system so that simp, std, and vivid modes
+## produce visually distinct results.
 ##
 ## :param args: Arguments after "get".
 proc implHandleGet(args: seq[string]) =
   let cfg = loadConfig()
   let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
+    # Display all application metadata.
+    styleSeparator(sk, DIV_SECTION)
+    styleKeyValue(sk, "name", APP_NAME)
     styleKeyValue(sk, "version", APP_VERSION)
     styleKeyValue(sk, "intro", APP_INTRO)
     styleKeyValue(sk, "license", APP_LICENSE)
     styleKeyValue(sk, "github", APP_GITHUB)
+    styleSeparator(sk, DIV_FOOTER)
     return
   case args[0]
   of "--intro":
-    echo APP_INTRO
+    styleValue(sk, APP_INTRO)
   of "--version":
-    echo APP_VERSION
+    styleValue(sk, APP_VERSION)
   of "--license":
-    echo APP_LICENSE
+    styleValue(sk, APP_LICENSE)
   of "--github":
-    echo APP_GITHUB
+    styleValue(sk, APP_GITHUB)
   else:
     implUsageError(
       fmt"unknown option '{args[0]}' for 'get get'")
@@ -802,17 +812,21 @@ proc implHandleQuery(
 
   # 5. Double-check (optional, default: enabled).
   if cfg.doubleCheck:
-    command = implDoubleCheck(
-      command, query, info, cfg, key.get, sk)
-    if not cfg.hideProcess:
-      styleCommand(sk,
-        "approved command", command)
+      let reviewedCommand = implDoubleCheck(
+        command, query, info, cfg, key.get, sk)
+      let commandChanged = reviewedCommand != command
+      command = reviewedCommand
+      if not cfg.hideProcess and commandChanged:
+        styleCommand(sk,
+          "approved command", command)
 
   # 6. Manual confirmation (optional).
   if cfg.manualConfirm:
-    if not confirmExecution(command, sk):
-      styleProgress(sk, "aborted.")
-      quit(0)
+      let showCommandInPrompt = cfg.hideProcess
+      if not confirmExecution(
+          command, sk, showCommandInPrompt):
+        styleProgress(sk, "aborted.")
+        quit(0)
 
   # 7. Execute the command with bundled bin dir.
   if not cfg.hideProcess:
@@ -892,6 +906,10 @@ proc implHandleQuery(
 
 ## Top-level CLI dispatcher.
 proc implMain() =
+  # Enable ANSI escape sequences on Windows before
+  # any styled output is written.
+  initAnsi()
+
   let envWarning = checkEnvironment()
   if envWarning.len > 0:
     stderr.writeLine(envWarning)
@@ -912,7 +930,9 @@ proc implMain() =
   of "get":
     implHandleGet(args[1 .. ^1])
   of "version":
-    echo APP_VERSION
+    let cfg = loadConfig()
+    let sk = parseStyle(cfg.style)
+    styleValue(sk, APP_VERSION)
   of "isok":
     implHandleIsOk()
   of "help", "--help", "-h":
