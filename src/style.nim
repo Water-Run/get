@@ -6,32 +6,23 @@
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
-## This module provides two output modes — plain and vivid — that
-## control how progress indicators, separators, warnings, commands,
-## and results are rendered on stderr and stdout.  Plain mode
-## produces unformatted text; vivid mode provides animated spinners,
-## ANSI colours, and optional external rendering via bat and mdcat.
+## This module provides two output modes — simp (plain) and vivid
+## — that control how progress indicators, separators, warnings,
+## commands, and results are rendered on stderr and stdout.  Simp
+## mode produces unformatted text; vivid mode provides animated
+## spinners, ANSI colours, and optional external rendering via
+## bat and mdcat.
 ##
-## On Windows, ANSI virtual terminal processing must be explicitly
-## enabled via initAnsi before any styled output is written.
-## initAnsi is a no-op on non-Windows platforms.
+## On Windows, ANSI virtual terminal processing must be
+## explicitly enabled via initAnsi before any styled output is
+## written.  initAnsi is a no-op on non-Windows platforms.
 ##
-## When external-display is enabled (default), bat is used for
-## syntax-highlighted output and mdcat is used for Markdown
-## rendering in vivid mode.  When external tools are unavailable,
-## vivid mode falls back to built-in ANSI colourisation.  Missing
-## binaries trigger a warning and graceful fallback.
-##
-## All styled output directed at progress or status goes to stderr;
-## final results go to stdout.  The module exposes pure or
-## side-effect-only procs that accept a StyleKind so that callers
-## need not branch on style themselves.
+## All styled output directed at progress or status goes to
+## stderr; final results go to stdout.
 
 {.experimental: "strictFuncs".}
 
 import std/[os, osproc, strformat, strutils]
-
-import utils
 
 # ---------------------------------------------------------------------------
 # Types
@@ -72,7 +63,7 @@ const ANSI_CYAN* = "\e[36m"
 const ANSI_MAGENTA* = "\e[35m"
 
 # ---------------------------------------------------------------------------
-# Constants — dividers (passed by callers, used only for vivid)
+# Constants — dividers
 # ---------------------------------------------------------------------------
 
 ## Thin separator for minor boundaries.
@@ -113,8 +104,7 @@ when defined(windows):
   ## Win32 standard error handle constant.
   const IMPL_STD_ERROR_HANDLE = -12'i32
 
-  ## Enables ANSI escape sequence processing on a
-  ## Windows console handle.
+  ## Enables ANSI escape sequence processing.
   const IMPL_ENABLE_VTP = 0x0004'u32
 
   ## Retrieves a handle for the specified standard device.
@@ -123,16 +113,14 @@ when defined(windows):
   ): int {.importc: "GetStdHandle",
     stdcall, dynlib: "kernel32".}
 
-  ## Retrieves the current input mode of a console's
-  ## input buffer or output screen buffer.
+  ## Retrieves the current console mode.
   proc implGetConsoleMode(
     hConsole: int,
     lpMode: ptr uint32
   ): int32 {.importc: "GetConsoleMode",
     stdcall, dynlib: "kernel32".}
 
-  ## Sets the input mode of a console's input buffer or
-  ## output screen buffer.
+  ## Sets the console mode.
   proc implSetConsoleMode(
     hConsole: int,
     dwMode: uint32
@@ -143,14 +131,12 @@ when defined(windows):
 # Public API — ANSI initialisation
 # ---------------------------------------------------------------------------
 
-## Enables ANSI virtual terminal processing on Windows so that
-## escape sequences produce colours and formatting rather than
-## appearing as raw text.  Must be called before any styled
-## output is written.  This is a no-op on non-Windows platforms.
+## Enables ANSI virtual terminal processing on Windows.  No-op
+## on non-Windows platforms.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     initAnsi()  # safe to call on any platform
+##     initAnsi()
 proc initAnsi*() =
   when defined(windows):
     for h in [IMPL_STD_OUTPUT_HANDLE,
@@ -159,7 +145,8 @@ proc initAnsi*() =
       if handle == -1 or handle == 0:
         continue
       var mode: uint32
-      if implGetConsoleMode(handle, addr mode) != 0:
+      if implGetConsoleMode(
+          handle, addr mode) != 0:
         discard implSetConsoleMode(
           handle, mode or IMPL_ENABLE_VTP)
 
@@ -186,12 +173,11 @@ func toStyleKind*(vivid: bool): StyleKind =
 ## Checks whether the bundled mdcat binary is available.
 ##
 ## :param binDir: Absolute path to the bundled bin directory.
-## :returns: true when mdcat exists and is executable.
+## :returns: true when mdcat exists.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — depends on filesystem.
-##     discard
+##     discard isMdcatAvailable("")
 proc isMdcatAvailable*(binDir: string): bool =
   if binDir.len == 0:
     return false
@@ -204,12 +190,11 @@ proc isMdcatAvailable*(binDir: string): bool =
 ## Checks whether the bundled bat binary is available.
 ##
 ## :param binDir: Absolute path to the bundled bin directory.
-## :returns: true when bat exists and is executable.
+## :returns: true when bat exists.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — depends on filesystem.
-##     discard
+##     discard isBatAvailable("")
 proc isBatAvailable*(binDir: string): bool =
   if binDir.len == 0:
     return false
@@ -224,12 +209,11 @@ proc isBatAvailable*(binDir: string): bool =
 ##
 ## :param text: The Markdown text to render.
 ## :param binDir: Absolute path to the bundled bin directory.
-## :returns: The rendered text, or the original text on failure.
+## :returns: The rendered text, or the original on failure.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires mdcat binary.
-##     discard
+##     discard renderMarkdown("# hi", "")
 proc renderMarkdown*(
   text: string,
   binDir: string
@@ -256,12 +240,11 @@ proc renderMarkdown*(
 ##
 ## :param text: The text to render.
 ## :param binDir: Absolute path to the bundled bin directory.
-## :returns: The rendered text, or the original text on failure.
+## :returns: The rendered text, or the original on failure.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires bat binary.
-##     discard
+##     discard renderWithBat("hello", "")
 proc renderWithBat*(
   text: string,
   binDir: string
@@ -288,19 +271,8 @@ proc renderWithBat*(
 # Private helpers — built-in help colourisation
 # ---------------------------------------------------------------------------
 
-## Applies lightweight ANSI colouring to a help text string so
-## that vivid mode produces readable styled output even when the
-## external bat binary is not available.
-##
-## Colouring rules:
-##   - The first line (title) is rendered in bold cyan.
-##   - Lines that do not start with a space and end with a colon
-##     are treated as section headers and coloured in cyan bold.
-##   - Lines starting with ``"  get "`` are treated as example
-##     commands and coloured in green bold.
-##   - Lines starting with ``"  --"`` are treated as flag
-##     descriptions and coloured in yellow bold.
-##   - All other lines are left unchanged.
+## Applies lightweight ANSI colouring to a help text string for
+## vivid mode when the external bat binary is not available.
 ##
 ## :param text: The full help text to colourise.
 ## :returns: The colourised string.
@@ -318,23 +290,19 @@ func implColorizeHelp(text: string): string =
     if stripped.len == 0:
       lines.add("")
       continue
-    # Section headers: not indented and ends with ':'
     if not rawLine.startsWith(" ") and
         stripped.endsWith(":"):
       lines.add(
         ANSI_CYAN & ANSI_BOLD &
         rawLine & ANSI_RESET)
-    # Example commands: indented "get ..."
     elif rawLine.startsWith("  get "):
       lines.add(
         ANSI_GREEN & ANSI_BOLD &
         rawLine & ANSI_RESET)
-    # Flags: indented "--..."
     elif rawLine.startsWith("  --"):
       lines.add(
         ANSI_YELLOW & ANSI_BOLD &
         rawLine & ANSI_RESET)
-    # Option names: 2-space indent, word then spaces
     elif rawLine.startsWith("  ") and
         not rawLine.startsWith("    ") and
         stripped.len > 0 and
@@ -360,8 +328,8 @@ func implColorizeHelp(text: string): string =
 # Public API — external display warnings
 # ---------------------------------------------------------------------------
 
-## Emits warnings when external-display settings conflict with the
-## active style or when required binaries are missing.
+## Emits warnings when external-display settings conflict with
+## the active style or when required binaries are missing.
 ##
 ## :param sk: The active output style.
 ## :param extDisplay: Whether external-display is enabled.
@@ -378,7 +346,6 @@ proc styleExternalDisplayCheck*(
       "warning: external-display has no " &
       "effect in plain mode")
     return
-  # Vivid mode: check for missing binaries.
   var missing: seq[string] = @[]
   if not isBatAvailable(binDir):
     missing.add("bat")
@@ -397,8 +364,7 @@ proc styleExternalDisplayCheck*(
 # Public API — styled stderr output
 # ---------------------------------------------------------------------------
 
-## Writes a progress message to stderr with style-appropriate
-## formatting.
+## Writes a progress message to stderr.
 ##
 ## :param kind: The active output style.
 ## :param text: The progress message text.
@@ -410,8 +376,7 @@ proc styleProgress*(kind: StyleKind, text: string) =
     stderr.writeLine(
       ANSI_CYAN & ANSI_BOLD & text & ANSI_RESET)
 
-## Writes a warning message to stderr with style-appropriate
-## formatting.
+## Writes a warning message to stderr.
 ##
 ## :param kind: The active output style.
 ## :param text: The warning message text.
@@ -422,10 +387,9 @@ proc styleWarning*(kind: StyleKind, text: string) =
   of skVivid:
     stderr.writeLine(
       ANSI_YELLOW & ANSI_BOLD &
-      "⚠ " & text & ANSI_RESET)
+      "\xe2\x9a\xa0 " & text & ANSI_RESET)
 
-## Writes an error message to stderr with style-appropriate
-## formatting.
+## Writes an error message to stderr.
 ##
 ## :param kind: The active output style.
 ## :param text: The error message text.
@@ -437,8 +401,7 @@ proc styleError*(kind: StyleKind, text: string) =
     stderr.writeLine(
       ANSI_RED & ANSI_BOLD & text & ANSI_RESET)
 
-## Writes a success message to stderr with style-appropriate
-## formatting.
+## Writes a success message to stderr.
 ##
 ## :param kind: The active output style.
 ## :param text: The success message text.
@@ -450,8 +413,7 @@ proc styleSuccess*(kind: StyleKind, text: string) =
     stderr.writeLine(
       ANSI_GREEN & ANSI_BOLD & text & ANSI_RESET)
 
-## Writes a command display to stderr with style-appropriate
-## formatting.
+## Writes a command display to stderr.
 ##
 ## :param kind: The active output style.
 ## :param label: The label prefix (e.g. "command").
@@ -466,15 +428,14 @@ proc styleCommand*(
     stderr.writeLine(fmt"{label}: {command}")
   of skVivid:
     stderr.writeLine(
-      ANSI_MAGENTA & "❯ " & ANSI_BOLD &
-      command & ANSI_RESET)
+      ANSI_MAGENTA & "\xe2\x9d\xaf " &
+      ANSI_BOLD & command & ANSI_RESET)
 
-## Writes the agent loop round indicator to stderr with
-## style-appropriate formatting.
+## Writes the agent loop round indicator to stderr.
 ##
 ## :param kind: The active output style.
 ## :param current: The current round number (1-based).
-## :param maxRounds: The configured maximum rounds (0 = unlimited).
+## :param maxRounds: Configured maximum rounds (0 = unlimited).
 proc styleRound*(
   kind: StyleKind,
   current: int,
@@ -490,17 +451,17 @@ proc styleRound*(
     stderr.writeLine(text)
   of skVivid:
     stderr.writeLine(
-      ANSI_DIM & "── " & ANSI_CYAN & ANSI_BOLD &
-      text & ANSI_RESET & ANSI_DIM &
-      " ──" & ANSI_RESET)
+      ANSI_DIM & "\xe2\x94\x80\xe2\x94\x80 " &
+      ANSI_CYAN & ANSI_BOLD & text & ANSI_RESET &
+      ANSI_DIM &
+      " \xe2\x94\x80\xe2\x94\x80" & ANSI_RESET)
 
 ## Writes a section separator to stderr.  Simp emits a blank
-## line; vivid emits nothing (visual structure comes from
-## coloured text).
+## line; vivid emits nothing.
 ##
 ## :param kind: The active output style.
-## :param separator: The divider string (ignored in both modes
-##                   but kept for API stability).
+## :param separator: The divider string (kept for API
+##                   stability).
 proc styleSeparator*(
   kind: StyleKind,
   separator: string
@@ -525,7 +486,8 @@ proc styleSeparator*(
 ##     let f = spinnerFrame(0)
 ##     assert f.len > 0
 func spinnerFrame*(tick: int): string =
-  result = SPINNER_FRAMES[tick mod SPINNER_FRAMES.len]
+  result = SPINNER_FRAMES[
+    tick mod SPINNER_FRAMES.len]
 
 ## Writes a spinner frame with a message to stderr, overwriting
 ## the current line using carriage return.
@@ -548,16 +510,14 @@ proc clearSpinner*() =
 # Public API — result output
 # ---------------------------------------------------------------------------
 
-## Writes the final result to stdout, using external display tools
-## when enabled and available.  When isMarkdown is true, mdcat is
-## used for rendering; otherwise bat is used for syntax-
-## highlighted display.
+## Writes the final result to stdout, using external display
+## tools when enabled and available.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.
 ## :param binDir: Bundled bin directory for tool lookup.
 ## :param extDisplay: Whether external display is enabled.
-## :param isMarkdown: Whether the content is Markdown (use mdcat).
+## :param isMarkdown: Whether the content is Markdown.
 proc styleResult*(
   kind: StyleKind,
   text: string,
@@ -589,9 +549,7 @@ proc styleResult*(
 # Public API — unified styled output helpers
 # ---------------------------------------------------------------------------
 
-## Writes a key-value pair to stdout with style-appropriate
-## formatting.  Used by config display, cache info, log info,
-## and similar informational pages.
+## Writes a key-value pair to stdout.
 ##
 ## :param kind: The active output style.
 ## :param key: The option or field name.
@@ -608,21 +566,15 @@ proc styleKeyValue*(
     echo ANSI_CYAN & ANSI_BOLD & key &
       ANSI_RESET & " = " & value
 
-## Writes a single value to stdout with style-appropriate
-## formatting.  Used for simple value displays such as
-## ``get version`` and ``get get --version``.
+## Writes a single value to stdout.
 ##
 ## :param kind: The active output style.
 ## :param text: The value text to display.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — produces console output.
 ##     discard
-proc styleValue*(
-  kind: StyleKind,
-  text: string
-) =
+proc styleValue*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     echo text
@@ -630,15 +582,11 @@ proc styleValue*(
     echo ANSI_CYAN & ANSI_BOLD &
       text & ANSI_RESET
 
-## Writes a section header to stderr with style-appropriate
-## formatting.
+## Writes a section header to stderr.
 ##
 ## :param kind: The active output style.
 ## :param title: The section title text.
-proc styleHeader*(
-  kind: StyleKind,
-  title: string
-) =
+proc styleHeader*(kind: StyleKind, title: string) =
   case kind
   of skSimp:
     stderr.writeLine(title)
@@ -646,25 +594,19 @@ proc styleHeader*(
     stderr.writeLine(
       ANSI_CYAN & ANSI_BOLD & title & ANSI_RESET)
 
-## Writes informational text to stdout with style-appropriate
-## formatting.
+## Writes informational text to stdout.
 ##
 ## :param kind: The active output style.
 ## :param text: The informational text to display.
-proc styleInfo*(
-  kind: StyleKind,
-  text: string
-) =
+proc styleInfo*(kind: StyleKind, text: string) =
   case kind
   of skSimp:
     echo text
   of skVivid:
     echo text
 
-## Displays help text to stdout.  In plain mode the text is
-## printed unmodified.  In vivid mode, bat is used when available
-## (via external-display); otherwise the built-in ANSI colouriser
-## highlights section headers, example commands, and option flags.
+## Displays help text to stdout.  In vivid mode, bat is used
+## when available; otherwise the built-in colouriser is used.
 ##
 ## :param kind: The active output style.
 ## :param text: The help text content.

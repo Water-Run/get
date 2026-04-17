@@ -2,25 +2,14 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
 ## This module sends requests to an OpenAI-compatible
 ## chat-completions endpoint, parses the JSON response, and
 ## displays elapsed-time progress on stderr while the HTTP
-## round-trip is in flight.  It uses asynchronous I/O so that a
-## one-second timer can fire between event-loop polls without
-## blocking the transfer.
-##
-## Progress display adapts to the configured output style: plain
-## shows dots, vivid shows an animated spinner.  Dots are emitted
-## every 2 seconds during the first 10 seconds; after that,
-## waited-time messages appear every 10 seconds.
-##
-## When timeout is set to 0 (disabled) the request may run
-## indefinitely.  When maxTokens is set to 0, the ``max_tokens``
-## field is omitted from the JSON body, letting the API decide.
+## round-trip is in flight.
 
 {.experimental: "strictFuncs".}
 
@@ -42,9 +31,8 @@ const CHAT_COMPLETIONS_PATH* = "/chat/completions"
 # Types
 # ---------------------------------------------------------------------------
 
-## Raised when the LLM API returns a non-successful HTTP status, a
-## malformed response body, or when the request exceeds the
-## configured timeout.
+## Raised when the LLM API returns a non-successful HTTP status,
+## a malformed response body, or when the request times out.
 type
   LlmApiError* = object of GetError
 
@@ -59,21 +47,24 @@ type
 type
   LlmResponse* = object
     content*: string  ## Text from the first choice.
-    tokensUsed*: int  ## Total tokens consumed (0 if unavailable).
+    tokensUsed*: int  ## Total tokens consumed.
 
 # ---------------------------------------------------------------------------
 # Private helpers — request construction
 # ---------------------------------------------------------------------------
 
-## Builds the JSON request body for an OpenAI-compatible
-## chat-completions endpoint.
+## Builds the JSON request body.
 ##
 ## :param req: The LLM request parameters.
-## :returns: A JsonNode representing the full request body.
-proc implBuildRequestBody(req: LlmRequest): JsonNode =
+## :returns: A JsonNode representing the request body.
+proc implBuildRequestBody(
+  req: LlmRequest
+): JsonNode =
   var msgs = newJArray()
   for m in req.messages:
-    msgs.add(%*{"role": m.role, "content": m.content})
+    msgs.add(%*{
+      "role": m.role,
+      "content": m.content})
   result = %*{
     "model": req.model,
     "messages": msgs
@@ -86,32 +77,35 @@ proc implBuildRequestBody(req: LlmRequest): JsonNode =
 ## :param url: The raw URL string.
 ## :returns: The URL without a trailing slash.
 func implNormaliseUrl(url: string): string =
-  result = url.strip(trailing = true, chars = {'/'})
+  result = url.strip(
+    trailing = true, chars = {'/'})
 
 # ---------------------------------------------------------------------------
 # Private helpers — async HTTP
 # ---------------------------------------------------------------------------
 
-## Posts the JSON body to the endpoint and returns the raw response
-## body string.
+## Posts the JSON body and returns the raw response body.
 ##
-## :param client: An open async HTTP client with headers set.
-## :param endpoint: The full URL including the path.
+## :param client: An open async HTTP client.
+## :param endpoint: The full URL.
 ## :param body: The serialised JSON request body.
 ## :returns: The response body as a string.
-## :raises: LlmApiError: If the server returns a non-200 status.
+## :raises: LlmApiError: On non-200 status.
 proc implPostRequest(
   client: AsyncHttpClient,
   endpoint: string,
   body: string
 ): Future[string] {.async.} =
-  let resp = await client.post(endpoint, body = body)
+  let resp = await client.post(
+    endpoint, body = body)
   let respBody = await resp.body
   if resp.code != Http200:
     let codeInt = resp.code.int
     let preview =
-      if respBody.len > 512: respBody[0 ..< 512] & "..."
-      else: respBody
+      if respBody.len > 512:
+        respBody[0 ..< 512] & "..."
+      else:
+        respBody
     raise newException(LlmApiError,
       fmt"API returned HTTP {codeInt}: {preview}")
   result = respBody
@@ -120,13 +114,11 @@ proc implPostRequest(
 # Private helpers — progress display
 # ---------------------------------------------------------------------------
 
-## Waits for the given future while printing elapsed-time progress
-## to stderr.  Plain mode prints dots; vivid mode shows an
-## animated spinner.
+## Waits for the future while printing elapsed-time progress.
 ##
-## :param fut: The future representing the in-flight request.
+## :param fut: The future for the in-flight request.
 ## :param timeoutSec: Maximum wait in seconds (0 = no limit).
-## :param hideProcess: Suppress all progress output when true.
+## :param hideProcess: Suppress progress when true.
 ## :param sk: The active output style.
 ## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
@@ -152,7 +144,8 @@ proc implAwaitWithProgress(
       if sk == skVivid:
         let msg =
           if timeoutSec > 0:
-            fmt"requesting... {elapsed}/{timeoutSec}s"
+            fmt"requesting... {elapsed}" &
+            fmt"/{timeoutSec}s"
           else:
             fmt"requesting... {elapsed}s"
         writeSpinner(elapsed, msg)
@@ -174,17 +167,21 @@ proc implAwaitWithProgress(
         elif elapsed mod 10 == 0:
           let waitMsg =
             if timeoutSec > 0:
-              fmt"- waited {elapsed}/{timeoutSec}s"
+              fmt"- waited {elapsed}" &
+              fmt"/{timeoutSec}s"
             else:
-              fmt"- waited {elapsed}s (no timeout)"
+              fmt"- waited {elapsed}s" &
+              " (no timeout)"
           stderr.writeLine(waitMsg)
-    if timeoutSec > 0 and elapsed >= timeoutSec:
+    if timeoutSec > 0 and
+        elapsed >= timeoutSec:
       if sk == skVivid:
         clearSpinner()
       elif lineOpen:
         stderr.writeLine("")
       raise newException(LlmApiError,
-        fmt"request timed out after {timeoutSec}s")
+        fmt"request timed out after " &
+        fmt"{timeoutSec}s")
   if not hideProcess:
     if sk == skVivid:
       clearSpinner()
@@ -196,13 +193,11 @@ proc implAwaitWithProgress(
 # Private helpers — response parsing
 # ---------------------------------------------------------------------------
 
-## Parses the raw JSON body returned by an OpenAI-compatible
-## endpoint into an LlmResponse.
+## Parses the raw JSON body into an LlmResponse.
 ##
 ## :param body: The raw JSON string.
 ## :returns: A populated LlmResponse.
-## :raises: LlmApiError: If the JSON is malformed or missing
-##          required fields.
+## :raises: LlmApiError: If the JSON is malformed.
 proc implParseResponse(body: string): LlmResponse =
   var node: JsonNode
   try:
@@ -218,37 +213,35 @@ proc implParseResponse(body: string): LlmResponse =
   let msg = choices[0]{"message"}
   if msg.isNil:
     raise newException(LlmApiError,
-      "API response missing 'message' in first choice")
+      "API response missing 'message'")
   let content = msg{"content"}
   if content.isNil:
     raise newException(LlmApiError,
-      "API response missing 'content' in message")
+      "API response missing 'content'")
   result = LlmResponse(
     content: content.getStr().strip(),
-    tokensUsed: node{"usage"}{"total_tokens"}.getInt(0)
-  )
+    tokensUsed:
+      node{"usage"}{"total_tokens"}.getInt(0))
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-## Sends an LlmRequest to the configured OpenAI-compatible endpoint
-## and returns the parsed LlmResponse.
+## Sends an LlmRequest to the configured endpoint and returns
+## the parsed LlmResponse.
 ##
-## :param req: The request payload (model, messages, maxTokens).
+## :param req: The request payload.
 ## :param url: The API base URL.
-## :param apiKey: The Bearer token.  Must not be empty.
+## :param apiKey: The Bearer token.
 ## :param timeoutSec: Maximum seconds to wait (0 = no limit).
-## :param hideProcess: Suppress progress output when true.
-## :param sk: The active output style for progress display.
+## :param hideProcess: Suppress progress when true.
+## :param sk: The active output style.
 ## :returns: A populated LlmResponse on success.
-## :raises: LlmApiError: On timeout, HTTP error, or malformed
-##          response.
+## :raises: LlmApiError: On timeout, HTTP error, or bad JSON.
 ## :raises: GetError: If apiKey or url is empty.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires a live API endpoint.
 ##     discard
 proc sendLlmRequest*(
   req: LlmRequest,
@@ -264,7 +257,6 @@ proc sendLlmRequest*(
   if url.len == 0:
     raise newException(GetError,
       "API URL is not configured")
-
   let endpoint =
     implNormaliseUrl(url) & CHAT_COMPLETIONS_PATH
 
@@ -272,8 +264,7 @@ proc sendLlmRequest*(
     let client = newAsyncHttpClient()
     client.headers = newHttpHeaders({
       "Authorization": fmt"Bearer {apiKey}",
-      "Content-Type": "application/json"
-    })
+      "Content-Type": "application/json"})
     try:
       let bodyStr = $implBuildRequestBody(req)
       let fut = implPostRequest(

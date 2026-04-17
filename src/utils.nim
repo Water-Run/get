@@ -8,18 +8,21 @@
 ## :License: AGPL-3.0
 ##
 ## This module provides application-wide constants such as version,
-## license, and GitHub URL, path resolution for configuration
-## directories and files, shared domain types (GetError, LlmMessage),
-## bundled-tool binary directory resolution, model strength
-## verification, and general-purpose string utilities consumed by
-## every other module.
+## license, and GitHub URL; path resolution for configuration
+## directories and files; shared domain types (GetError,
+## LlmMessage, AgentAction); bundled-tool binary directory
+## resolution; forbidden-command-pattern validation and safety
+## checking; model strength verification; and general-purpose
+## string utilities consumed by every other module.
 
 {.experimental: "strictFuncs".}
 
-import std/[os, options, strutils]
+import std/[os, options, strformat, strutils]
+
+import regex
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — application identity
 # ---------------------------------------------------------------------------
 
 ## The name of the application.
@@ -28,7 +31,7 @@ const APP_NAME* = "get"
 ## The version string, kept in sync with get.nimble.
 const APP_VERSION* = "1.0.0"
 
-## One-line introduction shown by `get get --intro`.
+## One-line introduction shown by ``get get --intro``.
 const APP_INTRO* = "get anything from your computer"
 
 ## SPDX license identifier.
@@ -36,6 +39,10 @@ const APP_LICENSE* = "AGPL-3.0"
 
 ## Canonical GitHub repository URL.
 const APP_GITHUB* = "https://github.com/Water-Run/get"
+
+# ---------------------------------------------------------------------------
+# Constants — file names and paths
+# ---------------------------------------------------------------------------
 
 ## Name of the configuration JSON file.
 const CONFIG_FILE_NAME* = "config.json"
@@ -49,19 +56,24 @@ const LOG_FILE_NAME* = "get.log"
 ## Name of the cache JSON file.
 const CACHE_FILE_NAME* = "cache.json"
 
+## Name of the bundled binary directory relative to the
+## executable.
+const BIN_DIR_NAME* = "bin"
+
+## Development-time path to the bundled binary directory,
+## relative to the executable (project root during nimble run).
+const DEV_BIN_DIR* = "src" / "bin"
+
+# ---------------------------------------------------------------------------
+# Constants — user-facing messages
+# ---------------------------------------------------------------------------
+
 ## Hint displayed after usage errors to direct users to the help
 ## command for detailed information.
 const HELP_HINT* = "Run 'get help' for usage information."
 
-## Name of the bundled binary directory relative to the executable.
-const BIN_DIR_NAME* = "bin"
-
-## Development-time path to the bundled binary directory, relative
-## to the executable (project root during nimble run).
-const DEV_BIN_DIR* = "src" / "bin"
-
-## Warning text emitted when the configured model is not recognised
-## as a known high-performance model.
+## Warning text emitted when the configured model is not
+## recognised as a known high-performance model.
 const MODEL_STRENGTH_WARNING* =
   "warning: model is not recognized as a known " &
   "high-performance model.\n" &
@@ -69,13 +81,18 @@ const MODEL_STRENGTH_WARNING* =
   "device, a sufficiently capable model is the " &
   "foundation of safety.\n" &
   "Consider using a known strong model (e.g. " &
-  "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+, " &
-  "DeepSeek, Grok 4+, GLM 4.7+)."
+  "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+," &
+  " DeepSeek, Grok 4+, GLM 4.7+)."
 
-## Default forbidden command pattern regex.  Commands matching this
-## pattern are rejected before execution.  The pattern uses ``\b``
-## word boundaries to avoid false positives in paths or arguments.
-## Users may override this via ``get set command-pattern``.
+# ---------------------------------------------------------------------------
+# Constants — safety
+# ---------------------------------------------------------------------------
+
+## Default forbidden command pattern regex.  Commands matching
+## this pattern are rejected before execution.  The pattern uses
+## ``\b`` word boundaries to avoid false positives in paths or
+## arguments.  Users may override this via
+## ``get set command-pattern``.
 const DEFAULT_COMMAND_PATTERN* =
   "\\b(rm|rmdir|del|rd|erase" &
   "|mv|move|cp|copy" &
@@ -91,9 +108,9 @@ const DEFAULT_COMMAND_PATTERN* =
   "|Clear-Content|Add-Content)\\b"
 
 ## Core dangerous command names used to validate whether a custom
-## command-pattern adequately covers common destructive operations.
-## When a user sets a custom pattern that fails to match any of
-## these names, a safety warning is emitted.
+## command-pattern adequately covers common destructive
+## operations.  When a user sets a custom pattern that fails to
+## match any of these names, a safety warning is emitted.
 const DANGEROUS_COMMAND_NAMES* = [
   "rm", "rmdir", "del", "mv", "cp",
   "chmod", "mkfs", "dd", "kill",
@@ -103,34 +120,34 @@ const DANGEROUS_COMMAND_NAMES* = [
 # Types
 # ---------------------------------------------------------------------------
 
-## Base exception type for all recoverable errors in the get tool.
-## Every domain-specific error should inherit from this type so that
-## the top-level CLI dispatcher can catch and display them
-## uniformly.
+## Base exception type for all recoverable errors in the get
+## tool.  Every domain-specific error should inherit from this
+## type so that the top-level CLI dispatcher can catch and
+## display them uniformly.
 type
   GetError* = object of CatchableError
 
-## Represents a single message in an LLM conversation.  This type
-## is defined here rather than in the llm module so that both the
-## prompt builder and the LLM client can reference it without
-## circular imports.
+## Represents a single message in an LLM conversation.  This
+## type is defined here rather than in the llm module so that
+## both the prompt builder and the LLM client can reference it
+## without circular imports.
 type
   LlmMessage* = object
     role*: string     ## "system", "user", or "assistant".
     content*: string  ## Message content text.
 
-## Describes the action the LLM chose in the agent loop protocol.
-## Used by the prompt parser and the main dispatcher to determine
-## the next step in the multi-round agent flow.
+## Describes the action the LLM chose in the agent loop
+## protocol.  Used by the prompt parser and the main dispatcher
+## to determine the next step in the multi-round agent flow.
 type
   AgentAction* = enum
-    aaContinue  ## Intermediate command — execute and return output.
-    aaFinal     ## Terminal command — execute and show output directly.
-    aaInterpret ## Terminal command — execute then summarise via LLM.
+    aaContinue  ## Intermediate cmd — execute and return output.
+    aaFinal     ## Terminal cmd — execute and show directly.
+    aaInterpret ## Terminal cmd — execute then summarise.
     aaAnswer    ## Direct text answer, no command to execute.
 
 # ---------------------------------------------------------------------------
-# Public API — paths
+# Public API — path helpers
 # ---------------------------------------------------------------------------
 
 ## Returns the absolute path to the application configuration
@@ -193,8 +210,8 @@ proc getCacheFilePath*(): string =
 
 ## Returns the absolute path to the bundled binary directory.
 ## Checks the production layout first (``<exe>/bin``), then the
-## development layout (``<exe>/src/bin``).  Returns an empty string
-## when neither exists.
+## development layout (``<exe>/src/bin``).  Returns an empty
+## string when neither exists.
 ##
 ## :returns: Absolute directory path, or empty string.
 ##
@@ -219,8 +236,7 @@ proc getBundledBinDir*(): string =
 ## Returns an empty string when the input is empty.
 ##
 ## :param s: The string to mask.
-## :returns: A string of asterisks whose length equals the input
-##           length.
+## :returns: A string of asterisks with the same length.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -249,9 +265,9 @@ func defaultShell*(): string =
 ## optional language tags (e.g. `` ```sh ``, `` ```bash ``,
 ## `` ```powershell ``, or bare `` ``` ``).
 ##
-## :param text: The full text that may contain fenced code blocks.
-## :returns: The trimmed content of the first code block, or none
-##           when no code block is found.
+## :param text: The full text that may contain fenced blocks.
+## :returns: The trimmed content of the first code block, or
+##           none when no code block is found.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -282,12 +298,13 @@ func extractCodeBlock*(text: string): Option[string] =
     let content = blockLines.join("\n").strip()
     if content.len > 0:
       return some(content)
-  return none(string)
+  result = none(string)
 
 ## Extracts the output-mode marker from an LLM response.  The
-## model may include ``<!-- DIRECT -->`` or ``<!-- INTERPRET -->``
-## after the code block to indicate whether the command output
-## should be shown raw or sent back for LLM interpretation.
+## model may include ``<!-- DIRECT -->`` or
+## ``<!-- INTERPRET -->`` after the code block to indicate
+## whether the command output should be shown raw or sent back
+## for LLM interpretation.
 ##
 ## :param text: The full LLM response text.
 ## :returns: ``"DIRECT"`` or ``"INTERPRET"``.  Defaults to
@@ -295,34 +312,32 @@ func extractCodeBlock*(text: string): Option[string] =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert extractOutputMode("```sh\nls\n```\n" &
-##       "<!-- DIRECT -->") == "DIRECT"
-##     assert extractOutputMode("```sh\nls\n```\n" &
-##       "<!-- INTERPRET -->") == "INTERPRET"
+##     assert extractOutputMode(
+##       "```sh\nls\n```\n<!-- DIRECT -->") == "DIRECT"
+##     assert extractOutputMode(
+##       "```sh\nls\n```\n<!-- INTERPRET -->") ==
+##       "INTERPRET"
 ##     assert extractOutputMode("no marker") == "DIRECT"
 func extractOutputMode*(text: string): string =
   let upper = toUpperAscii(text)
   if upper.contains("<!-- INTERPRET -->"):
     return "INTERPRET"
-  return "DIRECT"
+  result = "DIRECT"
 
 ## Parses an LLM response from the agent loop and returns the
 ## intended action together with the extracted command (if any).
 ##
 ## Parsing rules:
-##   1. If no fenced code block is found the action is aaAnswer.
-##   2. If a code block is found the response is scanned for an
-##      explicit marker:
+##   1. If no fenced code block is found → aaAnswer.
+##   2. If a code block is found, scan for a marker:
 ##        <!-- CONTINUE -->  → aaContinue
 ##        <!-- INTERPRET --> → aaInterpret
 ##        <!-- FINAL -->     → aaFinal
-##   3. When a code block is present but no marker is found the
-##      default action is aaFinal, reflecting get's preference
-##      for direct command output.
+##   3. When a code block exists but no marker is found the
+##      default action is aaFinal (get prefers direct output).
 ##
 ## :param text: The full LLM response text.
-## :returns: A tuple of the determined action and an optional
-##           command string extracted from the first code block.
+## :returns: A tuple of (action, optional command).
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -343,12 +358,12 @@ func extractAgentAction*(
     return (action: aaAnswer, command: none(string))
   let upper = toUpperAscii(text)
   if upper.contains("<!-- CONTINUE -->"):
-    return (action: aaContinue, command: cmd)
+    result = (action: aaContinue, command: cmd)
   elif upper.contains("<!-- INTERPRET -->"):
-    return (action: aaInterpret, command: cmd)
+    result = (action: aaInterpret, command: cmd)
   else:
-    return (action: aaFinal, command: cmd)
-  
+    result = (action: aaFinal, command: cmd)
+
 ## Formats an integer option value for display.  Returns "false"
 ## when the value is zero or negative (disabled), otherwise
 ## returns the integer as a string.
@@ -364,24 +379,83 @@ func formatIntOrDisable*(value: int): string =
   if value <= 0: "false" else: $value
 
 # ---------------------------------------------------------------------------
+# Public API — command pattern validation
+# ---------------------------------------------------------------------------
+
+## Validates a command string against a forbidden-command regex
+## pattern.  Returns true when the command is allowed (no match).
+##
+## :param command: The command to validate.
+## :param pattern: A forbidden-command regex string.
+## :returns: true if the command is allowed.
+## :raises: GetError: If the pattern is not a valid regex.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     assert validateCommandPattern(
+##       "ls -la", "\\brm\\b")
+##     assert not validateCommandPattern(
+##       "rm -rf /", "\\brm\\b")
+proc validateCommandPattern*(
+  command: string,
+  pattern: string
+): bool =
+  try:
+    result = not command.contains(re2(pattern))
+  except CatchableError:
+    raise newException(GetError,
+      fmt"invalid command-pattern regex: {pattern}")
+
+## Checks whether a user-provided forbidden-command-pattern
+## regex adequately covers common dangerous commands.  Returns a
+## warning message listing uncovered commands, or an empty
+## string.
+##
+## :param pattern: The user's forbidden-command regex.
+## :returns: Warning text, or empty string if adequate.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard checkPatternSafety("^ls")
+proc checkPatternSafety*(
+  pattern: string
+): string =
+  if pattern.len == 0:
+    return ""
+  var uncovered: seq[string] = @[]
+  for name in DANGEROUS_COMMAND_NAMES:
+    try:
+      if not name.contains(re2(pattern)):
+        uncovered.add(name)
+    except CatchableError:
+      discard
+  if uncovered.len > 0:
+    result =
+      "warning: custom command-pattern does " &
+      "not block these dangerous commands: " &
+      uncovered.join(", ")
+  else:
+    result = ""
+
+# ---------------------------------------------------------------------------
 # Private helpers — model version extraction
 # ---------------------------------------------------------------------------
 
-## Normalises a model name for comparison: lowercases and replaces
-## underscores with hyphens so that ``Claude_Opus_4.6`` and
-## ``claude-opus-4.6`` are treated identically.
+## Normalises a model name for comparison: lowercases and
+## replaces underscores with hyphens so that
+## ``Claude_Opus_4.6`` and ``claude-opus-4.6`` are treated
+## identically.
 ##
 ## :param model: Raw model identifier string.
 ## :returns: The normalised lowercase string.
 func implNormaliseModel(model: string): string =
   result = toLowerAscii(model).replace('_', '-')
 
-## Extracts the first version-like number that appears after the
-## family prefix in a normalised model name.  Skips common
+## Extracts the first version-like number that appears after
+## the family prefix in a normalised model name.  Skips common
 ## separators and an optional ``v`` prefix before the digits.
 ##
-## :param model: Normalised (lowercase, hyphen-separated) model
-##               name.
+## :param model: Normalised model name.
 ## :param family: Lowercased family prefix to search for.
 ## :returns: The extracted version as a float, or 0.0.
 func implExtractVersion(
@@ -412,15 +486,14 @@ func implExtractVersion(
       return parseFloat(numStr)
     except ValueError:
       return 0.0
-  return 0.0
+  result = 0.0
 
 ## Checks whether any weak-variant keyword is present in the
 ## normalised model name, with special handling for the MiniMax
 ## family where "mini" is part of the brand.
 ##
 ## :param m: Normalised model name.
-## :param skipMini: When true the keyword "mini" is not treated
-##                  as a weak indicator (for MiniMax family).
+## :param skipMini: When true "mini" is not treated as weak.
 ## :returns: true when a weak keyword is found.
 func implHasWeakKeyword(
   m: string,
@@ -435,26 +508,25 @@ func implHasWeakKeyword(
       continue
     if m.contains(w):
       return true
-  return false
+  result = false
 
 # ---------------------------------------------------------------------------
 # Public API — model strength check
 # ---------------------------------------------------------------------------
 
-## Checks whether the configured model name corresponds to a known
-## high-performance model suitable for command generation.
+## Checks whether the configured model name corresponds to a
+## known high-performance model suitable for command generation.
 ##
 ## Recognised strong families and their minimum versions:
 ## GPT >= 5 (including CodeX), Claude Opus/Sonnet >= 3.5 or
 ## Claude >= 3.7 by version, Gemini >= 3, Grok >= 4,
-## MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full), OpenAI o-series
-## >= 3.  Models containing weak-variant keywords (mini, nano,
-## lite, haiku, flash, etc.) or belonging to unsupported families
-## (Doubao, Qwen, etc.) are always treated as weak.
+## MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full), OpenAI
+## o-series >= 3.  Models containing weak-variant keywords
+## (mini, nano, lite, haiku, flash, etc.) or belonging to
+## unsupported families are always treated as weak.
 ##
-## Model names are normalised (lowercased, underscores replaced
-## with hyphens) before comparison so that ``Claude_Opus_4.6``
-## and ``claude-opus-4.6`` are equivalent.
+## Model names are normalised (lowercased, underscores →
+## hyphens) before comparison.
 ##
 ## :param model: The model identifier string.
 ## :returns: true when the model is recognised as strong.
@@ -463,7 +535,6 @@ func implHasWeakKeyword(
 ##   runnableExamples:
 ##     assert isKnownStrongModel("gpt-5.3-codex")
 ##     assert isKnownStrongModel("claude-opus-4.6")
-##     assert isKnownStrongModel("claude-sonnet-4.5")
 ##     assert isKnownStrongModel("deepseek-r1")
 ##     assert not isKnownStrongModel("gpt-5.4-mini")
 ##     assert not isKnownStrongModel("qwen-3.6plus")
@@ -482,13 +553,12 @@ func isKnownStrongModel*(model: string): bool =
   # GPT / Codex family.
   if m.contains("gpt") or m.contains("codex"):
     if implHasWeakKeyword(m): return false
-    let vGpt = implExtractVersion(m, "gpt")
-    let vCodex = implExtractVersion(m, "codex")
-    let v = max(vGpt, vCodex)
+    let v = max(
+      implExtractVersion(m, "gpt"),
+      implExtractVersion(m, "codex"))
     return v >= 5.0
 
-  # OpenAI o-series reasoning models (o1, o3, o4 …).
-  # Match "o" followed by a digit at word boundary.
+  # OpenAI o-series reasoning models.
   if m.contains("-o") or m.startsWith("o"):
     if implHasWeakKeyword(m): return false
     let oIdx =
@@ -497,23 +567,17 @@ func isKnownStrongModel*(model: string): bool =
     if oIdx >= 0 and oIdx < m.len - 1 and
         m[oIdx] == 'o' and
         m[oIdx + 1] in {'0' .. '9'}:
-      let v = implExtractVersion(m, "o")
-      return v >= 3.0
+      return implExtractVersion(m, "o") >= 3.0
 
-  # Claude family — supports named tiers (opus, sonnet) and
-  # plain version numbers.
+  # Claude family.
   if m.contains("claude"):
     if implHasWeakKeyword(m): return false
-    # Named tier: opus (strongest tier).
     if m.contains("opus"):
       let v = implExtractVersion(m, "opus")
-      # opus without version or with version >= 3.5.
       return v == 0.0 or v >= 3.5
-    # Named tier: sonnet (strong tier).
     if m.contains("sonnet"):
       let v = implExtractVersion(m, "sonnet")
       return v == 0.0 or v >= 3.5
-    # Fallback to plain numeric version after "claude".
     return implExtractVersion(m, "claude") >= 3.7
 
   # Gemini family.
@@ -526,10 +590,8 @@ func isKnownStrongModel*(model: string): bool =
     if implHasWeakKeyword(m): return false
     return implExtractVersion(m, "grok") >= 4.0
 
-  # MiniMax family (note: "minimax" itself contains "mini" so
-  # we must check the family BEFORE the generic weak scan).
+  # MiniMax family ("minimax" contains "mini").
   if m.contains("minimax"):
-    # "mini" inside "minimax" is the brand, not a weakness.
     if implHasWeakKeyword(m, skipMini = true):
       return false
     return implExtractVersion(m, "minimax") >= 2.7
@@ -544,5 +606,5 @@ func isKnownStrongModel*(model: string): bool =
     if implHasWeakKeyword(m): return false
     return true
 
-  # Unknown family — not recognised.
-  return false
+  # Unknown family.
+  result = false

@@ -2,23 +2,15 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
 ## This module implements a disk-backed cache that maps
 ## (query + context) hashes to previously generated commands and
-## their final output.  Each entry carries a cache mode that
-## determines behaviour on a subsequent hit: cmResult entries
-## return their stored output immediately; cmCommand entries
-## re-execute the stored command to produce fresh output.
-##
-## Cache entries expire after a configurable number of days (0 =
-## never expire) and the store is capped at a configurable maximum
-## number of entries (0 = unlimited).
-##
-## The cache-worthiness check performed by the caller yields a
-## CacheDecision that drives which mode (or none) is stored.
+## their final output.  Each entry carries a cache mode:
+## cmResult entries return stored output immediately; cmCommand
+## entries re-execute the stored command for fresh output.
 
 {.experimental: "strictFuncs".}
 
@@ -34,10 +26,10 @@ import utils
 # Types
 # ---------------------------------------------------------------------------
 
-## Describes how a cache entry should be used on a subsequent hit.
+## Describes how a cache entry is used on a subsequent hit.
 type
   CacheMode* = enum
-    cmCommand  ## Re-execute the cached command to get fresh output.
+    cmCommand  ## Re-execute the cached command.
     cmResult   ## Return the cached output immediately.
 
 ## Describes the outcome of a cache-worthiness check.
@@ -47,16 +39,15 @@ type
     cdCommand  ## Cache the command for re-execution.
     cdResult   ## Cache the final output for direct reuse.
 
-## A single cached result mapping a context hash to the generated
-## command and optionally the final displayed output.
+## A single cached result.
 type
   CacheEntry* = object
     hash*: string       ## MD5 hex digest of the context.
     query*: string      ## Original user query text.
-    command*: string     ## Generated shell command (may be empty).
-    output*: string     ## Final output (populated for cmResult, empty for cmCommand).
-    cacheMode*: CacheMode ## Behaviour on a cache hit.
-    timestamp*: int64   ## Unix epoch seconds when entry was created.
+    command*: string    ## Generated shell command.
+    output*: string     ## Final output (cmResult only).
+    cacheMode*: CacheMode ## Behaviour on cache hit.
+    timestamp*: int64   ## Unix epoch seconds when created.
 
 ## In-memory representation of the entire cache file.
 type
@@ -64,33 +55,32 @@ type
     entries*: seq[CacheEntry]  ## All cached entries.
 
 # ---------------------------------------------------------------------------
-# Private helpers — sorting
+# Private helpers
 # ---------------------------------------------------------------------------
 
 ## Compares two cache entries by timestamp (ascending).
 ##
 ## :param a: First entry.
 ## :param b: Second entry.
-## :returns: Negative if a is older, positive if newer, 0 if equal.
-func implCmpTimestamp(a, b: CacheEntry): int =
+## :returns: Negative if a is older, positive if newer.
+func implCmpTimestamp(
+  a, b: CacheEntry
+): int =
   result = cmp(a.timestamp, b.timestamp)
-
-# ---------------------------------------------------------------------------
-# Private helpers — CacheMode serialisation
-# ---------------------------------------------------------------------------
 
 ## Converts a CacheMode to its JSON string representation.
 ##
 ## :param mode: The cache mode to serialise.
 ## :returns: "command" or "result".
-func implCacheModeToStr(mode: CacheMode): string =
+func implCacheModeToStr(
+  mode: CacheMode
+): string =
   case mode
   of cmCommand: result = "command"
   of cmResult:  result = "result"
 
-## Parses a string into a CacheMode.  Returns cmResult for any
-## unrecognised value (backward-compatible with old entries that
-## lack the field).
+## Parses a string into a CacheMode.  Returns cmResult for
+## unrecognised values (backward-compatible).
 ##
 ## :param s: The string to parse.
 ## :returns: The corresponding CacheMode.
@@ -119,10 +109,12 @@ func implStrToCacheMode(s: string): CacheMode =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     import std/options
-##     let h1 = computeCacheHash("test", "/tmp", "bash",
-##       "gpt", false, none(string), none(string))
-##     let h2 = computeCacheHash("test", "/tmp", "bash",
-##       "gpt", false, none(string), none(string))
+##     let h1 = computeCacheHash("test", "/tmp",
+##       "bash", "gpt", false,
+##       none(string), none(string))
+##     let h2 = computeCacheHash("test", "/tmp",
+##       "bash", "gpt", false,
+##       none(string), none(string))
 ##     assert h1 == h2
 ##     assert h1.len == 32
 proc computeCacheHash*(
@@ -142,15 +134,8 @@ proc computeCacheHash*(
     else: ""
   let parts = @[
     toLowerAscii(query.strip()),
-    cwd,
-    shell,
-    model,
-    $instance,
-    sysPmt,
-    cmdPat,
-    hostOS,
-    hostCPU
-  ]
+    cwd, shell, model, $instance,
+    sysPmt, cmdPat, hostOS, hostCPU]
   result = $toMD5(parts.join("|"))
 
 # ---------------------------------------------------------------------------
@@ -164,7 +149,6 @@ proc computeCacheHash*(
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc loadCache*(): CacheStore =
   let path = getCacheFilePath()
@@ -178,20 +162,14 @@ proc loadCache*(): CacheStore =
     var entries: seq[CacheEntry] = @[]
     for item in node:
       let entry = CacheEntry(
-        hash:
-          item{"hash"}.getStr(""),
-        query:
-          item{"query"}.getStr(""),
-        command:
-          item{"command"}.getStr(""),
-        output:
-          item{"output"}.getStr(""),
-        cacheMode:
-          implStrToCacheMode(
-            item{"cacheMode"}.getStr("result")),
+        hash: item{"hash"}.getStr(""),
+        query: item{"query"}.getStr(""),
+        command: item{"command"}.getStr(""),
+        output: item{"output"}.getStr(""),
+        cacheMode: implStrToCacheMode(
+          item{"cacheMode"}.getStr("result")),
         timestamp:
-          item{"timestamp"}.getBiggestInt(0).int64
-      )
+          item{"timestamp"}.getBiggestInt(0).int64)
       if entry.hash.len > 0:
         entries.add(entry)
     result = CacheStore(entries: entries)
@@ -204,7 +182,6 @@ proc loadCache*(): CacheStore =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc saveCache*(store: CacheStore) =
   let path = getCacheFilePath()
@@ -216,8 +193,7 @@ proc saveCache*(store: CacheStore) =
       "command":   e.command,
       "output":    e.output,
       "cacheMode": implCacheModeToStr(e.cacheMode),
-      "timestamp": e.timestamp
-    })
+      "timestamp": e.timestamp})
   try:
     writeFile(path, pretty(arr, 2) & "\n")
   except IOError:
@@ -227,19 +203,18 @@ proc saveCache*(store: CacheStore) =
 # Public API — lookup
 # ---------------------------------------------------------------------------
 
-## Looks up a hash in the cache store.  Returns the matching entry
-## only if it has not expired.  When expiryDays is 0 (disabled)
-## entries never expire.
+## Looks up a hash in the cache store.  Returns the matching
+## entry only if it has not expired.
 ##
 ## :param store: The loaded cache store.
 ## :param hash: The context hash to search for.
 ## :param expiryDays: Maximum age in days (0 = never expire).
-## :returns: The matching entry, or none if not found or expired.
+## :returns: The matching entry, or none.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     let store = CacheStore(entries: @[])
 ##     import std/options
+##     let store = CacheStore(entries: @[])
 ##     assert lookupCache(store, "abc", 30).isNone
 proc lookupCache*(
   store: CacheStore,
@@ -256,24 +231,22 @@ proc lookupCache*(
         return some(e)
       else:
         return none(CacheEntry)
-  return none(CacheEntry)
+  result = none(CacheEntry)
 
 # ---------------------------------------------------------------------------
 # Public API — mutation
 # ---------------------------------------------------------------------------
 
-## Adds or replaces a cache entry and enforces the maximum entry
-## cap.  When maxEntries is 0 (disabled) no cap is enforced.
-## When expiryDays is 0 (disabled) no entries are purged by age.
+## Adds or replaces a cache entry and enforces the maximum
+## entry cap.
 ##
 ## :param store: The cache store to mutate (var).
 ## :param entry: The new cache entry to insert.
-## :param maxEntries: Maximum entries to retain (0 = unlimited).
-## :param expiryDays: Expiry period in days (0 = no purge).
+## :param maxEntries: Maximum entries (0 = unlimited).
+## :param expiryDays: Expiry in days (0 = no purge).
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — mutates state.
 ##     discard
 proc addCacheEntry*(
   store: var CacheStore,
@@ -286,7 +259,6 @@ proc addCacheEntry*(
     if e.hash != entry.hash:
       kept.add(e)
   kept.add(entry)
-
   if expiryDays > 0:
     let now = epochTime().int64
     let maxAge = expiryDays.int64 * 86400'i64
@@ -295,15 +267,13 @@ proc addCacheEntry*(
       if (now - e.timestamp) <= maxAge:
         fresh.add(e)
     kept = fresh
-
   if maxEntries > 0 and kept.len > maxEntries:
     kept.sort(implCmpTimestamp)
     kept = kept[kept.len - maxEntries .. ^1]
-
   store.entries = kept
 
 ## Removes all cache entries whose query matches the given text
-## (case-insensitive, trimmed comparison).
+## (case-insensitive).
 ##
 ## :param store: The cache store to mutate (var).
 ## :param query: The query text to match against.
@@ -311,7 +281,6 @@ proc addCacheEntry*(
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — mutates state.
 ##     discard
 proc unsetCacheEntries*(
   store: var CacheStore,
@@ -334,11 +303,10 @@ proc unsetCacheEntries*(
 
 ## Removes all entries from the cache file.
 ##
-## :returns: The number of entries that were removed.
+## :returns: The number of entries removed.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — modifies filesystem.
 ##     discard
 proc cleanCache*(): int =
   var store = loadCache()
@@ -346,31 +314,28 @@ proc cleanCache*(): int =
   store.entries = @[]
   saveCache(store)
 
-## Removes cache entries matching a query and persists the result.
+## Removes cache entries matching a query and persists.
 ##
-## :param query: The query text to match (case-insensitive).
+## :param query: The query text to match.
 ## :returns: The number of entries removed.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — modifies filesystem.
 ##     discard
 proc unsetCache*(query: string): int =
   var store = loadCache()
   result = unsetCacheEntries(store, query)
   saveCache(store)
 
-## Prints a summary of the cache state using the active output
-## style.
+## Prints a summary of the cache state.
 ##
 ## :param cacheEnabled: Whether cache is enabled.
-## :param expiryDays: Configured expiry in days (0 = never).
-## :param maxEntries: Configured max entry count (0 = unlimited).
+## :param expiryDays: Configured expiry in days.
+## :param maxEntries: Configured max entry count.
 ## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — produces console output.
 ##     discard
 proc displayCacheInfo*(
   cacheEnabled: bool,
@@ -385,7 +350,6 @@ proc displayCacheInfo*(
   styleKeyValue(sk, "cache", status)
   styleKeyValue(sk, "entries",
     $store.entries.len)
-  # Count by mode.
   var cmdCount = 0
   var resCount = 0
   for e in store.entries:

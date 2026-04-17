@@ -2,17 +2,17 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-17
 ## :File: sysinfo.nim
 ## :License: AGPL-3.0
 ##
-## This module collects runtime system information such as OS type,
-## CPU architecture, current working directory, username, hostname,
-## available command-line tools, and bundled binary tools shipped
-## alongside the executable.  The gathered snapshot is included in
-## LLM prompts so the model can generate context-aware commands.
-## It also provides a startup environment check that verifies
-## Windows 10+ / Linux 6.0+ on a 64-bit platform.
+## This module collects runtime system information such as OS
+## type, CPU architecture, current working directory, username,
+## hostname, available command-line tools, and bundled binary
+## tools shipped alongside the executable.  The gathered snapshot
+## is included in LLM prompts so the model can generate context-
+## aware commands.  It also provides a startup environment check
+## that verifies Windows 10+ / Linux 6.0+ on a 64-bit platform.
 
 {.experimental: "strictFuncs".}
 
@@ -25,14 +25,14 @@ import utils
 # ---------------------------------------------------------------------------
 
 when not (hostCPU == "amd64" or hostCPU == "arm64"):
-  {.error: "get requires a 64-bit platform (amd64 or arm64)".}
+  {.error:
+    "get requires a 64-bit platform (amd64 or arm64)".}
 
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
-## Describes a single tool bundled in the bin/ directory next to the
-## executable.
+## Describes a single tool bundled in the bin/ directory.
 type
   BundledTool* = object
     name*: string         ## Command name (platform-specific).
@@ -42,23 +42,23 @@ type
 ## provide context to the LLM when generating commands.
 type
   SysInfo* = object
-    os*: string              ## Operating system (e.g. "linux").
-    arch*: string            ## CPU architecture (e.g. "amd64").
-    hostname*: string        ## Machine hostname.
-    username*: string        ## Current username.
-    cwd*: string             ## Current working directory.
-    shell*: string           ## Configured shell name.
-    shellVersion*: string    ## Shell --version first line.
-    availableTools*: seq[string]   ## Tools found on PATH.
-    bundledTools*: seq[BundledTool] ## Tools shipped in bin/.
-    binDir*: string          ## Absolute path to bundled bin dir.
+    os*: string             ## Operating system (e.g. "linux").
+    arch*: string           ## CPU architecture (e.g. "amd64").
+    hostname*: string       ## Machine hostname.
+    username*: string       ## Current username.
+    cwd*: string            ## Current working directory.
+    shell*: string          ## Configured shell name.
+    shellVersion*: string   ## Shell --version first line.
+    availableTools*: seq[string]    ## Tools found on PATH.
+    bundledTools*: seq[BundledTool] ## Tools in bin/.
+    binDir*: string         ## Absolute path to bundled bin dir.
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants — tools to probe
 # ---------------------------------------------------------------------------
 
-## Tools to probe for on PATH.  Kept to commonly useful commands so
-## the startup cost is acceptable.
+## Tools to probe for on PATH.  Kept to commonly useful commands
+## so the startup cost is acceptable.
 const PROBE_TOOLS* = [
   "git", "curl", "wget",
   "python3", "python", "pip3", "pip",
@@ -73,8 +73,11 @@ const PROBE_TOOLS* = [
   "nim", "nimble"
 ]
 
-## Bundled tool definitions for Linux.  Descriptions include
-## key flags and explicit read-only safety notes.
+# ---------------------------------------------------------------------------
+# Constants — bundled tool definitions
+# ---------------------------------------------------------------------------
+
+## Bundled tool definitions for Linux.
 const BUNDLED_DEFS_LINUX = [
   ("rg",
    "ripgrep — ultra-fast regex search in files. " &
@@ -135,8 +138,8 @@ const BUNDLED_DEFS_LINUX = [
    "Read-only tool."),
   ("lua",
    "lua — Lua 5.x interpreter. " &
-   "Usage: lua <script.lua> or lua -e '<code>'. " &
-   "Can run small scripts for calculations, " &
+   "Usage: lua <script.lua> or lua -e '<code>'." &
+   " Can run small scripts for calculations, " &
    "text processing, and data formatting. " &
    "NEVER use io.open with write mode or " &
    "os.execute/os.rename/os.remove. " &
@@ -170,8 +173,8 @@ const BUNDLED_DEFS_WINDOWS = [
   ("fd",
    "fd — fast file/directory finder. " &
    "Usage: fd <pattern> [path]. " &
-   "Key flags: -e <ext>, -t f, -t d, --hidden. " &
-   "NEVER use -x/--exec with write commands. " &
+   "Key flags: -e <ext>, -t f, -t d, --hidden." &
+   " NEVER use -x/--exec with write commands. " &
    "Read-only tool."),
   ("sg",
    "ast-grep (sg) — AST-level structural code " &
@@ -186,12 +189,12 @@ const BUNDLED_DEFS_WINDOWS = [
    "-x '<glob>', -r, -w <mode>, -p <mode>. " &
    "NEVER use -o or -c flags. Read-only tool."),
   ("treepp",
-   "tree++ — enhanced directory tree for Windows. " &
-   "Usage: treepp [path] /F. " &
-   "Key flags: /F (show files), /NB (no banner), " &
-   "/L <n> (depth limit), /X <pat> (exclude), " &
-   "/S (file sizes), /HR (human-readable sizes), " &
-   "/G (respect .gitignore), " &
+   "tree++ — enhanced directory tree for Windows." &
+   " Usage: treepp [path] /F. " &
+   "Key flags: /F (show files), /NB (no banner)," &
+   " /L <n> (depth limit), /X <pat> (exclude), " &
+   "/S (file sizes), /HR (human-readable sizes)," &
+   " /G (respect .gitignore), " &
    "/RP (summary report), /B (batch mode). " &
    "NEVER use /O (writes files). " &
    "Read-only tool."),
@@ -224,7 +227,7 @@ const BUNDLED_DEFS_WINDOWS = [
 # ---------------------------------------------------------------------------
 
 ## Attempts to obtain the shell version string by running
-## ``<shell> --version`` and returning the first line of output.
+## ``<shell> --version``.
 ##
 ## :param shell: Shell executable name or path.
 ## :returns: First line of version output, or empty on failure.
@@ -239,8 +242,7 @@ proc implGetShellVersion(shell: string): string =
   except OSError, IOError:
     result = ""
 
-## Checks whether a tool is available on PATH using ``which``
-## (Unix) or ``where`` (Windows).
+## Checks whether a tool is available on PATH.
 ##
 ## :param tool: The command name to check.
 ## :returns: true when the tool is found.
@@ -256,7 +258,8 @@ proc implToolAvailable(tool: string): bool =
   except OSError, IOError:
     result = false
 
-## Detects which bundled tools are present in the given directory.
+## Detects which bundled tools are present in the given
+## directory.
 ##
 ## :param binDir: Absolute path to the bundled bin directory.
 ## :returns: A seq of BundledTool for every tool found.
@@ -285,7 +288,7 @@ proc implDetectBundledTools(
 
 ## Collects a snapshot of the current system environment.
 ##
-## :param shell: The configured shell name used for execution.
+## :param shell: The configured shell name.
 ## :returns: A populated SysInfo instance.
 ##
 ## .. code-block:: nim
@@ -323,10 +326,11 @@ proc collectSysInfo*(shell: string): SysInfo =
   for tool in PROBE_TOOLS:
     if implToolAvailable(tool):
       result.availableTools.add(tool)
-  result.bundledTools = implDetectBundledTools(binDir)
+  result.bundledTools =
+    implDetectBundledTools(binDir)
 
-## Formats a SysInfo snapshot into a multi-line string suitable for
-## inclusion in an LLM prompt.
+## Formats a SysInfo snapshot into a multi-line string suitable
+## for inclusion in an LLM prompt.
 ##
 ## :param info: The system information snapshot.
 ## :returns: A human-readable description of the system.
@@ -334,8 +338,9 @@ proc collectSysInfo*(shell: string): SysInfo =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     let info = SysInfo(os: "linux", arch: "amd64",
-##       hostname: "dev", username: "user", cwd: "/home",
-##       shell: "bash", shellVersion: "5.2",
+##       hostname: "dev", username: "user",
+##       cwd: "/home", shell: "bash",
+##       shellVersion: "5.2",
 ##       availableTools: @["git"],
 ##       bundledTools: @[], binDir: "")
 ##     let s = formatSysInfo(info)
@@ -382,8 +387,7 @@ func formatBundledTools*(
   result = lines.join("\n")
 
 ## Checks whether the runtime environment meets the minimum
-## requirements (Windows 10+ / Linux 6.0+, 64-bit).  Returns an
-## empty string when everything is fine, or a warning message.
+## requirements.  Returns an empty string when OK, or a warning.
 ##
 ## :returns: Empty string if OK, warning text otherwise.
 ##
@@ -404,7 +408,8 @@ proc checkEnvironment*(): string =
           let parts = verStr.split(".")
           if parts.len >= 1:
             try:
-              let major = parseInt(parts[0].strip())
+              let major = parseInt(
+                parts[0].strip())
               if major < 10:
                 return "warning: Windows 10+ " &
                   "required (detected major " &
@@ -415,16 +420,18 @@ proc checkEnvironment*(): string =
       discard
   elif defined(linux):
     try:
-      let (output, code) = execCmdEx("uname -r")
+      let (output, code) =
+        execCmdEx("uname -r")
       if code == 0 and output.len > 0:
         let ver = output.strip()
         let parts = ver.split(".")
         if parts.len >= 1:
           try:
-            let major = parseInt(parts[0].strip())
+            let major = parseInt(
+              parts[0].strip())
             if major < 6:
-              return "warning: Linux kernel 6.0+" &
-                fmt" required (detected {ver})"
+              return "warning: Linux kernel " &
+                fmt"6.0+ required (detected {ver})"
           except ValueError:
             discard
     except OSError, IOError:

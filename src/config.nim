@@ -6,18 +6,12 @@
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
-## This module owns the Config data type, its default values, JSON
-## serialisation, and all persistence logic including platform-
-## specific secure key storage (Linux: file permissions 0600;
-## Windows: DPAPI).  It exposes high-level operations consumed by
-## the CLI dispatcher: load, save, display, reset, set-by-name,
-## and readiness checking.
-##
-## String options (url, model, shell) accept an empty string as an
-## explicit "unset" value.  Boolean options reset to their compile-
-## time defaults when an empty string is supplied.  Integer options
-## accept "false" (or 0) to disable the feature, an empty string
-## to reset to the default, or a positive integer.
+## This module owns the Config data type, its default values,
+## JSON serialisation, and all persistence logic including
+## platform-specific secure key storage (Linux: file permissions
+## 0600; Windows: DPAPI).  It exposes high-level operations
+## consumed by the CLI dispatcher: load, save, display, reset,
+## set-by-name, and readiness checking.
 
 {.experimental: "strictFuncs".}
 
@@ -26,12 +20,11 @@ import std/[json, options, os, strformat, strutils]
 when defined(windows):
   import std/base64
 
-import exec
 import style
 import utils
 
 # ---------------------------------------------------------------------------
-# Constants — default values for every configuration option
+# Constants — default values
 # ---------------------------------------------------------------------------
 
 ## Default LLM API endpoint URL.
@@ -40,13 +33,13 @@ const DEFAULT_URL* = "https://api.poe.com/v1"
 ## Default LLM model identifier.
 const DEFAULT_MODEL* = "gpt-5.3-codex"
 
-## Default for manual-confirm (prompt before execution).
+## Default for manual-confirm.
 const DEFAULT_MANUAL_CONFIRM* = false
 
-## Default for double-check (second model review).
+## Default for double-check.
 const DEFAULT_DOUBLE_CHECK* = true
 
-## Default for instance (fast-reply mode).
+## Default for instance mode.
 const DEFAULT_INSTANCE* = false
 
 ## Default API request timeout in seconds.
@@ -73,19 +66,13 @@ const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
-## Default vivid mode flag.  When true, output uses animated
-## spinners, ANSI colours, and optional external rendering.
-## When false, plain unformatted text is used.
+## Default vivid mode flag.
 const DEFAULT_VIVID* = true
 
-## Default external-display flag.  When true, bat and mdcat are
-## used for syntax-highlighted and Markdown output rendering in
-## vivid mode.
+## Default external-display flag.
 const DEFAULT_EXTERNAL_DISPLAY* = true
 
-## Default maximum number of agent loop rounds in non-instance
-## mode.  When set to 0 the loop may run indefinitely (not
-## recommended).
+## Default maximum number of agent loop rounds.
 const DEFAULT_MAX_ROUNDS* = 3
 
 # ---------------------------------------------------------------------------
@@ -93,30 +80,30 @@ const DEFAULT_MAX_ROUNDS* = 3
 # ---------------------------------------------------------------------------
 
 ## Holds every runtime configuration option except the API key,
-## which is stored and managed separately for security reasons.
-## Integer options that support the "false" (disabled) state use 0
-## to represent the disabled condition.
+## which is stored separately for security reasons.  Integer
+## options that support the "false" (disabled) state use 0 to
+## represent the disabled condition.
 type
   Config* = object
-    url*: string                     ## LLM API endpoint URL.
+    url*: string                     ## API endpoint URL.
     model*: string                   ## LLM model identifier.
     manualConfirm*: bool             ## Prompt before executing.
-    doubleCheck*: bool               ## Second model review pass.
+    doubleCheck*: bool               ## Second model review.
     instance*: bool                  ## Single-call mode.
-    timeout*: int                    ## Per-request timeout (s). 0=disabled.
-    maxToken*: int                   ## Max tokens per request. 0=disabled.
-    commandPattern*: Option[string]  ## Regex for validation.
+    timeout*: int                    ## Per-request timeout (s).
+    maxToken*: int                   ## Max tokens per request.
+    commandPattern*: Option[string]  ## Forbidden-cmd regex.
     systemPrompt*: Option[string]    ## Custom system prompt.
     shell*: string                   ## Shell executable.
-    log*: bool                       ## Log requests/executions.
+    log*: bool                       ## Log requests.
     hideProcess*: bool               ## Hide intermediate output.
     cache*: bool                     ## Enable response cache.
-    cacheExpiry*: int                ## Cache expiry in days. 0=never.
-    cacheMaxEntries*: int            ## Max cached entries. 0=unlimited.
-    logMaxEntries*: int              ## Max log entries. 0=unlimited.
+    cacheExpiry*: int                ## Cache expiry in days.
+    cacheMaxEntries*: int            ## Max cached entries.
+    logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
-    externalDisplay*: bool           ## Use bat/mdcat for output rendering.
-    maxRounds*: int              ## Max agent loop rounds. 0=unlimited.
+    externalDisplay*: bool           ## Use bat/mdcat.
+    maxRounds*: int                  ## Max agent loop rounds.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -124,12 +111,12 @@ type
 
 when defined(windows):
   type
-    ## Mirrors the Windows DATA_BLOB structure used by DPAPI.
+    ## Mirrors the Windows DATA_BLOB structure.
     DataBlob = object
       cbData: uint32  ## Size of the data buffer in bytes.
       pbData: pointer ## Pointer to the data buffer.
 
-  ## Encrypts plaintext using the current user's DPAPI master key.
+  ## Encrypts plaintext using DPAPI.
   proc cryptProtectData(
     pDataIn: ptr DataBlob,
     szDataDescr: pointer,
@@ -141,8 +128,7 @@ when defined(windows):
   ): int32 {.importc: "CryptProtectData",
     stdcall, dynlib: "crypt32.dll".}
 
-  ## Decrypts ciphertext previously encrypted with
-  ## CryptProtectData.
+  ## Decrypts ciphertext previously encrypted with DPAPI.
   proc cryptUnprotectData(
     pDataIn: ptr DataBlob,
     ppszDataDescr: pointer,
@@ -161,12 +147,11 @@ when defined(windows):
     stdcall, dynlib: "kernel32.dll".}
 
 # ---------------------------------------------------------------------------
-# Private helpers — DPAPI encrypt / decrypt (Windows only)
+# Private helpers — DPAPI (Windows only)
 # ---------------------------------------------------------------------------
 
 when defined(windows):
-  ## Encrypts a plaintext string with DPAPI and returns a base64
-  ## encoding of the ciphertext.
+  ## Encrypts plaintext with DPAPI, returns base64.
   ##
   ## :param data: The plaintext to encrypt.
   ## :returns: Base64-encoded ciphertext.
@@ -180,8 +165,7 @@ when defined(windows):
     var outputBlob: DataBlob
     let ret = cryptProtectData(
       addr inputBlob, nil, nil, nil, nil, 0'u32,
-      addr outputBlob
-    )
+      addr outputBlob)
     if ret == 0:
       raise newException(GetError,
         "DPAPI encryption failed")
@@ -192,7 +176,7 @@ when defined(windows):
     discard localFree(outputBlob.pbData)
     result = encode(buf)
 
-  ## Decrypts a base64-encoded DPAPI ciphertext back to plaintext.
+  ## Decrypts base64-encoded DPAPI ciphertext.
   ##
   ## :param encoded: Base64-encoded ciphertext.
   ## :returns: The original plaintext string.
@@ -202,13 +186,13 @@ when defined(windows):
     var inputBlob = DataBlob(
       cbData: encrypted.len.uint32,
       pbData: if encrypted.len > 0:
-        cast[pointer](unsafeAddr encrypted[0]) else: nil
+        cast[pointer](unsafeAddr encrypted[0])
+        else: nil
     )
     var outputBlob: DataBlob
     let ret = cryptUnprotectData(
       addr inputBlob, nil, nil, nil, nil, 0'u32,
-      addr outputBlob
-    )
+      addr outputBlob)
     if ret == 0:
       raise newException(GetError,
         "DPAPI decryption failed")
@@ -224,12 +208,11 @@ when defined(windows):
 
 ## Returns the platform default shell name.
 ##
-## :returns: "powershell" on Windows, "bash" everywhere else.
+## :returns: "powershell" on Windows, "bash" elsewhere.
 func implDefaultShell(): string =
   result = defaultShell()
 
-## Parses a boolean string ("true" / "false").  When the input is
-## empty the provided default is returned.
+## Parses a boolean string.  Empty input returns the default.
 ##
 ## :param value: Raw string from the CLI.
 ## :param optName: Option name, used in error messages.
@@ -248,12 +231,11 @@ func implParseBool(
   of "false": result = false
   else:
     raise newException(GetError,
-      fmt"invalid value '{value}' for '{optName}':" &
-      " expected 'true' or 'false'")
+      fmt"invalid value '{value}' for " &
+      fmt"'{optName}': expected 'true' or 'false'")
 
-## Parses a positive integer string, or "false" (mapping to 0 =
-## disabled).  When the input is empty the provided default is
-## returned.
+## Parses a positive integer or "false" (mapping to 0).
+## Empty input returns the default.
 ##
 ## :param value: Raw string from the CLI.
 ## :param optName: Option name, used in error messages.
@@ -273,18 +255,20 @@ func implParseIntOrDisable(
     result = parseInt(value)
   except ValueError:
     raise newException(GetError,
-      fmt"invalid value '{value}' for '{optName}':" &
-      " expected positive integer or 'false'")
+      fmt"invalid value '{value}' for " &
+      fmt"'{optName}': expected positive " &
+      "integer or 'false'")
   if result < 0:
     raise newException(GetError,
-      fmt"invalid value '{value}' for '{optName}':" &
-      " expected positive integer or 'false'")
+      fmt"invalid value '{value}' for " &
+      fmt"'{optName}': expected positive " &
+      "integer or 'false'")
 
 # ---------------------------------------------------------------------------
 # Private helpers — JSON serialisation
 # ---------------------------------------------------------------------------
 
-## Converts a Config object to a pretty-printed JSON node.
+## Converts a Config object to a JSON node.
 ##
 ## :param cfg: The configuration to serialise.
 ## :returns: A JsonNode representing the configuration.
@@ -309,9 +293,11 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "maxRounds":       cfg.maxRounds
   }
   if cfg.commandPattern.isSome:
-    result["commandPattern"] = %cfg.commandPattern.get
+    result["commandPattern"] =
+      %cfg.commandPattern.get
   if cfg.systemPrompt.isSome:
-    result["systemPrompt"] = %cfg.systemPrompt.get
+    result["systemPrompt"] =
+      %cfg.systemPrompt.get
 
 ## Parses a JSON node into a Config.
 ##
@@ -325,51 +311,45 @@ proc implJsonToConfig(
   result = Config(
     url: node{"url"}.getStr(""),
     model: node{"model"}.getStr(""),
-    manualConfirm:
-      node{"manualConfirm"}.getBool(
-        defaults.manualConfirm),
-    doubleCheck:
-      node{"doubleCheck"}.getBool(
-        defaults.doubleCheck),
-    instance:
-      node{"instance"}.getBool(defaults.instance),
-    timeout:
-      node{"timeout"}.getInt(defaults.timeout),
-    maxToken:
-      node{"maxToken"}.getInt(defaults.maxToken),
+    manualConfirm: node{"manualConfirm"}.getBool(
+      defaults.manualConfirm),
+    doubleCheck: node{"doubleCheck"}.getBool(
+      defaults.doubleCheck),
+    instance: node{"instance"}.getBool(
+      defaults.instance),
+    timeout: node{"timeout"}.getInt(
+      defaults.timeout),
+    maxToken: node{"maxToken"}.getInt(
+      defaults.maxToken),
     shell: node{"shell"}.getStr(""),
     log: node{"log"}.getBool(defaults.log),
-    hideProcess:
-      node{"hideProcess"}.getBool(
-        defaults.hideProcess),
-    cache:
-      node{"cache"}.getBool(defaults.cache),
-    cacheExpiry:
-      node{"cacheExpiry"}.getInt(
-        defaults.cacheExpiry),
+    hideProcess: node{"hideProcess"}.getBool(
+      defaults.hideProcess),
+    cache: node{"cache"}.getBool(defaults.cache),
+    cacheExpiry: node{"cacheExpiry"}.getInt(
+      defaults.cacheExpiry),
     cacheMaxEntries:
       node{"cacheMaxEntries"}.getInt(
         defaults.cacheMaxEntries),
-    logMaxEntries:
-      node{"logMaxEntries"}.getInt(
-        defaults.logMaxEntries),
-    vivid:
-      node{"vivid"}.getBool(defaults.vivid),
+    logMaxEntries: node{"logMaxEntries"}.getInt(
+      defaults.logMaxEntries),
+    vivid: node{"vivid"}.getBool(defaults.vivid),
     externalDisplay:
       node{"externalDisplay"}.getBool(
         defaults.externalDisplay),
-    maxRounds:
-      node{"maxRounds"}.getInt(
-        defaults.maxRounds)
+    maxRounds: node{"maxRounds"}.getInt(
+      defaults.maxRounds)
   )
   let cmdNode = node{"commandPattern"}
-  if not cmdNode.isNil and cmdNode.kind == JString and
+  if not cmdNode.isNil and
+      cmdNode.kind == JString and
       cmdNode.getStr().len > 0:
     result.commandPattern = some(cmdNode.getStr())
   else:
     result.commandPattern = none(string)
   let sysNode = node{"systemPrompt"}
-  if not sysNode.isNil and sysNode.kind == JString and
+  if not sysNode.isNil and
+      sysNode.kind == JString and
       sysNode.getStr().len > 0:
     result.systemPrompt = some(sysNode.getStr())
   else:
@@ -381,7 +361,7 @@ proc implJsonToConfig(
 
 ## Creates a Config populated entirely with default values.
 ##
-## :returns: A Config with every field set to its documented default.
+## :returns: A Config with every field at its default.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
@@ -414,14 +394,13 @@ func defaultConfig*(): Config =
 # Public API — key storage
 # ---------------------------------------------------------------------------
 
-## Persists the API key using platform-appropriate secure storage.
-## Passing none deletes any stored key.
+## Persists the API key using platform-appropriate secure
+## storage.  Passing none deletes any stored key.
 ##
 ## :param key: The key value to store, or none to clear.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc saveKey*(key: Option[string]) =
   let path = getKeyFilePath()
@@ -435,15 +414,15 @@ proc saveKey*(key: Option[string]) =
     writeFile(path, encrypted)
   else:
     writeFile(path, value)
-    setFilePermissions(path, {fpUserRead, fpUserWrite})
+    setFilePermissions(path,
+      {fpUserRead, fpUserWrite})
 
 ## Loads the API key from platform-specific secure storage.
 ##
-## :returns: The stored key, or none if absent or unreadable.
+## :returns: The stored key, or none if absent.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc loadKey*(): Option[string] =
   let path = getKeyFilePath()
@@ -474,7 +453,6 @@ proc loadKey*(): Option[string] =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc loadConfig*(): Config =
   let path = getConfigFilePath()
@@ -502,7 +480,6 @@ proc loadConfig*(): Config =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem.
 ##     discard
 proc saveConfig*(cfg: Config) =
   let path = getConfigFilePath()
@@ -513,16 +490,13 @@ proc saveConfig*(cfg: Config) =
 # Public API — display
 # ---------------------------------------------------------------------------
 
-## Prints every configuration option to stdout using the active
-## output style.  The API key is masked with asterisks.  Integer
-## options that support disabling show "false" when the value is
-## zero.
+## Prints every configuration option to stdout.  The API key is
+## masked with asterisks.
 ##
 ## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — produces console output.
 ##     discard
 proc displayConfig*(sk: StyleKind = skSimp) =
   let cfg = loadConfig()
@@ -533,7 +507,7 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     if cfg.commandPattern.isSome:
       cfg.commandPattern.get
     else:
-      fmt"(default: built-in)"
+      "(default: built-in)"
   let sysPmt =
     if cfg.systemPrompt.isSome:
       cfg.systemPrompt.get else: ""
@@ -572,11 +546,11 @@ proc displayConfig*(sk: StyleKind = skSimp) =
 # Public API — reset
 # ---------------------------------------------------------------------------
 
-## Resets all configuration to defaults and clears the stored key.
+## Resets all configuration to defaults and clears the stored
+## key.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — modifies filesystem.
 ##     discard
 proc resetConfig*() =
   saveConfig(defaultConfig())
@@ -586,15 +560,15 @@ proc resetConfig*() =
 # Public API — set by name
 # ---------------------------------------------------------------------------
 
-## Sets a single configuration option by its CLI kebab-case name.
+## Sets a single configuration option by its CLI kebab-case
+## name.
 ##
 ## :param name: The kebab-case option name.
 ## :param value: The new value, or empty to unset/reset.
-## :raises: GetError: If the name is unknown or value is invalid.
+## :raises: GetError: If the name is unknown or value invalid.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — modifies filesystem.
 ##     discard
 proc setConfigOption*(name: string, value: string) =
   if name == "key":
@@ -641,7 +615,8 @@ proc setConfigOption*(name: string, value: string) =
   of "shell":
     cfg.shell = value
   of "log":
-    cfg.log = implParseBool(value, name, DEFAULT_LOG)
+    cfg.log = implParseBool(
+      value, name, DEFAULT_LOG)
   of "hide-process":
     cfg.hideProcess = implParseBool(
       value, name, DEFAULT_HIDE_PROCESS)
@@ -675,15 +650,13 @@ proc setConfigOption*(name: string, value: string) =
 # Public API — readiness check
 # ---------------------------------------------------------------------------
 
-## Checks whether key, url, and model are all configured.  Only
-## prints missing items; when all present returns true.
+## Checks whether key, url, and model are all configured.
 ##
 ## :param sk: The active output style.
 ## :returns: true when all three are present.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — requires filesystem and console.
 ##     discard
 proc checkReady*(sk: StyleKind = skSimp): bool =
   let cfg = loadConfig()

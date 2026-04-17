@@ -2,16 +2,14 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: logger.nim
 ## :License: AGPL-3.0
 ##
-## This module appends timestamped entries to the get.log file in
-## the application configuration directory.  Each entry records the
-## user query, generated command, exit code, and a truncated
-## preview of the command output.  Logging failures are silently
-## ignored.  It also provides log management commands: status
-## display, cleaning, and entry-count enforcement.
+## This module appends timestamped entries to the get.log file.
+## Each entry records the user query, generated command, exit
+## code, and a truncated output preview.  Logging failures are
+## silently ignored.
 
 {.experimental: "strictFuncs".}
 
@@ -24,7 +22,7 @@ import utils
 # Constants
 # ---------------------------------------------------------------------------
 
-## Maximum number of output characters stored in a single log entry.
+## Maximum output characters stored in a single log entry.
 const MAX_LOG_OUTPUT_LEN* = 4096
 
 ## Separator that marks the boundary between log entries.
@@ -62,7 +60,8 @@ func implTrimEntries(
       entries.add(b)
   if entries.len <= maxEntries:
     return content
-  let kept = entries[entries.len - maxEntries .. ^1]
+  let kept =
+    entries[entries.len - maxEntries .. ^1]
   result = kept.join(LOG_ENTRY_SEPARATOR) & "\n"
 
 # ---------------------------------------------------------------------------
@@ -79,7 +78,6 @@ func implTrimEntries(
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — writes to filesystem.
 ##     discard
 proc logExecution*(
   query: string,
@@ -122,7 +120,6 @@ proc logExecution*(
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — modifies filesystem.
 ##     discard
 proc cleanLog*(): int =
   let path = getLogFilePath()
@@ -135,15 +132,14 @@ proc cleanLog*(): int =
   except CatchableError:
     result = 0
 
-## Prints a summary of the log state using the active output style.
+## Prints a summary of the log state.
 ##
 ## :param logEnabled: Whether logging is enabled.
-## :param maxEntries: Configured max log entries (0 = unlimited).
+## :param maxEntries: Configured max log entries.
 ## :param sk: The active output style.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     # Illustrative — produces console output.
 ##     discard
 proc displayLogInfo*(
   logEnabled: bool,

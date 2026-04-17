@@ -6,11 +6,9 @@
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
-## This file exercises the pure-function helpers and infrastructure
-## operations exposed by utils, config, cache, sysinfo, exec,
-## prompt, logger, and llm.  The LLM connectivity suite is skipped
-## unless the environment variables GET_TEST_KEY, GET_TEST_URL, and
-## GET_TEST_MODEL are set.
+## This file exercises the pure-function helpers and
+## infrastructure operations exposed by utils, config, cache,
+## sysinfo, exec, prompt, logger, and llm.
 
 {.experimental: "strictFuncs".}
 
@@ -32,8 +30,8 @@ import sysinfo
 # ---------------------------------------------------------------------------
 
 suite "utils":
-  ## Tests for maskString, extractCodeBlock, defaultShell, and the
-  ## global application-identity constants.
+  ## Tests for maskString, extractCodeBlock, defaultShell,
+  ## command pattern validation, and application constants.
 
   test "maskString replaces characters with asterisks":
     check maskString("hello") == "*****"
@@ -82,10 +80,8 @@ suite "utils":
     check res.get == "first"
 
   test "extractCodeBlock handles multiline command":
-    let text = """```sh
-ls -la /etc && \
-  cat /etc/hostname
-```"""
+    let text = "```sh\nls -la /etc && \\\n" &
+      "  cat /etc/hostname\n```"
     let res = extractCodeBlock(text)
     check res.isSome
     check res.get.contains("ls -la")
@@ -103,21 +99,25 @@ ls -la /etc && \
     check DANGEROUS_COMMAND_NAMES.len > 0
 
   test "extractAgentAction with FINAL marker":
-    let text = "```sh\nls -la\n```\n<!-- FINAL -->"
+    let text =
+      "```sh\nls -la\n```\n<!-- FINAL -->"
     let r = extractAgentAction(text)
     check r.action == aaFinal
     check r.command.isSome
     check r.command.get == "ls -la"
 
   test "extractAgentAction with CONTINUE marker":
-    let text = "```sh\nfind . -type f\n```\n<!-- CONTINUE -->"
+    let text =
+      "```sh\nfind . -type f\n```\n" &
+      "<!-- CONTINUE -->"
     let r = extractAgentAction(text)
     check r.action == aaContinue
     check r.command.isSome
     check r.command.get == "find . -type f"
 
   test "extractAgentAction with INTERPRET marker":
-    let text = "```sh\ndf -h\n```\n<!-- INTERPRET -->"
+    let text =
+      "```sh\ndf -h\n```\n<!-- INTERPRET -->"
     let r = extractAgentAction(text)
     check r.action == aaInterpret
     check r.command.isSome
@@ -135,13 +135,61 @@ ls -la /etc && \
     check r.action == aaAnswer
     check r.command.isNone
 
+  test "validateCommandPattern allows safe command":
+    check validateCommandPattern(
+      "ls -la /etc", "\\brm\\b") == true
+
+  test "validateCommandPattern blocks forbidden":
+    check validateCommandPattern(
+      "rm -rf /", "\\brm\\b") == false
+
+  test "validateCommandPattern with default pattern":
+    check validateCommandPattern(
+      "rm -rf /",
+      DEFAULT_COMMAND_PATTERN) == false
+    check validateCommandPattern(
+      "ls -la",
+      DEFAULT_COMMAND_PATTERN) == true
+    check validateCommandPattern(
+      "kill -9 1234",
+      DEFAULT_COMMAND_PATTERN) == false
+    check validateCommandPattern(
+      "rg pattern .",
+      DEFAULT_COMMAND_PATTERN) == true
+
+  test "validateCommandPattern complex commands":
+    check validateCommandPattern(
+      "echo hello",
+      DEFAULT_COMMAND_PATTERN) == true
+    check validateCommandPattern(
+      "cat /etc/hostname",
+      DEFAULT_COMMAND_PATTERN) == true
+    check validateCommandPattern(
+      "shutdown -h now",
+      DEFAULT_COMMAND_PATTERN) == false
+
+  test "invalid regex raises GetError":
+    expect GetError:
+      discard validateCommandPattern(
+        "test", "[invalid")
+
+  test "checkPatternSafety reports uncovered":
+    let warn = checkPatternSafety("\\brm\\b")
+    check warn.len > 0
+    check warn.contains("warning")
+
+  test "checkPatternSafety with default pattern":
+    let warn = checkPatternSafety(
+      DEFAULT_COMMAND_PATTERN)
+    check warn.len == 0
+
 # ---------------------------------------------------------------------------
 # sysinfo tests
 # ---------------------------------------------------------------------------
 
 suite "sysinfo":
   ## Tests that system information collection produces sensible
-  ## data and environment checks run without error.
+  ## data.
 
   test "collectSysInfo returns non-empty os and arch":
     let info = collectSysInfo(defaultShell())
@@ -157,17 +205,12 @@ suite "sysinfo":
 
   test "formatSysInfo with minimal SysInfo":
     let info = SysInfo(
-      os: "testOS",
-      arch: "testArch",
-      hostname: "",
-      username: "",
-      cwd: "/tmp",
-      shell: "sh",
+      os: "testOS", arch: "testArch",
+      hostname: "", username: "",
+      cwd: "/tmp", shell: "sh",
       shellVersion: "",
       availableTools: @[],
-      bundledTools: @[],
-      binDir: ""
-    )
+      bundledTools: @[], binDir: "")
     let formatted = formatSysInfo(info)
     check formatted.contains("testOS")
     check formatted.contains("testArch")
@@ -193,51 +236,7 @@ suite "sysinfo":
 # ---------------------------------------------------------------------------
 
 suite "exec":
-  ## Tests for forbidden-command-pattern validation and command
-  ## execution.
-
-  test "validateCommandPattern allows safe command":
-    check validateCommandPattern(
-      "ls -la /etc", "\\brm\\b") == true
-
-  test "validateCommandPattern blocks forbidden":
-    check validateCommandPattern(
-      "rm -rf /", "\\brm\\b") == false
-
-  test "validateCommandPattern with default pattern":
-    check validateCommandPattern(
-      "rm -rf /", DEFAULT_COMMAND_PATTERN) == false
-    check validateCommandPattern(
-      "ls -la", DEFAULT_COMMAND_PATTERN) == true
-    check validateCommandPattern(
-      "kill -9 1234", DEFAULT_COMMAND_PATTERN) == false
-    check validateCommandPattern(
-      "rg pattern .", DEFAULT_COMMAND_PATTERN) == true
-
-  test "validateCommandPattern complex commands":
-    check validateCommandPattern(
-      "echo hello", DEFAULT_COMMAND_PATTERN) == true
-    check validateCommandPattern(
-      "cat /etc/hostname",
-      DEFAULT_COMMAND_PATTERN) == true
-    check validateCommandPattern(
-      "shutdown -h now",
-      DEFAULT_COMMAND_PATTERN) == false
-
-  test "invalid regex raises GetError":
-    expect GetError:
-      discard validateCommandPattern(
-        "test", "[invalid")
-
-  test "checkPatternSafety reports uncovered":
-    let warn = checkPatternSafety("\\brm\\b")
-    check warn.len > 0
-    check warn.contains("warning")
-
-  test "checkPatternSafety with default pattern":
-    let warn = checkPatternSafety(
-      DEFAULT_COMMAND_PATTERN)
-    check warn.len == 0
+  ## Tests for command execution.
 
   test "executeCommand runs echo":
     let shell = defaultShell()
@@ -252,12 +251,7 @@ suite "exec":
 
   test "executeCommand captures non-zero exit":
     let shell = defaultShell()
-    when defined(windows):
-      let res = executeCommand(
-        "exit 42", shell)
-    else:
-      let res = executeCommand(
-        "exit 42", shell)
+    let res = executeCommand("exit 42", shell)
     check res.exitCode == 42
 
   test "executeCommand with empty binDir works":
@@ -283,12 +277,11 @@ suite "style":
     check toStyleKind(false) == skSimp
 
 # ---------------------------------------------------------------------------
-# config — pure helpers via public API
+# config defaults
 # ---------------------------------------------------------------------------
 
 suite "config defaults":
-  ## Verifies that defaultConfig returns correct compile-time
-  ## defaults.
+  ## Verifies that defaultConfig returns correct defaults.
 
   test "defaultConfig has expected values":
     let cfg = defaultConfig()
@@ -322,12 +315,11 @@ suite "config defaults":
       check cfg.shell == "bash"
 
 # ---------------------------------------------------------------------------
-# config — set / load round-trip
+# config persistence round-trip
 # ---------------------------------------------------------------------------
 
 suite "config persistence round-trip":
-  ## Verifies that saveConfig and loadConfig faithfully preserve
-  ## every field.
+  ## Verifies save and load faithfully preserve every field.
 
   test "save and load preserves values":
     let original = Config(
@@ -348,27 +340,30 @@ suite "config persistence round-trip":
       cacheMaxEntries: 500,
       logMaxEntries:   200,
       vivid:           false,
-      externalDisplay: false
-      maxRounds:       5,
-    )
+      externalDisplay: false,
+      maxRounds:       5)
     saveConfig(original)
     let loaded = loadConfig()
     check loaded.url == original.url
     check loaded.model == original.model
     check loaded.manualConfirm ==
       original.manualConfirm
-    check loaded.doubleCheck == original.doubleCheck
+    check loaded.doubleCheck ==
+      original.doubleCheck
     check loaded.instance == original.instance
     check loaded.timeout == original.timeout
     check loaded.maxToken == original.maxToken
     check loaded.commandPattern ==
       original.commandPattern
-    check loaded.systemPrompt == original.systemPrompt
+    check loaded.systemPrompt ==
+      original.systemPrompt
     check loaded.shell == original.shell
     check loaded.log == original.log
-    check loaded.hideProcess == original.hideProcess
+    check loaded.hideProcess ==
+      original.hideProcess
     check loaded.cache == original.cache
-    check loaded.cacheExpiry == original.cacheExpiry
+    check loaded.cacheExpiry ==
+      original.cacheExpiry
     check loaded.cacheMaxEntries ==
       original.cacheMaxEntries
     check loaded.logMaxEntries ==
@@ -390,7 +385,7 @@ suite "config persistence round-trip":
     saveConfig(defaultConfig())
 
 # ---------------------------------------------------------------------------
-# config — setConfigOption validation
+# setConfigOption
 # ---------------------------------------------------------------------------
 
 suite "setConfigOption":
@@ -423,7 +418,8 @@ suite "setConfigOption":
     check cfg.manualConfirm == false
     setConfigOption("manual-confirm", "")
     cfg = loadConfig()
-    check cfg.manualConfirm == DEFAULT_MANUAL_CONFIRM
+    check cfg.manualConfirm ==
+      DEFAULT_MANUAL_CONFIRM
 
   test "set integer option":
     setConfigOption("timeout", "120")
@@ -584,13 +580,10 @@ suite "cache":
   test "save and load cache round-trip cmResult":
     var store = CacheStore(entries: @[])
     let entry = CacheEntry(
-      hash: "abc123",
-      query: "test query",
-      command: "echo hello",
-      output: "hello",
+      hash: "abc123", query: "test query",
+      command: "echo hello", output: "hello",
       cacheMode: cmResult,
-      timestamp: getTime().toUnix()
-    )
+      timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     saveCache(store)
     let loaded = loadCache()
@@ -609,13 +602,10 @@ suite "cache":
   test "save and load cache round-trip cmCommand":
     var store = CacheStore(entries: @[])
     let entry = CacheEntry(
-      hash: "cmd456",
-      query: "cpu usage",
-      command: "top -bn1",
-      output: "",
+      hash: "cmd456", query: "cpu usage",
+      command: "top -bn1", output: "",
       cacheMode: cmCommand,
-      timestamp: getTime().toUnix()
-    )
+      timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     saveCache(store)
     let loaded = loadCache()
@@ -632,14 +622,10 @@ suite "cache":
   test "lookupCache returns entry when fresh":
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "fresh1",
-        query: "q",
-        command: "cmd",
-        output: "out",
+        hash: "fresh1", query: "q",
+        command: "cmd", output: "out",
         cacheMode: cmResult,
-        timestamp: getTime().toUnix()
-      )
-    ])
+        timestamp: getTime().toUnix())])
     let hit = lookupCache(store, "fresh1", 30)
     check hit.isSome
     check hit.get.output == "out"
@@ -649,14 +635,9 @@ suite "cache":
     let old = getTime().toUnix() - (31 * 86400)
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "old1",
-        query: "q",
-        command: "cmd",
-        output: "out",
-        cacheMode: cmResult,
-        timestamp: old
-      )
-    ])
+        hash: "old1", query: "q",
+        command: "cmd", output: "out",
+        cacheMode: cmResult, timestamp: old)])
     let hit = lookupCache(store, "old1", 30)
     check hit.isNone
 
@@ -668,22 +649,15 @@ suite "cache":
   test "addCacheEntry replaces existing hash":
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "dup",
-        query: "old",
-        command: "old-cmd",
-        output: "old-out",
+        hash: "dup", query: "old",
+        command: "old-cmd", output: "old-out",
         cacheMode: cmResult,
-        timestamp: getTime().toUnix() - 100
-      )
-    ])
+        timestamp: getTime().toUnix() - 100)])
     let entry = CacheEntry(
-      hash: "dup",
-      query: "new",
-      command: "new-cmd",
-      output: "new-out",
+      hash: "dup", query: "new",
+      command: "new-cmd", output: "new-out",
       cacheMode: cmCommand,
-      timestamp: getTime().toUnix()
-    )
+      timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     check store.entries.len == 1
     check store.entries[0].query == "new"
@@ -693,36 +667,26 @@ suite "cache":
     var store = CacheStore(entries: @[])
     for i in 0 ..< 5:
       let e = CacheEntry(
-        hash: fmt"h{i}",
-        query: fmt"q{i}",
-        command: "",
-        output: "",
+        hash: fmt"h{i}", query: fmt"q{i}",
+        command: "", output: "",
         cacheMode: cmResult,
         timestamp:
-          getTime().toUnix() - (5 - i).int64
-      )
+          getTime().toUnix() - (5 - i).int64)
       addCacheEntry(store, e, 3, 30)
     check store.entries.len <= 3
 
   test "unsetCacheEntries removes matching query":
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "a1",
-        query: "system version",
-        command: "uname -a",
-        output: "Linux",
+        hash: "a1", query: "system version",
+        command: "uname -a", output: "Linux",
         cacheMode: cmResult,
-        timestamp: getTime().toUnix()
-      ),
+        timestamp: getTime().toUnix()),
       CacheEntry(
-        hash: "b2",
-        query: "disk usage",
-        command: "df -h",
-        output: "50G",
+        hash: "b2", query: "disk usage",
+        command: "df -h", output: "50G",
         cacheMode: cmCommand,
-        timestamp: getTime().toUnix()
-      )
-    ])
+        timestamp: getTime().toUnix())])
     let removed = unsetCacheEntries(
       store, "system version")
     check removed == 1
@@ -732,14 +696,10 @@ suite "cache":
   test "unsetCacheEntries case-insensitive":
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "ci",
-        query: "System Version",
-        command: "",
-        output: "",
+        hash: "ci", query: "System Version",
+        command: "", output: "",
         cacheMode: cmResult,
-        timestamp: getTime().toUnix()
-      )
-    ])
+        timestamp: getTime().toUnix())])
     let removed = unsetCacheEntries(
       store, "system version")
     check removed == 1
@@ -748,23 +708,17 @@ suite "cache":
   test "cleanCache removes all entries":
     var store = CacheStore(entries: @[
       CacheEntry(
-        hash: "x",
-        query: "q",
-        command: "",
-        output: "",
+        hash: "x", query: "q",
+        command: "", output: "",
         cacheMode: cmResult,
-        timestamp: getTime().toUnix()
-      )
-    ])
+        timestamp: getTime().toUnix())])
     saveCache(store)
     let removed = cleanCache()
     check removed == 1
     let loaded = loadCache()
     check loaded.entries.len == 0
 
-  test "backward compat: missing cacheMode defaults to cmResult":
-    # Simulate an old-format cache entry by writing JSON
-    # directly without cacheMode.
+  test "backward compat: missing cacheMode":
     let path = getCacheFilePath()
     let content = """[
   {
@@ -805,7 +759,7 @@ suite "logger":
 # ---------------------------------------------------------------------------
 
 suite "prompt":
-  ## Tests that prompt builders produce well-formed message lists.
+  ## Tests that prompt builders produce well-formed messages.
 
   test "buildInstanceMessages produces system+user":
     let info = SysInfo(
@@ -854,8 +808,7 @@ suite "prompt":
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
       availableTools: @[],
-      bundledTools: @[],
-      binDir: "")
+      bundledTools: @[], binDir: "")
     let msgs = buildAgentInitMessages(
       info, "test query", "bash",
       none(string), none(string), 3)
@@ -874,11 +827,11 @@ suite "prompt":
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
       availableTools: @[],
-      bundledTools: @[],
-      binDir: "")
+      bundledTools: @[], binDir: "")
     let msgs = buildAgentInitMessages(
       info, "test", "bash",
-      some("Custom rule here"), none(string), 3)
+      some("Custom rule here"),
+      none(string), 3)
     check msgs[0].content.contains(
       "Custom rule here")
 
@@ -889,8 +842,7 @@ suite "prompt":
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
       availableTools: @[],
-      bundledTools: @[],
-      binDir: "")
+      bundledTools: @[], binDir: "")
     let msgs = buildAgentInitMessages(
       info, "test", "bash",
       none(string), some("\\brm\\b"), 3)
@@ -912,7 +864,7 @@ suite "prompt":
     check msgs[3].content.contains("Round 2/3")
     check msgs[3].content.contains("file1")
 
-  test "buildAgentContinueMessages final round urgency":
+  test "buildAgentContinueMessages final round":
     let history = @[
       LlmMessage(role: "system", content: "s"),
       LlmMessage(role: "user", content: "q")]
@@ -928,8 +880,7 @@ suite "prompt":
       cwd: "/tmp", shell: "bash",
       shellVersion: "",
       availableTools: @[],
-      bundledTools: @[],
-      binDir: "")
+      bundledTools: @[], binDir: "")
     let msgs = buildDoubleCheckMessages(
       "ls -la", "list files", info)
     check msgs.len == 2
@@ -958,14 +909,14 @@ suite "prompt":
       "query", "cmd", "out", 3)
     check msgs[0].content.contains("3")
     check msgs[0].content.contains("exploration")
-    
+
 # ---------------------------------------------------------------------------
 # llm connectivity (optional)
 # ---------------------------------------------------------------------------
 
 suite "llm connectivity":
-  ## Sends a minimal probe request.  Skipped when GET_TEST_KEY,
-  ## GET_TEST_URL, or GET_TEST_MODEL are absent.
+  ## Sends a minimal probe request.  Skipped when env vars are
+  ## absent.
 
   test "sendLlmRequest returns non-empty response":
     let apiKey   = getEnv("GET_TEST_KEY", "")
@@ -983,15 +934,10 @@ suite "llm connectivity":
             content: ISOK_SYSTEM_PROMPT),
           LlmMessage(
             role: "user",
-            content: ISOK_USER_PROMPT)
-        ],
-        maxTokens: ISOK_MAX_TOKENS
-      )
+            content: ISOK_USER_PROMPT)],
+        maxTokens: ISOK_MAX_TOKENS)
       let resp = sendLlmRequest(
-        req,
-        apiUrl,
-        apiKey,
-        timeoutSec  = 30,
-        hideProcess = true
-      )
+        req, apiUrl, apiKey,
+        timeoutSec = 30,
+        hideProcess = true)
       check resp.content.len > 0
