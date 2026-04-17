@@ -3,7 +3,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-14
+## :Date: 2026-04-17
 ## :File: utils.nim
 ## :License: AGPL-3.0
 ##
@@ -118,6 +118,16 @@ type
   LlmMessage* = object
     role*: string     ## "system", "user", or "assistant".
     content*: string  ## Message content text.
+
+## Describes the action the LLM chose in the agent loop protocol.
+## Used by the prompt parser and the main dispatcher to determine
+## the next step in the multi-round agent flow.
+type
+  AgentAction* = enum
+    aaContinue  ## Intermediate command — execute and return output.
+    aaFinal     ## Terminal command — execute and show output directly.
+    aaInterpret ## Terminal command — execute then summarise via LLM.
+    aaAnswer    ## Direct text answer, no command to execute.
 
 # ---------------------------------------------------------------------------
 # Public API — paths
@@ -296,6 +306,49 @@ func extractOutputMode*(text: string): string =
     return "INTERPRET"
   return "DIRECT"
 
+## Parses an LLM response from the agent loop and returns the
+## intended action together with the extracted command (if any).
+##
+## Parsing rules:
+##   1. If no fenced code block is found the action is aaAnswer.
+##   2. If a code block is found the response is scanned for an
+##      explicit marker:
+##        <!-- CONTINUE -->  → aaContinue
+##        <!-- INTERPRET --> → aaInterpret
+##        <!-- FINAL -->     → aaFinal
+##   3. When a code block is present but no marker is found the
+##      default action is aaFinal, reflecting get's preference
+##      for direct command output.
+##
+## :param text: The full LLM response text.
+## :returns: A tuple of the determined action and an optional
+##           command string extracted from the first code block.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     import std/options
+##     let r1 = extractAgentAction(
+##       "```sh\nls -la\n```\n<!-- FINAL -->")
+##     assert r1.action == aaFinal
+##     assert r1.command == some("ls -la")
+##     let r2 = extractAgentAction("Just text")
+##     assert r2.action == aaAnswer
+##     assert r2.command.isNone
+func extractAgentAction*(
+  text: string
+): tuple[action: AgentAction,
+         command: Option[string]] =
+  let cmd = extractCodeBlock(text)
+  if cmd.isNone:
+    return (action: aaAnswer, command: none(string))
+  let upper = toUpperAscii(text)
+  if upper.contains("<!-- CONTINUE -->"):
+    return (action: aaContinue, command: cmd)
+  elif upper.contains("<!-- INTERPRET -->"):
+    return (action: aaInterpret, command: cmd)
+  else:
+    return (action: aaFinal, command: cmd)
+  
 ## Formats an integer option value for display.  Returns "false"
 ## when the value is zero or negative (disabled), otherwise
 ## returns the integer as a string.

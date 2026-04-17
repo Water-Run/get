@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
@@ -101,6 +101,39 @@ ls -la /etc && \
 
   test "DANGEROUS_COMMAND_NAMES has entries":
     check DANGEROUS_COMMAND_NAMES.len > 0
+
+  test "extractAgentAction with FINAL marker":
+    let text = "```sh\nls -la\n```\n<!-- FINAL -->"
+    let r = extractAgentAction(text)
+    check r.action == aaFinal
+    check r.command.isSome
+    check r.command.get == "ls -la"
+
+  test "extractAgentAction with CONTINUE marker":
+    let text = "```sh\nfind . -type f\n```\n<!-- CONTINUE -->"
+    let r = extractAgentAction(text)
+    check r.action == aaContinue
+    check r.command.isSome
+    check r.command.get == "find . -type f"
+
+  test "extractAgentAction with INTERPRET marker":
+    let text = "```sh\ndf -h\n```\n<!-- INTERPRET -->"
+    let r = extractAgentAction(text)
+    check r.action == aaInterpret
+    check r.command.isSome
+
+  test "extractAgentAction defaults to aaFinal":
+    let text = "```sh\nuname -a\n```"
+    let r = extractAgentAction(text)
+    check r.action == aaFinal
+    check r.command.isSome
+    check r.command.get == "uname -a"
+
+  test "extractAgentAction plain text is aaAnswer":
+    let text = "Python is not installed."
+    let r = extractAgentAction(text)
+    check r.action == aaAnswer
+    check r.command.isNone
 
 # ---------------------------------------------------------------------------
 # sysinfo tests
@@ -279,6 +312,7 @@ suite "config defaults":
     check cfg.vivid == DEFAULT_VIVID
     check cfg.externalDisplay ==
       DEFAULT_EXTERNAL_DISPLAY
+    check cfg.maxRounds == DEFAULT_MAX_ROUNDS
 
   test "defaultConfig shell matches platform":
     let cfg = defaultConfig()
@@ -315,6 +349,7 @@ suite "config persistence round-trip":
       logMaxEntries:   200,
       vivid:           false,
       externalDisplay: false
+      maxRounds:       5,
     )
     saveConfig(original)
     let loaded = loadConfig()
@@ -341,6 +376,7 @@ suite "config persistence round-trip":
     check loaded.vivid == original.vivid
     check loaded.externalDisplay ==
       original.externalDisplay
+    check loaded.maxRounds == original.maxRounds
     saveConfig(defaultConfig())
 
   test "save and load with none options":
@@ -477,6 +513,18 @@ suite "setConfigOption":
     setConfigOption("external-display", "true")
     cfg = loadConfig()
     check cfg.externalDisplay == true
+    saveConfig(defaultConfig())
+
+  test "set max-rounds":
+    setConfigOption("max-rounds", "5")
+    var cfg = loadConfig()
+    check cfg.maxRounds == 5
+    setConfigOption("max-rounds", "false")
+    cfg = loadConfig()
+    check cfg.maxRounds == 0
+    setConfigOption("max-rounds", "")
+    cfg = loadConfig()
+    check cfg.maxRounds == DEFAULT_MAX_ROUNDS
     saveConfig(defaultConfig())
 
 # ---------------------------------------------------------------------------
@@ -759,7 +807,7 @@ suite "logger":
 suite "prompt":
   ## Tests that prompt builders produce well-formed message lists.
 
-  test "buildQueryMessages produces system+user":
+  test "buildInstanceMessages produces system+user":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "dev", username: "user",
@@ -770,16 +818,16 @@ suite "prompt":
         BundledTool(name: "rg",
           description: "fast grep")],
       binDir: "/opt/bin")
-    let msgs = buildQueryMessages(
-      info, "disk usage", "bash", true,
+    let msgs = buildInstanceMessages(
+      info, "disk usage", "bash",
       none(string), none(string))
     check msgs.len == 2
     check msgs[0].role == "system"
     check msgs[1].role == "user"
-    check msgs[0].content.contains("read-only")
+    check msgs[0].content.contains("READ-ONLY")
     check msgs[1].content.contains("disk usage")
 
-  test "buildQueryMessages includes bundled tools":
+  test "buildInstanceMessages includes bundled tools":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
@@ -792,14 +840,14 @@ suite "prompt":
         BundledTool(name: "fd",
           description: "fast find")],
       binDir: "/opt/bin")
-    let msgs = buildQueryMessages(
-      info, "test", "bash", false,
+    let msgs = buildInstanceMessages(
+      info, "test", "bash",
       none(string), none(string))
     check msgs[0].content.contains("BUNDLED TOOLS")
     check msgs[0].content.contains("rg")
     check msgs[0].content.contains("fd")
 
-  test "buildQueryMessages includes bat guidance":
+  test "buildAgentInitMessages produces system+user":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
@@ -808,13 +856,18 @@ suite "prompt":
       availableTools: @[],
       bundledTools: @[],
       binDir: "")
-    let msgs = buildQueryMessages(
-      info, "test", "bash", false,
-      none(string), none(string))
-    check msgs[0].content.contains("bat")
-    check msgs[0].content.contains("mdcat")
+    let msgs = buildAgentInitMessages(
+      info, "test query", "bash",
+      none(string), none(string), 3)
+    check msgs.len == 2
+    check msgs[0].role == "system"
+    check msgs[1].role == "user"
+    check msgs[0].content.contains("CONTINUE")
+    check msgs[0].content.contains("FINAL")
+    check msgs[0].content.contains("INTERPRET")
+    check msgs[0].content.contains("3")
 
-  test "buildQueryMessages includes custom prompt":
+  test "buildAgentInitMessages includes custom prompt":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
@@ -823,13 +876,13 @@ suite "prompt":
       availableTools: @[],
       bundledTools: @[],
       binDir: "")
-    let msgs = buildQueryMessages(
-      info, "test", "bash", false,
-      some("Custom rule here"), none(string))
+    let msgs = buildAgentInitMessages(
+      info, "test", "bash",
+      some("Custom rule here"), none(string), 3)
     check msgs[0].content.contains(
       "Custom rule here")
 
-  test "buildQueryMessages includes pattern note":
+  test "buildAgentInitMessages includes pattern note":
     let info = SysInfo(
       os: "linux", arch: "amd64",
       hostname: "", username: "",
@@ -838,12 +891,35 @@ suite "prompt":
       availableTools: @[],
       bundledTools: @[],
       binDir: "")
-    let msgs = buildQueryMessages(
-      info, "test", "bash", false,
-      none(string), some("\\brm\\b"))
+    let msgs = buildAgentInitMessages(
+      info, "test", "bash",
+      none(string), some("\\brm\\b"), 3)
     check msgs[0].content.contains("\\brm\\b")
-    check msgs[0].content.contains(
-      "MUST NOT match")
+
+  test "buildAgentContinueMessages extends history":
+    let history = @[
+      LlmMessage(role: "system",
+        content: "system prompt"),
+      LlmMessage(role: "user",
+        content: "user query")]
+    let msgs = buildAgentContinueMessages(
+      history,
+      "```sh\nls\n```\n<!-- CONTINUE -->",
+      "ls", "file1\nfile2", 0, 2, 3)
+    check msgs.len == 4
+    check msgs[2].role == "assistant"
+    check msgs[3].role == "user"
+    check msgs[3].content.contains("Round 2/3")
+    check msgs[3].content.contains("file1")
+
+  test "buildAgentContinueMessages final round urgency":
+    let history = @[
+      LlmMessage(role: "system", content: "s"),
+      LlmMessage(role: "user", content: "q")]
+    let msgs = buildAgentContinueMessages(
+      history, "resp", "cmd", "out", 0, 3, 3)
+    check msgs[3].content.contains("FINAL round")
+    check msgs[3].content.contains("MUST")
 
   test "buildDoubleCheckMessages produces 2 msgs":
     let info = SysInfo(
@@ -869,14 +945,20 @@ suite "prompt":
     check msgs[0].content.contains("df -h")
     check msgs[0].content.contains("50G")
 
-  test "buildCacheCheckMessages mentions COMMAND":
+  test "buildCacheCheckMessages mentions all modes":
     let msgs = buildCacheCheckMessages(
-      "cpu usage", "top -bn1", "50%")
+      "cpu usage", "top -bn1", "50%", 1)
     check msgs.len == 2
     check msgs[0].content.contains("RESULT")
     check msgs[0].content.contains("COMMAND")
     check msgs[0].content.contains("NOCACHE")
 
+  test "buildCacheCheckMessages multi-round note":
+    let msgs = buildCacheCheckMessages(
+      "query", "cmd", "out", 3)
+    check msgs[0].content.contains("3")
+    check msgs[0].content.contains("exploration")
+    
 # ---------------------------------------------------------------------------
 # llm connectivity (optional)
 # ---------------------------------------------------------------------------

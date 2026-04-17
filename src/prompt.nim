@@ -2,20 +2,23 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
-## This module assembles the system prompt and user prompt sent to
-## the LLM for each command context: query generation, double-check
-## safety review, output interpretation, cache-worthiness check,
-## and isok connectivity verification.  Every builder returns a
-## seq[LlmMessage] that can be passed directly to the LLM client.
+## This module assembles system and user prompts for every LLM
+## interaction context: instance-mode single-call generation,
+## multi-round agent-loop orchestration, double-check safety
+## review, output interpretation, cache-worthiness evaluation,
+## and isok connectivity verification.
 ##
-## The cache-worthiness check now supports three outcomes: RESULT
-## (cache the output for immediate reuse), COMMAND (cache the
-## command for re-execution with fresh output), and NOCACHE (do
-## not cache anything).
+## The agent loop protocol defines four possible LLM actions:
+##   CONTINUE  — intermediate command; execute and feed back.
+##   FINAL     — terminal command; execute and show directly.
+##   INTERPRET — terminal command; execute then summarise.
+##   (no code block) — direct text answer from the LLM.
+## The default when no marker is present is FINAL, reflecting
+## get's preference for direct command output over interpretation.
 
 {.experimental: "strictFuncs".}
 
@@ -46,22 +49,142 @@ const ISOK_MAX_TOKENS* = 32
 const CACHE_CHECK_MAX_TOKENS* = 32
 
 # ---------------------------------------------------------------------------
-# Public API — query prompt
+# Private helpers — shared context block
 # ---------------------------------------------------------------------------
 
-## Builds the message list for the initial command-generation
-## request.  The system message contains strict read-only
-## constraints, system information, bundled tool documentation,
-## the configured shell, an optional custom system prompt, and
-## an optional command-pattern note.
+## Builds the shared context block included in both instance and
+## agent system prompts: read-only constraints, format rules,
+## tool selection guidance, system information, bundled tools,
+## optional custom prompt, and optional command-pattern note.
+##
+## :param info: System information snapshot.
+## :param shell: The shell that will execute commands.
+## :param customPrompt: Optional user-supplied system prompt.
+## :param pattern: Optional forbidden-command regex note.
+## :returns: The multi-line context string.
+func implBuildBaseContext(
+  info: SysInfo,
+  shell: string,
+  customPrompt: Option[string],
+  pattern: Option[string]
+): string =
+  var lines: seq[string] = @[]
+  lines.add("STRICT READ-ONLY CONSTRAINTS " &
+    "(VIOLATION IS FORBIDDEN):")
+  lines.add(
+    "- This tool performs READ-ONLY operations " &
+    "ONLY. You MUST NEVER generate commands that " &
+    "modify, delete, create, write, move, rename," &
+    " or alter ANY data, files, directories, " &
+    "system settings, or external state.")
+  lines.add(
+    "- If the user's query CANNOT be answered " &
+    "with a purely read-only command, respond " &
+    "with a plain text explanation instead of a " &
+    "code block. NEVER generate a destructive " &
+    "command even if the user asks for it.")
+  lines.add(
+    "- Commands like rm, del, mv, cp, mkdir, " &
+    "touch, chmod, chown, tee, write, " &
+    "Set-Content, New-Item, Remove-Item, " &
+    "Move-Item, redirect (>), append (>>), " &
+    "and similar are STRICTLY FORBIDDEN.")
+  lines.add(
+    "- For bundled tools: NEVER use flags that " &
+    "write files or modify state " &
+    "(e.g. pmc -o/-c, tree -o/--output, " &
+    "treepp /O, fd -x with write commands).")
+  lines.add("")
+  lines.add("COMMAND FORMAT:")
+  lines.add(
+    "- Wrap every command in a ```sh fenced " &
+    "code block.")
+  lines.add(
+    "- Generate exactly ONE command per code " &
+    "block (you may use pipes or && to chain " &
+    "read-only sub-commands).")
+  lines.add(
+    fmt"- The command must work in {shell}. " &
+    "Ensure correct syntax for this shell.")
+  lines.add(
+    "- Prefer using bundled tools listed below " &
+    "when they fit the task; they are already " &
+    "available in PATH and guaranteed to work.")
+  lines.add(
+    "- Verify your command mentally before " &
+    "outputting — check flag names, argument " &
+    "order, and shell quoting.")
+  lines.add("")
+  lines.add("TOOL SELECTION GUIDANCE:")
+  lines.add(
+    "- For directory tree visualisation: use " &
+    "`tree` (Linux) or `treepp` (Windows).")
+  lines.add(
+    "- For searching file contents: use `rg` " &
+    "(ripgrep).")
+  lines.add(
+    "- For finding files by name: use `fd`.")
+  lines.add(
+    "- For packaging code context: use `pmc`.")
+  lines.add(
+    "- For code statistics (lines of code): " &
+    "use `tokei`.")
+  lines.add(
+    "- For calculations or text processing: " &
+    "use `lua -e '<code>'`.")
+  lines.add(
+    "- For AST-level code search: use `sg` " &
+    "(ast-grep).")
+  lines.add(
+    "- For syntax-highlighted file viewing: " &
+    "use `bat` (e.g. bat --style=plain " &
+    "--paging=never <file>).")
+  lines.add(
+    "- For Markdown rendering in terminal: " &
+    "use `mdcat` (e.g. mdcat --no-pager " &
+    "<file>).")
+  lines.add(
+    "- If the user's request clearly requires " &
+    "a third-party library or tool that is not " &
+    "available, explain what is needed rather " &
+    "than generating a command that will fail.")
+  lines.add("")
+  lines.add("SYSTEM INFORMATION:")
+  lines.add(formatSysInfo(info))
+  let bundledBlock = formatBundledTools(
+    info.bundledTools)
+  if bundledBlock.len > 0:
+    lines.add("")
+    lines.add(bundledBlock)
+  if customPrompt.isSome:
+    lines.add("")
+    lines.add("ADDITIONAL INSTRUCTIONS:")
+    lines.add(customPrompt.get)
+  if pattern.isSome:
+    lines.add("")
+    lines.add(
+      "NOTE: The generated command MUST NOT match" &
+      " the following forbidden-command regex " &
+      "pattern: " & pattern.get &
+      ". If your command would match this " &
+      "pattern, respond with a plain text " &
+      "explanation instead.")
+  result = lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Public API — instance mode prompt
+# ---------------------------------------------------------------------------
+
+## Builds the message list for instance mode (single-call).
+## The LLM is instructed to return exactly one command whose
+## output will be shown directly to the user, or a plain text
+## answer when no command can satisfy the query.
 ##
 ## :param info: System information snapshot.
 ## :param query: The user's natural-language query.
 ## :param shell: The shell that will execute the command.
-## :param instance: When true the model is asked to produce clean
-##                  human-readable output.
 ## :param customPrompt: Optional user-supplied system prompt.
-## :param pattern: Optional command-pattern regex note.
+## :param pattern: Optional forbidden-command regex note.
 ## :returns: A two-element seq (system, user) of LlmMessage.
 ##
 ## .. code-block:: nim
@@ -72,14 +195,13 @@ const CACHE_CHECK_MAX_TOKENS* = 32
 ##       shell: "bash", shellVersion: "",
 ##       availableTools: @[],
 ##       bundledTools: @[], binDir: "")
-##     let msgs = buildQueryMessages(info, "test",
-##       "bash", false, none(string), none(string))
+##     let msgs = buildInstanceMessages(info,
+##       "test", "bash", none(string), none(string))
 ##     assert msgs.len == 2
-func buildQueryMessages*(
+func buildInstanceMessages*(
   info: SysInfo,
   query: string,
   shell: string,
-  instance: bool,
   customPrompt: Option[string],
   pattern: Option[string]
 ): seq[LlmMessage] =
@@ -88,140 +210,214 @@ func buildQueryMessages*(
     "You are a command-line assistant. Your task" &
     " is to generate a single shell command that" &
     " retrieves the information the user " &
-    "requested. Focus on directly executing " &
-    "tools and commands to obtain the answer " &
-    "rather than relying on further processing.")
+    "requested. The command output will be shown" &
+    " directly to the user — make it clean and" &
+    " human-readable.")
   sysLines.add("")
-  sysLines.add("STRICT READ-ONLY CONSTRAINTS " &
-    "(VIOLATION IS FORBIDDEN):")
-  sysLines.add(
-    "- This tool performs READ-ONLY operations " &
-    "ONLY. You MUST NEVER generate commands that " &
-    "modify, delete, create, write, move, rename," &
-    " or alter ANY data, files, directories, " &
-    "system settings, or external state.")
-  sysLines.add(
-    "- If the user's query CANNOT be answered " &
-    "with a purely read-only command, respond " &
-    "with a plain text explanation instead of a " &
-    "code block. NEVER generate a destructive " &
-    "command even if the user asks for it.")
-  sysLines.add(
-    "- Commands like rm, del, mv, cp, mkdir, " &
-    "touch, chmod, chown, tee, write, " &
-    "Set-Content, New-Item, Remove-Item, " &
-    "Move-Item, redirect (>), append (>>), " &
-    "and similar are STRICTLY FORBIDDEN.")
-  sysLines.add(
-    "- For bundled tools: NEVER use flags that " &
-    "write files or modify state " &
-    "(e.g. pmc -o/-c, tree -o/--output, " &
-    "treepp /O, fd -x with write commands).")
-  sysLines.add("")
-  sysLines.add("FORMAT:")
-  sysLines.add(
-    "- Wrap your command in a ```sh fenced code" &
-    " block.")
-  sysLines.add(
-    "- Generate exactly ONE command (you may use" &
-    " pipes or && to chain read-only " &
-    "sub-commands).")
-  sysLines.add(
-    fmt"- The command must work in {shell}." &
-    " Ensure correct syntax for this shell.")
-  sysLines.add(
-    "- Prefer using bundled tools listed below" &
-    " when they fit the task; they are already" &
-    " available in PATH and guaranteed to work.")
-  sysLines.add(
-    "- Verify your command mentally before " &
-    "outputting — check flag names, argument " &
-    "order, and shell quoting.")
-  if instance:
-    sysLines.add(
-      "- The output will be shown directly to the" &
-      " user. Make it clean and human-readable.")
-  else:
-    sysLines.add(
-      "- After the code block, on a NEW line, " &
-      "add exactly ONE of these markers:")
-    sysLines.add(
-      "  <!-- DIRECT --> if the command output is " &
-      "self-explanatory and can be shown directly" &
-      " to the user (e.g. tree output, version " &
-      "info, file listings, code content, " &
-      "network info, system stats, IP addresses," &
-      " directory structures, tool output).")
-    sysLines.add(
-      "  <!-- INTERPRET --> if the command output " &
-      "needs interpretation or summarisation to " &
-      "answer the user's question (e.g. complex " &
-      "log analysis, multi-step reasoning about " &
-      "output, comparing multiple data sources).")
-    sysLines.add(
-      "  Default to <!-- DIRECT --> when " &
-      "uncertain. Most queries should use " &
-      "DIRECT.")
-  sysLines.add("")
-  sysLines.add("TOOL SELECTION GUIDANCE:")
-  sysLines.add(
-    "- For directory tree visualisation: use " &
-    "`tree` (Linux) or `treepp` (Windows).")
-  sysLines.add(
-    "- For searching file contents: use `rg` " &
-    "(ripgrep).")
-  sysLines.add(
-    "- For finding files by name: use `fd`.")
-  sysLines.add(
-    "- For packaging code context: use `pmc`.")
-  sysLines.add(
-    "- For code statistics (lines of code): " &
-    "use `tokei`.")
-  sysLines.add(
-    "- For calculations or text processing: " &
-    "use `lua -e '<code>'`.")
-  sysLines.add(
-    "- For AST-level code search: use `sg` " &
-    "(ast-grep).")
-  sysLines.add(
-    "- For syntax-highlighted file viewing: " &
-    "use `bat` (e.g. bat --style=plain " &
-    "--paging=never <file>).")
-  sysLines.add(
-    "- For Markdown rendering in terminal: " &
-    "use `mdcat` (e.g. mdcat --no-pager " &
-    "<file>).")
-  sysLines.add(
-    "- If the user's request clearly requires " &
-    "a third-party library or tool that is not " &
-    "available, explain what is needed rather " &
-    "than generating a command that will fail.")
-  sysLines.add("")
-  sysLines.add("SYSTEM INFORMATION:")
-  sysLines.add(formatSysInfo(info))
-  let bundledBlock = formatBundledTools(
-    info.bundledTools)
-  if bundledBlock.len > 0:
-    sysLines.add("")
-    sysLines.add(bundledBlock)
-  if customPrompt.isSome:
-    sysLines.add("")
-    sysLines.add("ADDITIONAL INSTRUCTIONS:")
-    sysLines.add(customPrompt.get)
-  if pattern.isSome:
-    sysLines.add("")
-    sysLines.add(
-      "NOTE: The generated command MUST NOT match" &
-      " the following forbidden-command regex " &
-      "pattern: " & pattern.get &
-      ". If your command would match this " &
-      "pattern, respond with a plain text " &
-      "explanation instead.")
+  sysLines.add(implBuildBaseContext(
+    info, shell, customPrompt, pattern))
   let sysContent = sysLines.join("\n")
   result = @[
     LlmMessage(role: "system", content: sysContent),
     LlmMessage(role: "user", content: query)
   ]
+
+# ---------------------------------------------------------------------------
+# Public API — agent loop prompts
+# ---------------------------------------------------------------------------
+
+## Builds the initial message list for the agent loop (non-
+## instance mode, round 1).  The system prompt explains the
+## multi-round protocol with CONTINUE / FINAL / INTERPRET
+## markers and includes the full round budget.
+##
+## :param info: System information snapshot.
+## :param query: The user's natural-language query.
+## :param shell: The shell that will execute commands.
+## :param customPrompt: Optional user-supplied system prompt.
+## :param pattern: Optional forbidden-command regex note.
+## :param maxRounds: Maximum rounds budget (0 = unlimited).
+## :returns: A two-element seq (system, user) of LlmMessage.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     import std/options
+##     let info = SysInfo(os: "linux", arch: "amd64",
+##       hostname: "", username: "", cwd: "/tmp",
+##       shell: "bash", shellVersion: "",
+##       availableTools: @[],
+##       bundledTools: @[], binDir: "")
+##     let msgs = buildAgentInitMessages(info,
+##       "test", "bash", none(string), none(string), 3)
+##     assert msgs.len == 2
+func buildAgentInitMessages*(
+  info: SysInfo,
+  query: string,
+  shell: string,
+  customPrompt: Option[string],
+  pattern: Option[string],
+  maxRounds: int
+): seq[LlmMessage] =
+  var sysLines: seq[string] = @[]
+  sysLines.add(
+    "You are a command-line assistant operating " &
+    "in an agent loop. You can execute shell " &
+    "commands step by step to gather information " &
+    "before producing a final answer.")
+  sysLines.add("")
+  sysLines.add(implBuildBaseContext(
+    info, shell, customPrompt, pattern))
+  sysLines.add("")
+  sysLines.add("RESPONSE PROTOCOL:")
+  sysLines.add(
+    "Each response must follow one of these " &
+    "formats:")
+  sysLines.add("")
+  sysLines.add(
+    "1. INTERMEDIATE STEP — execute a command " &
+    "and continue:")
+  sysLines.add(
+    "   Wrap a single command in a ```sh code " &
+    "block, then add <!-- CONTINUE --> on a " &
+    "new line after the closing fence.")
+  sysLines.add(
+    "   The command will be executed and its " &
+    "output returned to you for the next round.")
+  sysLines.add("")
+  sysLines.add(
+    "2. FINAL COMMAND (direct output) — execute" &
+    " and show to user:")
+  sysLines.add(
+    "   Wrap a single command in a ```sh code " &
+    "block, then add <!-- FINAL --> on a new " &
+    "line (or omit the marker — FINAL is the " &
+    "default).")
+  sysLines.add(
+    "   The output is shown directly to the " &
+    "user. This terminates the loop.")
+  sysLines.add("")
+  sysLines.add(
+    "3. FINAL COMMAND (interpreted output) — " &
+    "execute and summarise:")
+  sysLines.add(
+    "   Wrap a single command in a ```sh code " &
+    "block, then add <!-- INTERPRET --> on a " &
+    "new line.")
+  sysLines.add(
+    "   The output is sent back for you to " &
+    "summarise. Use ONLY when raw output " &
+    "genuinely needs explanation. Prefer " &
+    "<!-- FINAL -->.")
+  sysLines.add("")
+  sysLines.add(
+    "4. DIRECT TEXT ANSWER — no command needed:")
+  sysLines.add(
+    "   Respond with plain text (no code " &
+    "block). This terminates the loop.")
+  sysLines.add(
+    "   Use only when no shell command can " &
+    "answer the query.")
+  sysLines.add("")
+  sysLines.add("BEHAVIOUR PREFERENCES:")
+  sysLines.add(
+    "- Prefer FAST, DIRECT responses. Most " &
+    "queries should be answerable in a single " &
+    "<!-- FINAL --> command.")
+  sysLines.add(
+    "- Use <!-- CONTINUE --> only when you " &
+    "genuinely need preliminary information " &
+    "that cannot be obtained in one command.")
+  sysLines.add(
+    "- Use <!-- INTERPRET --> only when the " &
+    "raw output is genuinely unclear to a " &
+    "human reader.")
+  sysLines.add(
+    "- NEVER loop unnecessarily. Converge to " &
+    "a final answer as quickly as possible.")
+  if maxRounds > 0:
+    sysLines.add("")
+    sysLines.add(
+      fmt"ROUND BUDGET: You have a maximum of " &
+      fmt"{maxRounds} round(s). Plan accordingly.")
+  let sysContent = sysLines.join("\n")
+  result = @[
+    LlmMessage(role: "system", content: sysContent),
+    LlmMessage(role: "user", content: query)
+  ]
+
+## Extends the conversation history with the assistant's previous
+## response and the execution result for the next agent round.
+## Includes urgency text that increases with each round.
+##
+## :param history: Existing conversation messages.
+## :param assistantResponse: The LLM's raw response text.
+## :param command: The command that was actually executed (may
+##                 differ from the LLM's suggestion after
+##                 double-check revision).
+## :param output: The captured command output.
+## :param exitCode: The command's exit code.
+## :param nextRound: The upcoming round number (1-based).
+## :param maxRounds: Maximum rounds budget (0 = unlimited).
+## :returns: The extended message list for the next LLM call.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     let history = @[
+##       LlmMessage(role: "system", content: "sys"),
+##       LlmMessage(role: "user", content: "q")]
+##     let msgs = buildAgentContinueMessages(
+##       history, "```sh\nls\n```\n<!-- CONTINUE -->",
+##       "ls", "file1\nfile2", 0, 2, 3)
+##     assert msgs.len == 4
+func buildAgentContinueMessages*(
+  history: seq[LlmMessage],
+  assistantResponse: string,
+  command: string,
+  output: string,
+  exitCode: int,
+  nextRound: int,
+  maxRounds: int
+): seq[LlmMessage] =
+  var msgs = history
+  msgs.add(LlmMessage(
+    role: "assistant",
+    content: assistantResponse))
+  var userLines: seq[string] = @[]
+  if maxRounds > 0:
+    userLines.add(
+      fmt"[Round {nextRound}/{maxRounds}]")
+  else:
+    userLines.add(fmt"[Round {nextRound}]")
+  userLines.add(
+    fmt"Executed command: {command}")
+  userLines.add(fmt"Exit code: {exitCode}")
+  let trimmed = output.strip()
+  if trimmed.len > 0:
+    userLines.add("Output:")
+    userLines.add(trimmed)
+  else:
+    userLines.add("Output: (empty)")
+  userLines.add("")
+  if maxRounds > 0 and nextRound >= maxRounds:
+    userLines.add(
+      "This is the FINAL round. You MUST " &
+      "provide a final answer now. Use " &
+      "<!-- FINAL --> with a command, " &
+      "<!-- INTERPRET --> with a command, or " &
+      "a plain text answer. Do NOT use " &
+      "<!-- CONTINUE -->.")
+  elif maxRounds > 0 and
+      nextRound >= maxRounds - 1:
+    userLines.add(
+      "Please converge to a final answer. " &
+      "The next round is the last.")
+  else:
+    userLines.add(
+      "Continue working toward a final answer.")
+  msgs.add(LlmMessage(
+    role: "user",
+    content: userLines.join("\n")))
+  result = msgs
 
 # ---------------------------------------------------------------------------
 # Public API — double-check prompt
@@ -346,25 +542,28 @@ func buildInterpretMessages*(
 ## model evaluates whether the query result is stable enough to
 ## cache and, if so, whether the output or just the command should
 ## be cached.  Three possible responses:
-##   RESULT  — output is stable, cache it for direct reuse.
-##   COMMAND — command is reusable but output is volatile, cache
+##   RESULT  — output is stable, cache for direct reuse.
+##   COMMAND — command is reusable but output volatile, cache
 ##             the command for re-execution.
 ##   NOCACHE — do not cache anything.
 ##
 ## :param query: The original user query.
-## :param command: The command that was executed (may be empty).
+## :param command: The final command that was executed (may be
+##                 empty for direct text answers).
 ## :param outputPreview: A truncated preview of the output.
+## :param rounds: Number of agent rounds used (1 for instance).
 ## :returns: A two-element seq (system, user) of LlmMessage.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     let msgs = buildCacheCheckMessages(
-##       "system version", "uname -a", "Linux 6.1")
+##       "system version", "uname -a", "Linux 6.1", 1)
 ##     assert msgs.len == 2
 func buildCacheCheckMessages*(
   query: string,
   command: string,
-  outputPreview: string
+  outputPreview: string,
+  rounds: int = 1
 ): seq[LlmMessage] =
   var sysLines: seq[string] = @[]
   sysLines.add(
@@ -402,6 +601,15 @@ func buildCacheCheckMessages*(
     "useful. Examples: queries about transient " &
     "errors, ambiguous requests that may require " &
     "different commands next time.")
+  if rounds > 1:
+    sysLines.add("")
+    sysLines.add(
+      fmt"NOTE: This result was obtained after " &
+      fmt"{rounds} exploration round(s). If the " &
+      "final command only makes sense after " &
+      "intermediate exploration that may yield " &
+      "different results next time, prefer " &
+      "NOCACHE.")
   let sysContent = sysLines.join("\n")
   var userLines: seq[string] = @[]
   userLines.add(fmt"Query: {query}")

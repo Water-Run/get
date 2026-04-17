@@ -2,25 +2,26 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
 ## This module parses command-line arguments, routes execution to
 ## the appropriate subcommand handler, and manages top-level error
-## reporting.  The query flow supports instance (single-call) and
-## non-instance (multi-step) modes, optional double-check safety
-## review, manual-confirm gating, forbidden-command-pattern
-## validation, response caching with three-way LLM-driven
-## cache-worthiness decisions (RESULT / COMMAND / NOCACHE),
-## structured logging, model-strength warnings, progress display,
-## external-display rendering (bat/mdcat), and bundled tool
-## integration.
+## reporting.  The query flow supports two modes:
 ##
-## The output mode is controlled by a single ``vivid`` boolean
-## (default: true).  When vivid is enabled, output uses animated
-## spinners, ANSI colours, and optional external rendering.  When
-## disabled, plain unformatted text is produced.
+##   Instance — single LLM call, one command, direct output.
+##
+##   Agent    — multi-round loop where the LLM can execute
+##              intermediate commands to gather information before
+##              producing a final answer.  An urgency counter
+##              increases each round to encourage convergence, and
+##              a hard cap (max-rounds, default 3) prevents
+##              unbounded loops.
+##
+## Every command — whether intermediate or final — passes through
+## all safety layers before execution: forbidden-command pattern,
+## double-check LLM review, and optional manual confirmation.
 
 {.experimental: "strictFuncs".}
 
@@ -44,6 +45,10 @@ import utils
 ## check prompt to keep the token cost low.
 const CACHE_CHECK_PREVIEW_LEN = 200
 
+## Maximum characters of intermediate output shown to the user
+## during agent loop rounds (when hideProcess is false).
+const INTERMEDIATE_OUTPUT_PREVIEW_LEN = 500
+
 ## Comprehensive help text displayed by `get help`.
 const HELP_TEXT* = """get -- get anything from your computer
 
@@ -66,7 +71,7 @@ query flags (per-invocation overrides):
   --double-check               enable safety review
   --no-double-check            skip safety review
   --instance                   fast single-call mode
-  --no-instance                multi-step mode
+  --no-instance                multi-step agent mode
   --hide-process               suppress intermediate output
   --no-hide-process            show intermediate output
   --vivid                      enable vivid output mode
@@ -90,6 +95,8 @@ set options:
                        (integer or false, default: 300)
   max-token          max tokens per request
                        (integer or false, default: 20480)
+  max-rounds         max agent loop rounds (non-instance)
+                       (integer or false, default: 3)
   command-pattern    forbidden command regex
                        (string, default: built-in blocklist)
   system-prompt      custom system prompt
@@ -144,7 +151,7 @@ examples:
   get set key sk-your-api-key
   get set url https://api.openai.com/v1
   get set timeout false
-  get set vivid false
+  get set max-rounds 5
   get config --model
   get cache --clean
   get log --clean"""
@@ -297,6 +304,611 @@ proc implLoadStyle(
   )
 
 # ---------------------------------------------------------------------------
+# Private helpers — LLM call wrappers
+# ---------------------------------------------------------------------------
+
+## Sends an LLM request and returns the response.
+##
+## :param messages: Conversation messages to send.
+## :param cfg: The loaded configuration.
+## :param key: The API key.
+## :param sk: The active output style.
+## :returns: The LLM response.
+proc implLlmCall(
+  messages: seq[LlmMessage],
+  cfg: Config,
+  key: string,
+  sk: StyleKind = skSimp
+): LlmResponse =
+  let req = LlmRequest(
+    model: cfg.model,
+    messages: messages,
+    maxTokens: cfg.maxToken
+  )
+  result = sendLlmRequest(
+    req,
+    cfg.url,
+    key,
+    timeoutSec = cfg.timeout,
+    hideProcess = cfg.hideProcess,
+    sk = sk
+  )
+
+# ---------------------------------------------------------------------------
+# Private helpers — shell and pattern resolution
+# ---------------------------------------------------------------------------
+
+## Resolves the effective shell.
+##
+## :param cfg: The loaded configuration.
+## :returns: A non-empty shell name.
+func implEffectiveShell(cfg: Config): string =
+  if cfg.shell.len > 0: cfg.shell
+  else: defaultShell()
+
+## Resolves the effective forbidden-command pattern.
+##
+## :param cfg: The loaded configuration.
+## :param sk: The active output style (for warnings).
+## :returns: The pattern string to use.
+proc implEffectivePattern(
+  cfg: Config,
+  sk: StyleKind
+): string =
+  if cfg.commandPattern.isSome:
+    let pat = cfg.commandPattern.get
+    if pat.len == 0:
+      styleWarning(sk,
+        "warning: command-pattern is empty — " &
+        "no forbidden command filtering is active")
+      return ""
+    return pat
+  result = DEFAULT_COMMAND_PATTERN
+
+# ---------------------------------------------------------------------------
+# Private helpers — safety checks
+# ---------------------------------------------------------------------------
+
+## Performs the double-check safety review on a command.
+##
+## :param command: The command to review.
+## :param query: The original user query.
+## :param info: System information snapshot.
+## :param cfg: The loaded configuration.
+## :param key: The API key.
+## :param sk: The active output style.
+## :returns: The approved (possibly revised) command.
+proc implDoubleCheck(
+  command: string,
+  query: string,
+  info: SysInfo,
+  cfg: Config,
+  key: string,
+  sk: StyleKind
+): string =
+  if not cfg.hideProcess:
+    styleProgress(sk, "double-checking command...")
+  let msgs = buildDoubleCheckMessages(
+    command, query, info)
+  let resp = implLlmCall(msgs, cfg, key, sk)
+  let stripped = resp.content.strip()
+  if toUpperAscii(stripped) == "UNSAFE":
+    styleError(sk,
+      "error: command deemed unsafe by review")
+    quit(1)
+  let revised = extractCodeBlock(resp.content)
+  if revised.isSome:
+    result = revised.get
+  else:
+    result = command
+
+## Runs all safety layers on a command: forbidden-command pattern,
+## double-check review, and manual confirmation.  Returns the
+## (possibly revised) command.  Quits with a non-zero exit code
+## if any check rejects the command, or if the user declines
+## manual confirmation.
+##
+## :param command: The raw command from the LLM.
+## :param query: The original user query.
+## :param info: System information snapshot.
+## :param cfg: The loaded configuration.
+## :param key: The API key.
+## :param sk: The active output style.
+## :param effectivePattern: The active forbidden-command regex.
+## :returns: The approved command string.
+proc implSafetyCheck(
+  command: string,
+  query: string,
+  info: SysInfo,
+  cfg: Config,
+  key: string,
+  sk: StyleKind,
+  effectivePattern: string
+): string =
+  # Layer 1: Forbidden command pattern.
+  if effectivePattern.len > 0:
+    if not validateCommandPattern(
+        command, effectivePattern):
+      styleError(sk,
+        "error: command matches forbidden " &
+        "pattern — rejected")
+      if cfg.log:
+        logExecution(query, command,
+          "rejected by forbidden pattern", 1,
+          cfg.logMaxEntries)
+      quit(1)
+  # Layer 2: Double-check LLM review.
+  var checked = command
+  if cfg.doubleCheck:
+    checked = implDoubleCheck(
+      command, query, info, cfg, key, sk)
+    if checked != command and not cfg.hideProcess:
+      styleCommand(sk, "revised command", checked)
+  # Layer 3: Manual confirmation.
+  if cfg.manualConfirm:
+    let showCmd = cfg.hideProcess
+    if not confirmExecution(checked, sk, showCmd):
+      styleProgress(sk, "aborted.")
+      quit(0)
+  result = checked
+
+# ---------------------------------------------------------------------------
+# Private helpers — cache decision
+# ---------------------------------------------------------------------------
+
+## Asks the LLM whether a query result should be cached and how.
+##
+## :param query: The original user query.
+## :param command: The final command.
+## :param output: The full output.
+## :param cfg: The loaded configuration.
+## :param key: The API key.
+## :param rounds: Number of agent rounds used.
+## :returns: The cache decision.
+proc implCheckShouldCache(
+  query: string,
+  command: string,
+  output: string,
+  cfg: Config,
+  key: string,
+  rounds: int = 1
+): CacheDecision =
+  try:
+    let preview =
+      if output.len > CACHE_CHECK_PREVIEW_LEN:
+        output[0 ..< CACHE_CHECK_PREVIEW_LEN] &
+          "..."
+      else:
+        output
+    let msgs = buildCacheCheckMessages(
+      query, command, preview, rounds)
+    let req = LlmRequest(
+      model: cfg.model,
+      messages: msgs,
+      maxTokens: CACHE_CHECK_MAX_TOKENS
+    )
+    let resp = sendLlmRequest(
+      req,
+      cfg.url,
+      key,
+      timeoutSec = (
+        if cfg.timeout > 0: min(cfg.timeout, 30)
+        else: 30),
+      hideProcess = true
+    )
+    let answer = toUpperAscii(
+      resp.content.strip())
+    if answer.contains("NOCACHE"):
+      result = cdNoCache
+    elif answer.contains("COMMAND"):
+      result = cdCommand
+    else:
+      result = cdResult
+  except CatchableError:
+    result = cdResult
+
+# ---------------------------------------------------------------------------
+# Private helpers — model strength warning
+# ---------------------------------------------------------------------------
+
+## Emits a model-strength warning when the configured model is
+## not recognised as a known high-performance model.
+##
+## :param model: The configured model name.
+## :param sk: The active output style.
+proc implWarnIfWeakModel(
+  model: string,
+  sk: StyleKind
+) =
+  if model.len > 0 and
+      not isKnownStrongModel(model):
+    styleWarning(sk, MODEL_STRENGTH_WARNING)
+
+# ---------------------------------------------------------------------------
+# Private helpers — cache storage
+# ---------------------------------------------------------------------------
+
+## Persists a cache entry based on the cache decision.
+##
+## :param decision: The LLM's caching recommendation.
+## :param cacheHash: The context hash.
+## :param query: The user query.
+## :param command: The final command.
+## :param output: The final output.
+## :param cfg: The loaded configuration.
+## :param sk: The active output style.
+proc implStoreCache(
+  decision: CacheDecision,
+  cacheHash: string,
+  query: string,
+  command: string,
+  output: string,
+  cfg: Config,
+  sk: StyleKind
+) =
+  case decision
+  of cdResult:
+    var store = loadCache()
+    let entry = CacheEntry(
+      hash: cacheHash,
+      query: query,
+      command: command,
+      output: output,
+      cacheMode: cmResult,
+      timestamp: getTime().toUnix()
+    )
+    addCacheEntry(store, entry,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+  of cdCommand:
+    var store = loadCache()
+    let entry = CacheEntry(
+      hash: cacheHash,
+      query: query,
+      command: command,
+      output: "",
+      cacheMode: cmCommand,
+      timestamp: getTime().toUnix()
+    )
+    addCacheEntry(store, entry,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+  of cdNoCache:
+    if not cfg.hideProcess:
+      styleProgress(sk, "(result not cached)")
+
+# ---------------------------------------------------------------------------
+# Private helpers — instance flow
+# ---------------------------------------------------------------------------
+
+## Handles a query in instance mode: a single LLM call that
+## produces one command (or text answer), executed and displayed
+## directly.
+##
+## :param query: The user query.
+## :param cfg: The effective configuration.
+## :param key: The API key.
+## :param sk: The active output style.
+## :param binDir: Bundled bin directory.
+## :param extDisplay: External display enabled flag.
+## :param shell: The effective shell.
+## :param info: System information snapshot.
+## :param effectivePattern: Forbidden-command regex.
+## :param useCache: Whether caching is active.
+## :param cacheHash: The precomputed context hash.
+proc implInstanceFlow(
+  query: string,
+  cfg: Config,
+  key: string,
+  sk: StyleKind,
+  binDir: string,
+  extDisplay: bool,
+  shell: string,
+  info: SysInfo,
+  effectivePattern: string,
+  useCache: bool,
+  cacheHash: string
+) =
+  styleSeparator(sk, DIV_THIN)
+  let patternOpt =
+    if effectivePattern.len > 0:
+      some(effectivePattern)
+    else:
+      none(string)
+  let msgs = buildInstanceMessages(
+    info, query, shell,
+    cfg.systemPrompt, patternOpt)
+  let resp = implLlmCall(msgs, cfg, key, sk)
+
+  let cmd = extractCodeBlock(resp.content)
+  if cmd.isNone:
+    # Direct text answer.
+    styleSeparator(sk, DIV_SECTION)
+    styleResult(sk, resp.content, binDir,
+      extDisplay, false)
+    if useCache:
+      let decision = implCheckShouldCache(
+        query, "", resp.content, cfg, key, 1)
+      implStoreCache(decision, cacheHash, query,
+        "", resp.content, cfg, sk)
+    if cfg.log:
+      logExecution(query, "(none)",
+        resp.content, 0, cfg.logMaxEntries)
+    return
+
+  var command = cmd.get
+  if not cfg.hideProcess:
+    styleCommand(sk, "command", command)
+
+  # Safety checks.
+  command = implSafetyCheck(
+    command, query, info, cfg, key, sk,
+    effectivePattern)
+
+  # Execute.
+  if not cfg.hideProcess:
+    styleSeparator(sk, DIV_WARN)
+    styleProgress(sk, "executing...")
+  let execRes = executeCommand(
+    command, shell, info.binDir)
+
+  styleSeparator(sk, DIV_SECTION)
+  var finalOutput = execRes.output.strip()
+  if finalOutput.len > 0:
+    styleResult(sk, finalOutput, info.binDir,
+      extDisplay, false)
+  elif execRes.exitCode != 0:
+    finalOutput =
+      fmt"command exited with code " &
+      fmt"{execRes.exitCode}"
+    styleError(sk, finalOutput)
+
+  # Cache.
+  if useCache and
+      (finalOutput.len > 0 or command.len > 0):
+    let decision = implCheckShouldCache(
+      query, command, finalOutput, cfg, key, 1)
+    implStoreCache(decision, cacheHash, query,
+      command, finalOutput, cfg, sk)
+
+  # Log.
+  if cfg.log:
+    logExecution(query, command,
+      execRes.output, execRes.exitCode,
+      cfg.logMaxEntries)
+
+  # Exit code propagation.
+  if execRes.exitCode != 0:
+    quit(execRes.exitCode)
+
+# ---------------------------------------------------------------------------
+# Private helpers — agent loop flow
+# ---------------------------------------------------------------------------
+
+## Handles a query in agent (non-instance) mode: a multi-round
+## loop where the LLM can execute intermediate commands before
+## producing a final answer.
+##
+## :param query: The user query.
+## :param cfg: The effective configuration.
+## :param key: The API key.
+## :param sk: The active output style.
+## :param binDir: Bundled bin directory.
+## :param extDisplay: External display enabled flag.
+## :param shell: The effective shell.
+## :param info: System information snapshot.
+## :param effectivePattern: Forbidden-command regex.
+## :param useCache: Whether caching is active.
+## :param cacheHash: The precomputed context hash.
+proc implAgentFlow(
+  query: string,
+  cfg: Config,
+  key: string,
+  sk: StyleKind,
+  binDir: string,
+  extDisplay: bool,
+  shell: string,
+  info: SysInfo,
+  effectivePattern: string,
+  useCache: bool,
+  cacheHash: string
+) =
+  let maxRounds =
+    if cfg.maxRounds > 0: cfg.maxRounds
+    else: high(int)
+
+  let patternOpt =
+    if effectivePattern.len > 0:
+      some(effectivePattern)
+    else:
+      none(string)
+
+  var messages = buildAgentInitMessages(
+    info, query, shell, cfg.systemPrompt,
+    patternOpt, cfg.maxRounds)
+
+  var finalOutput = ""
+  var lastCommand = ""
+  var lastExitCode = 0
+  var roundsUsed = 0
+  var terminated = false
+
+  for round in 1 .. maxRounds:
+    roundsUsed = round
+    if not cfg.hideProcess:
+      styleSeparator(sk, DIV_THIN)
+      styleRound(sk, round, cfg.maxRounds)
+
+    let resp = implLlmCall(
+      messages, cfg, key, sk)
+    var parsed = extractAgentAction(resp.content)
+
+    # At max round, force CONTINUE → FINAL.
+    if parsed.action == aaContinue and
+        round >= maxRounds:
+      parsed = (action: aaFinal,
+                command: parsed.command)
+
+    case parsed.action
+    of aaContinue:
+      let rawCmd = parsed.command.get
+      if not cfg.hideProcess:
+        styleCommand(sk, "command", rawCmd)
+
+      let checkedCmd = implSafetyCheck(
+        rawCmd, query, info, cfg, key, sk,
+        effectivePattern)
+
+      if not cfg.hideProcess:
+        styleProgress(sk, "executing...")
+      let execRes = executeCommand(
+        checkedCmd, shell, info.binDir)
+
+      if not cfg.hideProcess:
+        let preview =
+          if execRes.output.len >
+              INTERMEDIATE_OUTPUT_PREVIEW_LEN:
+            execRes.output[
+              0 ..< INTERMEDIATE_OUTPUT_PREVIEW_LEN
+            ] & "..."
+          else:
+            execRes.output
+        if preview.strip().len > 0:
+          styleProgress(sk, preview.strip())
+
+      if cfg.log:
+        logExecution(
+          fmt"{query} (round {round})",
+          checkedCmd, execRes.output,
+          execRes.exitCode, cfg.logMaxEntries)
+
+      messages = buildAgentContinueMessages(
+        messages, resp.content, checkedCmd,
+        execRes.output, execRes.exitCode,
+        round + 1, cfg.maxRounds)
+      lastCommand = checkedCmd
+      lastExitCode = execRes.exitCode
+
+    of aaFinal:
+      let rawCmd = parsed.command.get
+      if not cfg.hideProcess:
+        styleCommand(sk, "command", rawCmd)
+
+      let checkedCmd = implSafetyCheck(
+        rawCmd, query, info, cfg, key, sk,
+        effectivePattern)
+
+      if not cfg.hideProcess:
+        styleSeparator(sk, DIV_WARN)
+        styleProgress(sk, "executing...")
+      let execRes = executeCommand(
+        checkedCmd, shell, info.binDir)
+
+      lastCommand = checkedCmd
+      lastExitCode = execRes.exitCode
+      finalOutput = execRes.output.strip()
+
+      styleSeparator(sk, DIV_SECTION)
+      if finalOutput.len > 0:
+        styleResult(sk, finalOutput, info.binDir,
+          extDisplay, false)
+      elif execRes.exitCode != 0:
+        finalOutput =
+          fmt"command exited with code " &
+          fmt"{execRes.exitCode}"
+        styleError(sk, finalOutput)
+
+      if cfg.log:
+        logExecution(query, checkedCmd,
+          execRes.output, execRes.exitCode,
+          cfg.logMaxEntries)
+
+      terminated = true
+      break
+
+    of aaInterpret:
+      let rawCmd = parsed.command.get
+      if not cfg.hideProcess:
+        styleCommand(sk, "command", rawCmd)
+
+      let checkedCmd = implSafetyCheck(
+        rawCmd, query, info, cfg, key, sk,
+        effectivePattern)
+
+      if not cfg.hideProcess:
+        styleSeparator(sk, DIV_WARN)
+        styleProgress(sk, "executing...")
+      let execRes = executeCommand(
+        checkedCmd, shell, info.binDir)
+
+      lastCommand = checkedCmd
+      lastExitCode = execRes.exitCode
+
+      if execRes.exitCode != 0 and
+          execRes.output.strip().len == 0:
+        finalOutput =
+          fmt"command exited with code " &
+          fmt"{execRes.exitCode}"
+        styleSeparator(sk, DIV_SECTION)
+        styleError(sk, finalOutput)
+      else:
+        if not cfg.hideProcess:
+          styleProgress(sk, "interpreting...")
+        let interpretMsgs = buildInterpretMessages(
+          query, checkedCmd, execRes.output)
+        let interpretResp = implLlmCall(
+          interpretMsgs, cfg, key, sk)
+        finalOutput = interpretResp.content
+        styleSeparator(sk, DIV_SECTION)
+        styleResult(sk, finalOutput, info.binDir,
+          extDisplay, true)
+
+      if cfg.log:
+        logExecution(query, checkedCmd,
+          execRes.output, execRes.exitCode,
+          cfg.logMaxEntries)
+
+      terminated = true
+      break
+
+    of aaAnswer:
+      finalOutput = resp.content.strip()
+      lastCommand = ""
+      lastExitCode = 0
+
+      styleSeparator(sk, DIV_SECTION)
+      styleResult(sk, finalOutput, info.binDir,
+        extDisplay, false)
+
+      if cfg.log:
+        logExecution(query, "(none)",
+          finalOutput, 0, cfg.logMaxEntries)
+
+      terminated = true
+      break
+
+  # Fallback when loop exhausts without termination
+  # (should not happen due to CONTINUE→FINAL forcing).
+  if not terminated:
+    if finalOutput.len == 0:
+      finalOutput = "(no result after " &
+        fmt"{roundsUsed} rounds)"
+      styleError(sk, finalOutput)
+
+  # Cache decision.
+  if useCache and
+      (finalOutput.len > 0 or lastCommand.len > 0):
+    let decision = implCheckShouldCache(
+      query, lastCommand, finalOutput, cfg, key,
+      roundsUsed)
+    implStoreCache(decision, cacheHash, query,
+      lastCommand, finalOutput, cfg, sk)
+
+  # Exit code propagation.
+  if lastExitCode != 0:
+    quit(lastExitCode)
+
+# ---------------------------------------------------------------------------
 # Private helpers — subcommand handlers
 # ---------------------------------------------------------------------------
 
@@ -354,6 +966,9 @@ proc implHandleConfig(args: seq[string]) =
     of "max-token":
       styleKeyValue(sk, "max-token",
         formatIntOrDisable(cfg.maxToken))
+    of "max-rounds":
+      styleKeyValue(sk, "max-rounds",
+        formatIntOrDisable(cfg.maxRounds))
     of "command-pattern":
       let pat =
         if cfg.commandPattern.isSome:
@@ -524,158 +1139,8 @@ proc implHandleIsOk() =
 # Private helpers — query flow
 # ---------------------------------------------------------------------------
 
-## Resolves the effective shell.
-##
-## :param cfg: The loaded configuration.
-## :returns: A non-empty shell name.
-func implEffectiveShell(cfg: Config): string =
-  if cfg.shell.len > 0: cfg.shell
-  else: defaultShell()
-
-## Resolves the effective forbidden-command pattern.
-##
-## :param cfg: The loaded configuration.
-## :param sk: The active output style (for warnings).
-## :returns: The pattern string to use.
-proc implEffectivePattern(
-  cfg: Config,
-  sk: StyleKind
-): string =
-  if cfg.commandPattern.isSome:
-    let pat = cfg.commandPattern.get
-    if pat.len == 0:
-      styleWarning(sk,
-        "warning: command-pattern is empty — " &
-        "no forbidden command filtering is active")
-      return ""
-    return pat
-  result = DEFAULT_COMMAND_PATTERN
-
-## Sends an LLM request and returns the response.
-##
-## :param messages: Conversation messages to send.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :returns: The LLM response.
-proc implLlmCall(
-  messages: seq[LlmMessage],
-  cfg: Config,
-  key: string,
-  sk: StyleKind = skSimp
-): LlmResponse =
-  let req = LlmRequest(
-    model: cfg.model,
-    messages: messages,
-    maxTokens: cfg.maxToken
-  )
-  result = sendLlmRequest(
-    req,
-    cfg.url,
-    key,
-    timeoutSec = cfg.timeout,
-    hideProcess = cfg.hideProcess,
-    sk = sk
-  )
-
-## Performs the double-check safety review on a command.
-##
-## :param command: The command to review.
-## :param query: The original user query.
-## :param info: System information snapshot.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :returns: The approved (possibly revised) command.
-proc implDoubleCheck(
-  command: string,
-  query: string,
-  info: SysInfo,
-  cfg: Config,
-  key: string,
-  sk: StyleKind
-): string =
-  if not cfg.hideProcess:
-    styleProgress(sk, "double-checking command...")
-  let msgs = buildDoubleCheckMessages(
-    command, query, info)
-  let resp = implLlmCall(msgs, cfg, key, sk)
-  let stripped = resp.content.strip()
-  if toUpperAscii(stripped) == "UNSAFE":
-    styleError(sk,
-      "error: command deemed unsafe by review")
-    quit(1)
-  let revised = extractCodeBlock(resp.content)
-  if revised.isSome:
-    result = revised.get
-  else:
-    result = command
-
-## Asks the LLM whether a query result should be cached and how.
-## Returns cdResult, cdCommand, or cdNoCache.  Defaults to
-## cdResult on transient errors (fail-open).
-##
-## :param query: The original user query.
-## :param command: The generated command.
-## :param output: The full command output.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :returns: The cache decision.
-proc implCheckShouldCache(
-  query: string,
-  command: string,
-  output: string,
-  cfg: Config,
-  key: string
-): CacheDecision =
-  try:
-    let preview =
-      if output.len > CACHE_CHECK_PREVIEW_LEN:
-        output[0 ..< CACHE_CHECK_PREVIEW_LEN] & "..."
-      else:
-        output
-    let msgs = buildCacheCheckMessages(
-      query, command, preview)
-    let req = LlmRequest(
-      model: cfg.model,
-      messages: msgs,
-      maxTokens: CACHE_CHECK_MAX_TOKENS
-    )
-    let resp = sendLlmRequest(
-      req,
-      cfg.url,
-      key,
-      timeoutSec = (
-        if cfg.timeout > 0: min(cfg.timeout, 30)
-        else: 30),
-      hideProcess = true
-    )
-    let answer = toUpperAscii(
-      resp.content.strip())
-    if answer.contains("NOCACHE"):
-      result = cdNoCache
-    elif answer.contains("COMMAND"):
-      result = cdCommand
-    else:
-      result = cdResult
-  except CatchableError:
-    # Fail-open: cache result on error.
-    result = cdResult
-
-## Emits a model-strength warning when the configured model is
-## not recognised as a known high-performance model.
-##
-## :param model: The configured model name.
-## :param sk: The active output style.
-proc implWarnIfWeakModel(
-  model: string,
-  sk: StyleKind
-) =
-  if model.len > 0 and
-      not isKnownStrongModel(model):
-    styleWarning(sk, MODEL_STRENGTH_WARNING)
-
-## Handles a natural-language query.
+## Handles a natural-language query by dispatching to instance or
+## agent flow based on configuration.
 ##
 ## :param query: The user's natural-language query.
 ## :param ov: Per-invocation override flags.
@@ -704,20 +1169,15 @@ proc implHandleQuery(
   let binDir = getBundledBinDir()
   let extDisplay = cfg.externalDisplay
 
-  # External display checks and warnings.
   styleExternalDisplayCheck(sk, extDisplay, binDir)
-
-  # Model-strength advisory.
   implWarnIfWeakModel(cfg.model, sk)
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
-
-  # Resolve effective forbidden pattern.
   let effectivePattern = implEffectivePattern(
     cfg, sk)
 
-  # ---- Cache lookup ----
+  # Cache lookup.
   let noCache = ov.noCache
   let useCache = cfg.cache and (not noCache)
   var cacheHash = ""
@@ -732,16 +1192,12 @@ proc implHandleQuery(
     if hit.isSome:
       case hit.get.cacheMode
       of cmResult:
-        # Direct output reuse — no API call, no
-        # execution.
         if not cfg.hideProcess:
           styleProgress(sk, "(cached result)")
         styleResult(sk, hit.get.output,
           binDir, extDisplay)
         return
       of cmCommand:
-        # Re-execute the cached command for fresh
-        # output.
         if not cfg.hideProcess:
           styleProgress(sk, "(cached command)")
           styleCommand(sk, "command",
@@ -764,174 +1220,21 @@ proc implHandleQuery(
           quit(execRes.exitCode)
         return
 
-  # 1. Collect system information.
+  # Collect system information.
   if not cfg.hideProcess:
-    styleProgress(sk, "collecting system info...")
+    styleProgress(sk,
+      "collecting system info...")
   let info = collectSysInfo(shell)
 
-  # 2. Build query prompt and call LLM.
-  styleSeparator(sk, DIV_THIN)
-  let patternOpt =
-    if effectivePattern.len > 0:
-      some(effectivePattern)
-    else:
-      none(string)
-  let queryMsgs = buildQueryMessages(
-    info, query, shell, cfg.instance,
-    cfg.systemPrompt, patternOpt)
-  let genResp = implLlmCall(
-    queryMsgs, cfg, key.get, sk)
-
-  # 3. Extract command and output-mode marker.
-  let maybeCmd = extractCodeBlock(genResp.content)
-  let outputMode = extractOutputMode(
-    genResp.content)
-
-  if maybeCmd.isNone:
-    # Direct text answer (no command generated).
-    let isMarkdown = outputMode == "INTERPRET"
-    styleResult(sk, genResp.content, binDir,
-      extDisplay, isMarkdown)
-    if useCache:
-      let decision = implCheckShouldCache(
-        query, "", genResp.content, cfg, key.get)
-      if decision == cdResult:
-        var store = loadCache()
-        let entry = CacheEntry(
-          hash: cacheHash,
-          query: query,
-          command: "",
-          output: genResp.content,
-          cacheMode: cmResult,
-          timestamp: getTime().toUnix()
-        )
-        addCacheEntry(store, entry,
-          cfg.cacheMaxEntries, cfg.cacheExpiry)
-        saveCache(store)
-    if cfg.log:
-      logExecution(query, "(none)",
-        genResp.content, 0, cfg.logMaxEntries)
-    return
-
-  var command = maybeCmd.get
-  if not cfg.hideProcess:
-    styleCommand(sk, "command", command)
-
-  # 4. Forbidden-command pattern check.
-  if effectivePattern.len > 0:
-    if not validateCommandPattern(
-        command, effectivePattern):
-      styleError(sk,
-        "error: command matches forbidden " &
-        "pattern — rejected")
-      if cfg.log:
-        logExecution(query, command,
-          "rejected by forbidden pattern", 1,
-          cfg.logMaxEntries)
-      quit(1)
-
-  # 5. Double-check (optional, default: enabled).
-  if cfg.doubleCheck:
-    let reviewedCommand = implDoubleCheck(
-      command, query, info, cfg, key.get, sk)
-    let commandChanged = reviewedCommand != command
-    command = reviewedCommand
-    if not cfg.hideProcess and commandChanged:
-      styleCommand(sk,
-        "approved command", command)
-
-  # 6. Manual confirmation (optional).
-  if cfg.manualConfirm:
-    let showCommandInPrompt = cfg.hideProcess
-    if not confirmExecution(
-        command, sk, showCommandInPrompt):
-      styleProgress(sk, "aborted.")
-      quit(0)
-
-  # 7. Execute the command with bundled bin dir.
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_WARN)
-    styleProgress(sk, "executing...")
-  let execRes = executeCommand(
-    command, shell, info.binDir)
-
-  # 8. Output handling (instance / DIRECT /
-  #    INTERPRET).
-  styleSeparator(sk, DIV_SECTION)
-  var finalOutput = ""
-  if cfg.instance or outputMode == "DIRECT":
-    finalOutput = execRes.output.strip()
-    if finalOutput.len > 0:
-      styleResult(sk, finalOutput, info.binDir,
-        extDisplay, false)
-    elif execRes.exitCode != 0:
-      finalOutput =
-        fmt"command exited with code " &
-        fmt"{execRes.exitCode}"
-      styleError(sk, finalOutput)
+  # Dispatch to instance or agent flow.
+  if cfg.instance:
+    implInstanceFlow(query, cfg, key.get, sk,
+      binDir, extDisplay, shell, info,
+      effectivePattern, useCache, cacheHash)
   else:
-    if execRes.exitCode != 0 and
-        execRes.output.strip().len == 0:
-      finalOutput =
-        fmt"command exited with code " &
-        fmt"{execRes.exitCode}"
-      styleError(sk, finalOutput)
-    else:
-      let interpretMsgs = buildInterpretMessages(
-        query, command, execRes.output)
-      let interpretResp = implLlmCall(
-        interpretMsgs, cfg, key.get, sk)
-      finalOutput = interpretResp.content
-      styleResult(sk, finalOutput, info.binDir,
-        extDisplay, true)
-
-  # 9. Cache decision (three-way: RESULT / COMMAND
-  #    / NOCACHE).
-  if useCache and
-      (finalOutput.len > 0 or command.len > 0):
-    let decision = implCheckShouldCache(
-      query, command, finalOutput, cfg, key.get)
-    case decision
-    of cdResult:
-      var store = loadCache()
-      let entry = CacheEntry(
-        hash: cacheHash,
-        query: query,
-        command: command,
-        output: finalOutput,
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix()
-      )
-      addCacheEntry(store, entry,
-        cfg.cacheMaxEntries, cfg.cacheExpiry)
-      saveCache(store)
-    of cdCommand:
-      var store = loadCache()
-      let entry = CacheEntry(
-        hash: cacheHash,
-        query: query,
-        command: command,
-        output: "",
-        cacheMode: cmCommand,
-        timestamp: getTime().toUnix()
-      )
-      addCacheEntry(store, entry,
-        cfg.cacheMaxEntries, cfg.cacheExpiry)
-      saveCache(store)
-    of cdNoCache:
-      if not cfg.hideProcess:
-        styleProgress(sk,
-          "(result not cached)")
-
-  # 10. Log.
-  if cfg.log:
-    logExecution(query, command,
-      execRes.output, execRes.exitCode,
-      cfg.logMaxEntries)
-
-  # 11. Propagate non-zero exit code.
-  if execRes.exitCode != 0:
-    quit(execRes.exitCode)
+    implAgentFlow(query, cfg, key.get, sk,
+      binDir, extDisplay, shell, info,
+      effectivePattern, useCache, cacheHash)
 
 # ---------------------------------------------------------------------------
 # Private helpers — top-level dispatcher

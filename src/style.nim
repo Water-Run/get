@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
@@ -468,6 +468,31 @@ proc styleCommand*(
     stderr.writeLine(
       ANSI_MAGENTA & "❯ " & ANSI_BOLD &
       command & ANSI_RESET)
+
+## Writes the agent loop round indicator to stderr with
+## style-appropriate formatting.
+##
+## :param kind: The active output style.
+## :param current: The current round number (1-based).
+## :param maxRounds: The configured maximum rounds (0 = unlimited).
+proc styleRound*(
+  kind: StyleKind,
+  current: int,
+  maxRounds: int
+) =
+  let text =
+    if maxRounds > 0:
+      fmt"round {current}/{maxRounds}"
+    else:
+      fmt"round {current}"
+  case kind
+  of skSimp:
+    stderr.writeLine(text)
+  of skVivid:
+    stderr.writeLine(
+      ANSI_DIM & "── " & ANSI_CYAN & ANSI_BOLD &
+      text & ANSI_RESET & ANSI_DIM &
+      " ──" & ANSI_RESET)
 
 ## Writes a section separator to stderr.  Simp emits a blank
 ## line; vivid emits nothing (visual structure comes from

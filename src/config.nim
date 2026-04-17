@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-16
+## :Date: 2026-04-17
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -83,6 +83,11 @@ const DEFAULT_VIVID* = true
 ## vivid mode.
 const DEFAULT_EXTERNAL_DISPLAY* = true
 
+## Default maximum number of agent loop rounds in non-instance
+## mode.  When set to 0 the loop may run indefinitely (not
+## recommended).
+const DEFAULT_MAX_ROUNDS* = 3
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -111,6 +116,7 @@ type
     logMaxEntries*: int              ## Max log entries. 0=unlimited.
     vivid*: bool                     ## Vivid output mode.
     externalDisplay*: bool           ## Use bat/mdcat for output rendering.
+    maxRounds*: int              ## Max agent loop rounds. 0=unlimited.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -299,7 +305,8 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheMaxEntries": cfg.cacheMaxEntries,
     "logMaxEntries":   cfg.logMaxEntries,
     "vivid":           cfg.vivid,
-    "externalDisplay": cfg.externalDisplay
+    "externalDisplay": cfg.externalDisplay,
+    "maxRounds":       cfg.maxRounds
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] = %cfg.commandPattern.get
@@ -350,7 +357,10 @@ proc implJsonToConfig(
       node{"vivid"}.getBool(defaults.vivid),
     externalDisplay:
       node{"externalDisplay"}.getBool(
-        defaults.externalDisplay)
+        defaults.externalDisplay),
+    maxRounds:
+      node{"maxRounds"}.getInt(
+        defaults.maxRounds)
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and cmdNode.kind == JString and
@@ -396,7 +406,8 @@ func defaultConfig*(): Config =
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
     vivid:           DEFAULT_VIVID,
-    externalDisplay: DEFAULT_EXTERNAL_DISPLAY
+    externalDisplay: DEFAULT_EXTERNAL_DISPLAY,
+    maxRounds:       DEFAULT_MAX_ROUNDS
   )
 
 # ---------------------------------------------------------------------------
@@ -538,6 +549,8 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     formatIntOrDisable(cfg.timeout))
   styleKeyValue(sk, "max-token",
     formatIntOrDisable(cfg.maxToken))
+  styleKeyValue(sk, "max-rounds",
+    formatIntOrDisable(cfg.maxRounds))
   styleKeyValue(sk, "command-pattern", cmdPat)
   styleKeyValue(sk, "system-prompt", sysPmt)
   styleKeyValue(sk, "shell", cfg.shell)
@@ -650,6 +663,9 @@ proc setConfigOption*(name: string, value: string) =
   of "external-display":
     cfg.externalDisplay = implParseBool(
       value, name, DEFAULT_EXTERNAL_DISPLAY)
+  of "max-rounds":
+    cfg.maxRounds = implParseIntOrDisable(
+      value, name, DEFAULT_MAX_ROUNDS)
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")
