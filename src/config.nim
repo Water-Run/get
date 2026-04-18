@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -435,7 +435,7 @@ proc loadKey*(): Option[string] =
     try:
       result = some(implDecryptDpapi(content))
     except GetError:
-      stderr.writeLine(
+      styleWarning(toStyleKind(DEFAULT_VIVID),
         "warning: cannot decrypt key file," &
         " treating as unset")
       result = none(string)
@@ -464,12 +464,12 @@ proc loadConfig*(): Config =
     let node = parseJson(content)
     result = implJsonToConfig(node, defaults)
   except JsonParsingError:
-    stderr.writeLine(
+    styleWarning(toStyleKind(defaults.vivid),
       "warning: config file is corrupted," &
       " using defaults")
     result = defaults
   except IOError:
-    stderr.writeLine(
+    styleWarning(toStyleKind(defaults.vivid),
       "warning: cannot read config file," &
       " using defaults")
     result = defaults
@@ -604,7 +604,8 @@ proc setConfigOption*(name: string, value: string) =
       cfg.commandPattern = some(value)
       let safetyWarn = checkPatternSafety(value)
       if safetyWarn.len > 0:
-        stderr.writeLine(safetyWarn)
+        styleWarning(toStyleKind(cfg.vivid),
+          safetyWarn)
     else:
       cfg.commandPattern = none(string)
   of "system-prompt":

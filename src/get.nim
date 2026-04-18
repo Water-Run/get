@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
@@ -1246,7 +1246,9 @@ proc implMain() =
 
   let envWarning = checkEnvironment()
   if envWarning.len > 0:
-    stderr.writeLine(envWarning)
+    let cfgForWarn = loadConfig()
+    styleWarning(
+      toStyleKind(cfgForWarn.vivid), envWarning)
 
   let args = commandLineParams()
   if args.len == 0:
@@ -1286,7 +1288,13 @@ proc implMain() =
 
 ## Ctrl+C handler that exits gracefully.
 proc implCtrlCHandler() {.noconv.} =
-  stderr.write("\ninterrupted.\n")
+  try:
+    let cfg = loadConfig()
+    let sk = toStyleKind(cfg.vivid)
+    stderr.write("\n")
+    styleProgress(sk, "interrupted.")
+  except CatchableError:
+    stderr.write("\ninterrupted.\n")
   quit(130)
 
 # ---------------------------------------------------------------------------
@@ -1298,8 +1306,18 @@ when isMainModule:
   try:
     implMain()
   except GetError as e:
-    stderr.writeLine(fmt"error: {e.msg}")
+    try:
+      let cfgForErr = loadConfig()
+      styleError(toStyleKind(cfgForErr.vivid),
+        fmt"error: {e.msg}")
+    except CatchableError:
+      stderr.writeLine(fmt"error: {e.msg}")
     quit(1)
   except CatchableError as e:
-    stderr.writeLine(fmt"error: {e.msg}")
+    try:
+      let cfgForErr = loadConfig()
+      styleError(toStyleKind(cfgForErr.vivid),
+        fmt"error: {e.msg}")
+    except CatchableError:
+      stderr.writeLine(fmt"error: {e.msg}")
     quit(1)
