@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
@@ -10,11 +10,22 @@
 ## chat-completions endpoint, parses the JSON response, and
 ## displays elapsed-time progress on stderr while the HTTP
 ## round-trip is in flight.
+##
+## The module auto-detects a system HTTP/HTTPS proxy (either
+## from environment variables or, on Windows, from the user's
+## Internet Settings registry keys) and applies it to the
+## underlying async HTTP client.  Low-level network failures
+## are classified and wrapped into a short, user-friendly
+## message so that operating-system specific or async traceback
+## noise is never shown to the user.
 
 {.experimental: "strictFuncs".}
 
-import std/[asyncdispatch, httpclient, json,
+import std/[asyncdispatch, httpclient, json, os,
             strformat, strutils]
+
+when defined(windows):
+  import std/osproc
 
 import style
 import utils
@@ -26,6 +37,12 @@ import utils
 ## Path appended to the configured base URL to reach the
 ## chat-completions endpoint.
 const CHAT_COMPLETIONS_PATH* = "/chat/completions"
+
+## Human-readable message shown when a low-level network
+## failure is detected.
+const NETWORK_ERROR_MESSAGE* =
+  "network error. check your device's network " &
+  "connection and proxy settings."
 
 # ---------------------------------------------------------------------------
 # Types
@@ -48,6 +65,135 @@ type
   LlmResponse* = object
     content*: string  ## Text from the first choice.
     tokensUsed*: int  ## Total tokens consumed.
+
+# ---------------------------------------------------------------------------
+# Private helpers — proxy detection
+# ---------------------------------------------------------------------------
+
+## Detects the system proxy configuration.
+##
+## Environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY in
+## both upper- and lower-case) take precedence.  On Windows the
+## function falls back to the user's Internet Settings registry
+## keys when no environment variable is present.  It also
+## handles the per-protocol "http=...;https=..." format that
+## Windows uses when different proxies are configured for each
+## scheme.
+##
+## :returns: The proxy URL (e.g. "http://127.0.0.1:7890"), or
+##           an empty string when no proxy is configured.
+proc implDetectSystemProxy(): string =
+  for name in ["HTTPS_PROXY", "https_proxy",
+               "HTTP_PROXY",  "http_proxy",
+               "ALL_PROXY",   "all_proxy"]:
+    let v = getEnv(name, "")
+    if v.len > 0:
+      return v
+
+  when defined(windows):
+    try:
+      let (enOut, enCode) = execCmdEx(
+        "reg query \"HKCU\\Software\\Microsoft\\" &
+        "Windows\\CurrentVersion\\Internet " &
+        "Settings\" /v ProxyEnable")
+      if enCode != 0 or not enOut.contains("0x1"):
+        return ""
+
+      let (srvOut, srvCode) = execCmdEx(
+        "reg query \"HKCU\\Software\\Microsoft\\" &
+        "Windows\\CurrentVersion\\Internet " &
+        "Settings\" /v ProxyServer")
+      if srvCode != 0:
+        return ""
+
+      var srv = ""
+      for line in srvOut.splitLines():
+        let idx = line.find("REG_SZ")
+        if idx >= 0 and
+            line.contains("ProxyServer"):
+          srv = line[idx + "REG_SZ".len .. ^1].
+            strip()
+          break
+      if srv.len == 0:
+        return ""
+
+      if srv.contains("="):
+        var httpsProxy = ""
+        var httpProxy  = ""
+        for part in srv.split(';'):
+          let kv = part.split('=', 1)
+          if kv.len == 2:
+            let key = toLowerAscii(kv[0].strip())
+            let val = kv[1].strip()
+            case key
+            of "https": httpsProxy = val
+            of "http":  httpProxy  = val
+            else: discard
+        if httpsProxy.len > 0:
+          srv = httpsProxy
+        elif httpProxy.len > 0:
+          srv = httpProxy
+        else:
+          return ""
+
+      if not srv.contains("://"):
+        srv = "http://" & srv
+      return srv
+    except CatchableError:
+      discard
+
+  result = ""
+
+# ---------------------------------------------------------------------------
+# Private helpers — error classification
+# ---------------------------------------------------------------------------
+
+## Cleans an exception message by removing Nim's async
+## traceback block and keeping only the first substantive line.
+##
+## :param raw: The raw exception message string.
+## :returns: A single-line trimmed message, or empty when the
+##           input contains no usable text.
+func implCleanErrorMessage(raw: string): string =
+  var msg = raw
+  let tbIdx = msg.find("Async traceback")
+  if tbIdx >= 0:
+    msg = msg[0 ..< tbIdx]
+  msg = msg.strip()
+  let lines = msg.splitLines()
+  if lines.len == 0:
+    return ""
+  result = lines[0].strip()
+
+## Classifies whether a cleaned error message describes a
+## network connectivity problem (English or Chinese-localised
+## Windows messages both covered).
+##
+## :param msg: The cleaned first-line error message.
+## :returns: true when the message indicates a network error.
+func implIsNetworkError(msg: string): bool =
+  if msg.len == 0:
+    return false
+  let lower = toLowerAscii(msg)
+  const englishKeywords = [
+    "timeout", "timed out", "connection",
+    "network", "unreachable", "resolve",
+    "could not connect", "dns", "semaphore",
+    "refused", "reset by peer", "socket",
+    "no route", "ssl", "tls", "certificate",
+    "handshake", "getaddrinfo", "eof",
+    "host is down", "no such host"]
+  for kw in englishKeywords:
+    if lower.contains(kw):
+      return true
+  const cnKeywords = [
+    "信号灯", "超时", "连接", "网络",
+    "拒绝", "无法访问", "主机", "中断",
+    "重置", "路由", "证书", "握手"]
+  for kw in cnKeywords:
+    if msg.contains(kw):
+      return true
+  result = false
 
 # ---------------------------------------------------------------------------
 # Private helpers — request construction
@@ -181,7 +327,8 @@ proc implAwaitWithProgress(
         stderr.writeLine("")
       raise newException(LlmApiError,
         fmt"request timed out after " &
-        fmt"{timeoutSec}s")
+        fmt"{timeoutSec}s. " &
+        NETWORK_ERROR_MESSAGE)
   if not hideProcess:
     if sk == skVivid:
       clearSpinner()
@@ -228,7 +375,9 @@ proc implParseResponse(body: string): LlmResponse =
 # ---------------------------------------------------------------------------
 
 ## Sends an LlmRequest to the configured endpoint and returns
-## the parsed LlmResponse.
+## the parsed LlmResponse.  Automatically applies any detected
+## system proxy and wraps low-level network failures into a
+## short, user-friendly message.
 ##
 ## :param req: The request payload.
 ## :param url: The API base URL.
@@ -237,7 +386,8 @@ proc implParseResponse(body: string): LlmResponse =
 ## :param hideProcess: Suppress progress when true.
 ## :param sk: The active output style.
 ## :returns: A populated LlmResponse on success.
-## :raises: LlmApiError: On timeout, HTTP error, or bad JSON.
+## :raises: LlmApiError: On timeout, HTTP error, network
+##                       failure, or malformed JSON.
 ## :raises: GetError: If apiKey or url is empty.
 ##
 ## .. code-block:: nim
@@ -260,8 +410,18 @@ proc sendLlmRequest*(
   let endpoint =
     implNormaliseUrl(url) & CHAT_COMPLETIONS_PATH
 
+  let proxyUrl = implDetectSystemProxy()
+  if proxyUrl.len > 0 and not hideProcess:
+    styleProgress(sk,
+      fmt"using system proxy: {proxyUrl}")
+
   proc impl(): Future[LlmResponse] {.async.} =
-    let client = newAsyncHttpClient()
+    let client =
+      if proxyUrl.len > 0:
+        newAsyncHttpClient(
+          proxy = newProxy(proxyUrl))
+      else:
+        newAsyncHttpClient()
     client.headers = newHttpHeaders({
       "Authorization": fmt"Bearer {apiKey}",
       "Content-Type": "application/json"})
@@ -282,5 +442,12 @@ proc sendLlmRequest*(
   except GetError:
     raise
   except CatchableError as e:
+    let clean = implCleanErrorMessage(e.msg)
+    if implIsNetworkError(clean):
+      raise newException(LlmApiError,
+        NETWORK_ERROR_MESSAGE)
+    if clean.len == 0:
+      raise newException(LlmApiError,
+        NETWORK_ERROR_MESSAGE)
     raise newException(LlmApiError,
-      fmt"request failed: {e.msg}")
+      fmt"request failed: {clean}")
