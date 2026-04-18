@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: exec.nim
 ## :License: AGPL-3.0
 ##
@@ -12,6 +12,13 @@
 ## Commands are run through the configured shell via startProcess
 ## with the bundled bin/ directory prepended to PATH so that
 ## shipped tools are available to generated commands.
+##
+## When the configured shell is PowerShell, a UTF-8 prelude is
+## injected before every user-supplied command so that native
+## programs (such as ``treepp`` or ``ipconfig``) whose output
+## flows through a pipe are not truncated or garbled by the
+## default Windows code page (for example GBK/CP936 on Chinese
+## installations).
 ##
 ## Forbidden-command-pattern validation lives in utils.nim so
 ## that the config module can reference it without a circular
@@ -24,6 +31,28 @@ import std/[envvars, os, osproc, strtabs, streams,
 
 import style
 import utils
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+## PowerShell prelude injected before every user-supplied command.
+## Sets only ``$OutputEncoding`` to UTF-8 so that Nim always reads
+## a well-formed UTF-8 byte stream from the stdout pipe.
+##
+## Two common-looking fixes are deliberately NOT applied:
+##
+## ``[Console]::OutputEncoding`` is left untouched.  Native Win32
+## tools emit OEM-encoded bytes (GBK, Shift-JIS, etc.); overriding
+## this property causes mis-decoding and pipe truncation — the root
+## cause of the "``ipconfig`` shows only its English header" symptom.
+##
+## ``chcp 65001`` is NOT executed.  It mutates the shared console
+## code page, which under PowerShell 7 disrupts child output
+## buffering and produces an empty pipe.
+const POWERSHELL_UTF8_PRELUDE =
+  "$OutputEncoding = " &
+  "[System.Text.UTF8Encoding]::new(); "
 
 # ---------------------------------------------------------------------------
 # Types
@@ -40,11 +69,15 @@ type
 # ---------------------------------------------------------------------------
 
 ## Builds the argument list for invoking a command through the
-## given shell.
+## given shell.  For PowerShell and pwsh shells, the UTF-8
+## prelude defined by POWERSHELL_UTF8_PRELUDE is prepended to
+## the command so that native program output captured through
+## a pipe is not truncated or garbled by the default Windows
+## code page.
 ##
 ## :param shell: Shell executable name or path.
 ## :param command: The command string to execute.
-## :returns: A seq of shell arguments.
+## :returns: A seq of shell arguments ready for startProcess.
 func implBuildShellArgs(
   shell: string,
   command: string
@@ -52,9 +85,12 @@ func implBuildShellArgs(
   let lower = toLowerAscii(shell)
   if lower.contains("powershell") or
       lower.contains("pwsh"):
+    # Prepend the UTF-8 prelude so Windows non-ASCII output
+    # survives the pipe transcoding layer.
+    let wrapped = POWERSHELL_UTF8_PRELUDE & command
     result = @[
       "-NoProfile", "-NonInteractive",
-      "-Command", command]
+      "-Command", wrapped]
   elif lower.contains("cmd"):
     result = @["/C", command]
   else:
@@ -109,6 +145,336 @@ proc implReadTerminalLine(): string =
   result = ""
 
 # ---------------------------------------------------------------------------
+# Private helpers — Windows output decoding
+# ---------------------------------------------------------------------------
+
+when defined(windows):
+  ## Windows ANSI (system default) code page identifier.
+  const CP_ACP = 0'u32
+
+  ## Windows OEM code page identifier (console default,
+  ## e.g. CP936 on Simplified Chinese installations).
+  const CP_OEMCP = 1'u32
+
+  ## UTF-8 code page identifier.
+  const CP_UTF8 = 65001'u32
+
+  ## Minimum byte count before the UTF-16LE heuristic is
+  ## allowed to accept a buffer.  Short buffers are ambiguous
+  ## (e.g. a 2-byte pure-ASCII reply looks like UTF-16LE with
+  ## a zero high byte), so we require a little more evidence.
+  const UTF16_HEURISTIC_MIN_LEN = 8
+
+  ## Ratio of zero high bytes required for UTF-16LE detection,
+  ## expressed as a percentage of sampled 16-bit code units.
+  const UTF16_HEURISTIC_MIN_RATIO = 40
+
+  ## Upper bound on the number of 16-bit units sampled when
+  ## running the UTF-16LE heuristic.
+  const UTF16_HEURISTIC_SAMPLE_CAP = 512
+
+  ## Converts a byte sequence in the given code page to a
+  ## UTF-16 buffer.
+  proc multiByteToWideChar(
+    codePage: uint32,
+    dwFlags: uint32,
+    lpMultiByteStr: cstring,
+    cbMultiByte: int32,
+    lpWideCharStr: ptr uint16,
+    cchWideChar: int32
+  ): int32 {.importc: "MultiByteToWideChar",
+    stdcall, dynlib: "kernel32".}
+
+  ## Converts a UTF-16 buffer to a byte sequence in the given
+  ## code page.
+  proc wideCharToMultiByte(
+    codePage: uint32,
+    dwFlags: uint32,
+    lpWideCharStr: ptr uint16,
+    cchWideChar: int32,
+    lpMultiByteStr: cstring,
+    cbMultiByte: int32,
+    lpDefaultChar: pointer,
+    lpUsedDefaultChar: pointer
+  ): int32 {.importc: "WideCharToMultiByte",
+    stdcall, dynlib: "kernel32".}
+
+when defined(windows):
+
+  ## Tests whether the data begins with a UTF-8 BOM
+  ## (``EF BB BF``).
+  ##
+  ## :param data: Raw byte string captured from a child
+  ##              process.
+  ## :returns: true when the first three bytes match the
+  ##           UTF-8 BOM signature.
+  func implHasUtf8Bom(data: string): bool =
+    result = data.len >= 3 and
+      byte(data[0]) == 0xEF'u8 and
+      byte(data[1]) == 0xBB'u8 and
+      byte(data[2]) == 0xBF'u8
+
+  ## Tests whether the data begins with a UTF-16LE BOM
+  ## (``FF FE``).
+  ##
+  ## :param data: Raw byte string captured from a child
+  ##              process.
+  ## :returns: true on UTF-16LE BOM match.
+  func implHasUtf16LeBom(data: string): bool =
+    result = data.len >= 2 and
+      byte(data[0]) == 0xFF'u8 and
+      byte(data[1]) == 0xFE'u8
+
+  ## Tests whether the data begins with a UTF-16BE BOM
+  ## (``FE FF``).
+  ##
+  ## :param data: Raw byte string captured from a child
+  ##              process.
+  ## :returns: true on UTF-16BE BOM match.
+  func implHasUtf16BeBom(data: string): bool =
+    result = data.len >= 2 and
+      byte(data[0]) == 0xFE'u8 and
+      byte(data[1]) == 0xFF'u8
+
+  ## Performs strict validation of a byte string as UTF-8.
+  ## Rejects overlong encodings, surrogate halves, and
+  ## out-of-range lead bytes, so that random OEM / GBK byte
+  ## streams are not mistaken for UTF-8.
+  ##
+  ## :param data: Raw byte string.
+  ## :returns: true only when every byte participates in a
+  ##           well-formed UTF-8 sequence.
+  func implIsValidUtf8(data: string): bool =
+    var i = 0
+    while i < data.len:
+      let b = byte(data[i])
+      if b < 0x80'u8:
+        i += 1
+      elif (b and 0xE0'u8) == 0xC0'u8:
+        if b < 0xC2'u8: return false
+        if i + 1 >= data.len: return false
+        if (byte(data[i + 1]) and 0xC0'u8) !=
+            0x80'u8:
+          return false
+        i += 2
+      elif (b and 0xF0'u8) == 0xE0'u8:
+        if i + 2 >= data.len: return false
+        let b1 = byte(data[i + 1])
+        let b2 = byte(data[i + 2])
+        if (b1 and 0xC0'u8) != 0x80'u8:
+          return false
+        if (b2 and 0xC0'u8) != 0x80'u8:
+          return false
+        if b == 0xE0'u8 and b1 < 0xA0'u8:
+          return false
+        if b == 0xED'u8 and b1 >= 0xA0'u8:
+          return false
+        i += 3
+      elif (b and 0xF8'u8) == 0xF0'u8:
+        if b >= 0xF5'u8: return false
+        if i + 3 >= data.len: return false
+        let b1 = byte(data[i + 1])
+        let b2 = byte(data[i + 2])
+        let b3 = byte(data[i + 3])
+        if (b1 and 0xC0'u8) != 0x80'u8:
+          return false
+        if (b2 and 0xC0'u8) != 0x80'u8:
+          return false
+        if (b3 and 0xC0'u8) != 0x80'u8:
+          return false
+        if b == 0xF0'u8 and b1 < 0x90'u8:
+          return false
+        if b == 0xF4'u8 and b1 > 0x8F'u8:
+          return false
+        i += 4
+      else:
+        return false
+    result = true
+
+  ## Heuristic detector for unmarked UTF-16LE output.  On a
+  ## Latin/ASCII-heavy stream every second byte is zero; we
+  ## accept the buffer as UTF-16LE when the zero-high-byte
+  ## ratio exceeds ``UTF16_HEURISTIC_MIN_RATIO`` percent.
+  ##
+  ## :param data: Raw byte string.
+  ## :returns: true when the heuristic suggests UTF-16LE.
+  func implLooksLikeUtf16Le(data: string): bool =
+    if data.len < UTF16_HEURISTIC_MIN_LEN:
+      return false
+    if (data.len mod 2) != 0:
+      return false
+    var zeros = 0
+    var samples = 0
+    var i = 1
+    while i < data.len and
+        samples < UTF16_HEURISTIC_SAMPLE_CAP:
+      if byte(data[i]) == 0'u8:
+        zeros += 1
+      samples += 1
+      i += 2
+    if samples == 0:
+      return false
+    result = (zeros * 100 div samples) >=
+      UTF16_HEURISTIC_MIN_RATIO
+
+when defined(windows):
+
+  ## Decodes a UTF-16LE byte buffer into UTF-8 using the
+  ## Win32 conversion routines.  Returns an empty string on
+  ## conversion failure so that callers can try the next
+  ## strategy.
+  ##
+  ## :param data: Raw UTF-16LE byte buffer (no BOM).
+  ## :returns: The decoded UTF-8 string, or empty on failure.
+  proc implDecodeUtf16Le(data: string): string =
+    if data.len < 2:
+      return ""
+    let numWords = (data.len div 2).int32
+    if numWords <= 0:
+      return ""
+    let src = cast[ptr uint16](unsafeAddr data[0])
+    let utf8Len = wideCharToMultiByte(
+      CP_UTF8, 0'u32, src, numWords,
+      nil, 0'i32, nil, nil)
+    if utf8Len <= 0:
+      return ""
+    result = newString(utf8Len)
+    let written = wideCharToMultiByte(
+      CP_UTF8, 0'u32, src, numWords,
+      cstring(result), utf8Len, nil, nil)
+    if written <= 0:
+      return ""
+
+  ## Decodes a UTF-16BE byte buffer into UTF-8 by first
+  ## byte-swapping the input into UTF-16LE.
+  ##
+  ## :param data: Raw UTF-16BE byte buffer (no BOM).
+  ## :returns: The decoded UTF-8 string, or empty on failure.
+  proc implDecodeUtf16Be(data: string): string =
+    if data.len < 2:
+      return ""
+    let paired = data.len - (data.len mod 2)
+    if paired <= 0:
+      return ""
+    var swapped = newString(paired)
+    var i = 0
+    while i + 1 < paired:
+      swapped[i] = data[i + 1]
+      swapped[i + 1] = data[i]
+      i += 2
+    result = implDecodeUtf16Le(swapped)
+
+  ## Decodes a byte buffer interpreted under the given
+  ## Windows code page into UTF-8.  Used as the OEM/ACP
+  ## fallback when no Unicode signature is present.
+  ##
+  ## :param data: Raw byte buffer.
+  ## :param codePage: Windows code page identifier
+  ##                  (e.g. ``CP_OEMCP`` or ``CP_ACP``).
+  ## :returns: The decoded UTF-8 string, or empty on failure.
+  proc implDecodeWithCodePage(
+    data: string,
+    codePage: uint32
+  ): string =
+    if data.len == 0:
+      return ""
+    let wideLen = multiByteToWideChar(
+      codePage, 0'u32,
+      cstring(data), data.len.int32,
+      nil, 0'i32)
+    if wideLen <= 0:
+      return ""
+    var wide = newSeq[uint16](wideLen)
+    let wRet = multiByteToWideChar(
+      codePage, 0'u32,
+      cstring(data), data.len.int32,
+      addr wide[0], wideLen)
+    if wRet <= 0:
+      return ""
+    let utf8Len = wideCharToMultiByte(
+      CP_UTF8, 0'u32, addr wide[0], wRet,
+      nil, 0'i32, nil, nil)
+    if utf8Len <= 0:
+      return ""
+    result = newString(utf8Len)
+    let written = wideCharToMultiByte(
+      CP_UTF8, 0'u32, addr wide[0], wRet,
+      cstring(result), utf8Len, nil, nil)
+    if written <= 0:
+      return ""
+
+when defined(windows):
+
+  ## Normalises the raw byte stream captured from a Windows
+  ## child process into UTF-8 using a layered strategy:
+  ##
+  ## 1. Recognise UTF-8 / UTF-16LE / UTF-16BE BOMs and strip
+  ##    them.
+  ## 2. Accept the buffer as-is when it is strictly valid
+  ##    UTF-8.
+  ## 3. Try the UTF-16LE heuristic for unmarked wide output
+  ##    (common for programs using ``Write-Output`` in PS 7
+  ##    without the prelude taking effect).
+  ## 4. Fall back to the OEM console code page (e.g. CP936)
+  ##    which is the default encoding of native Win32 tools
+  ##    such as ``ipconfig``.
+  ## 5. Fall back to the ANSI / system code page.
+  ## 6. As a last resort, replace non-ASCII bytes with
+  ##    ``?`` so that the caller never receives an empty
+  ##    string and never has to handle decoding errors.
+  ##
+  ## :param data: Raw bytes from the child process pipe.
+  ## :returns: A valid UTF-8 string.  Never raises.
+  proc implNormalizeWindowsOutput(
+    data: string
+  ): string =
+    if data.len == 0:
+      return ""
+    # 1. BOM-driven decoding.
+    if implHasUtf8Bom(data):
+      return data[3 .. ^1]
+    if implHasUtf16LeBom(data):
+      let decoded = implDecodeUtf16Le(
+        data[2 .. ^1])
+      if decoded.len > 0:
+        return decoded
+    if implHasUtf16BeBom(data):
+      let decoded = implDecodeUtf16Be(
+        data[2 .. ^1])
+      if decoded.len > 0:
+        return decoded
+    # 2. Strict UTF-8 acceptance.
+    if implIsValidUtf8(data):
+      return data
+    # 3. Unmarked UTF-16LE heuristic.
+    if implLooksLikeUtf16Le(data):
+      let decoded = implDecodeUtf16Le(data)
+      if decoded.len > 0 and
+          implIsValidUtf8(decoded):
+        return decoded
+    # 4. OEM code page (CP936 / CP932 / etc.).
+    let oemDecoded = implDecodeWithCodePage(
+      data, CP_OEMCP)
+    if oemDecoded.len > 0 and
+        implIsValidUtf8(oemDecoded):
+      return oemDecoded
+    # 5. ANSI code page.
+    let acpDecoded = implDecodeWithCodePage(
+      data, CP_ACP)
+    if acpDecoded.len > 0 and
+        implIsValidUtf8(acpDecoded):
+      return acpDecoded
+    # 6. Last-resort ASCII-safe replacement.  Guarantees
+    # the caller receives a non-empty, valid UTF-8 string.
+    result = newStringOfCap(data.len)
+    for c in data:
+      if byte(c) < 0x80'u8:
+        result.add(c)
+      else:
+        result.add('?')
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -155,7 +521,13 @@ proc confirmExecution*(
 
 ## Executes a command string through the specified shell and
 ## returns the captured combined output together with the exit
-## code.
+## code.  On Windows the captured byte stream is passed through
+## ``implNormalizeWindowsOutput`` so that the caller always
+## receives a valid UTF-8 string regardless of whether the
+## child process emitted UTF-8, UTF-16LE with or without a BOM,
+## OEM code-page text (e.g. CP936 from ``ipconfig``), or ANSI
+## code-page text.  On Linux the raw bytes — which are already
+## UTF-8 — are returned unchanged.
 ##
 ## :param command: The command to execute.
 ## :param shell: Shell executable name or path.
@@ -184,9 +556,14 @@ proc executeCommand*(
   except OSError as e:
     raise newException(GetError,
       fmt"cannot start shell '{shell}': {e.msg}")
-  let output = p.outputStream.readAll()
+  let rawOutput = p.outputStream.readAll()
   let exitCode = p.waitForExit()
   p.close()
+  when defined(windows):
+    let output = implNormalizeWindowsOutput(
+      rawOutput)
+  else:
+    let output = rawOutput
   result = ExecResult(
     output: output,
     exitCode: exitCode)

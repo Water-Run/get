@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
@@ -12,6 +12,17 @@
 ## mode produces unformatted text; vivid mode provides animated
 ## spinners, ANSI colours, and optional external rendering via
 ## bat and mdcat.
+##
+## External rendering is deliberately narrow: bat is invoked
+## only when the content being rendered is code-like or
+## Markdown-formatted LLM reply text.  Specifically, bat is
+## used for the built-in help text and as a fallback for
+## Markdown replies when mdcat is unavailable; mdcat is the
+## preferred renderer for Markdown replies when present.  Raw
+## command output is never piped through bat, because feeding
+## arbitrary byte streams into an external process over a
+## stdin pipe is a known source of truncation and encoding
+## issues on Windows.
 ##
 ## On Windows, ANSI virtual terminal processing must be
 ## explicitly enabled via initAnsi before any styled output is
@@ -510,14 +521,29 @@ proc clearSpinner*() =
 # Public API — result output
 # ---------------------------------------------------------------------------
 
-## Writes the final result to stdout, using external display
-## tools when enabled and available.
+## Writes the final result to stdout.  External rendering is
+## restricted to Markdown-formatted LLM replies: when the
+## content is Markdown and external display is enabled, mdcat
+## is used if available and bat is used only as a fallback
+## when mdcat is missing.  Raw command output
+## (``isMarkdown == false``) is always echoed as plain text,
+## which avoids the truncation and encoding issues caused by
+## piping arbitrary byte streams through an external renderer
+## on Windows.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.
 ## :param binDir: Bundled bin directory for tool lookup.
 ## :param extDisplay: Whether external display is enabled.
-## :param isMarkdown: Whether the content is Markdown.
+## :param isMarkdown: Whether the content is Markdown text
+##                    produced by the LLM.  Only Markdown
+##                    content is eligible for external
+##                    rendering; raw command output must be
+##                    passed with ``isMarkdown = false``.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard
 proc styleResult*(
   kind: StyleKind,
   text: string,
@@ -529,8 +555,9 @@ proc styleResult*(
   of skSimp:
     echo text
   of skVivid:
-    if extDisplay and binDir.len > 0:
-      if isMarkdown and isMdcatAvailable(binDir):
+    if extDisplay and isMarkdown and
+        binDir.len > 0:
+      if isMdcatAvailable(binDir):
         let rendered = renderMarkdown(text, binDir)
         stdout.write(rendered)
         if not rendered.endsWith("\n"):

@@ -1,99 +1,115 @@
 #!/usr/bin/env python3
 """
-install_get.py — installer / uninstaller for `get`.
+get_ready.py — installer / uninstaller for `get`.
 
-Layout expected next to this script:
-    install_get.py
+Run this script to install `get` on your system. If `get` is already
+installed, running the script again switches to uninstall mode.
+
+Expected layout next to this script:
+
+    get_ready.py
     get            (Linux binary)
     get.exe        (Windows binary)
     get.1          (Linux man page)
     bin/           (optional, extra tools)
-
-No external dependencies. Python 3.12+.
 """
 from __future__ import annotations
 
+import ctypes
 import os
-import sys
-import shutil
 import platform
+import shutil
+import sys
 from pathlib import Path
+from typing import Iterable
 
-# ────────────────────────────── constants ──────────────────────────────
+# ─────────────────────────── environment flags ─────────────────────────
 
-IS_WINDOWS = os.name == "nt"
-IS_LINUX   = sys.platform.startswith("linux")
-SCRIPT_DIR = Path(__file__).resolve().parent
+IS_WINDOWS: bool = os.name == "nt"
+IS_LINUX:   bool = sys.platform.startswith("linux")
+SCRIPT_DIR: Path = Path(__file__).resolve().parent
 
-MARK_BEGIN = "# >>> get installer >>>"
-MARK_END   = "# <<< get installer <<<"
+RC_MARK_BEGIN = "# >>> get installer >>>"
+RC_MARK_END   = "# <<< get installer <<<"
+
+PROJECT_TAGLINE = "get - get anything from your computer"
+PROJECT_GITHUB  = "github: https://github.com/Water-Run/get"
 
 # ─────────────────────────────── styling ───────────────────────────────
 
-class C:
-    RESET = "\033[0m"
-    BOLD  = "\033[1m"
-    DIM   = "\033[2m"
-    RED   = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW= "\033[33m"
-    BLUE  = "\033[34m"
-    MAG   = "\033[35m"
-    CYAN  = "\033[36m"
+class Color:
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RED    = "\033[31m"
+    GREEN  = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE   = "\033[34m"
+    MAGENTA= "\033[35m"
+    CYAN   = "\033[36m"
 
-def _strip_colors() -> None:
-    for k in list(vars(C)):
-        if not k.startswith("_"):
-            setattr(C, k, "")
+
+def _disable_colors() -> None:
+    for name in list(vars(Color)):
+        if not name.startswith("_"):
+            setattr(Color, name, "")
+
 
 def _enable_ansi() -> None:
     if not sys.stdout.isatty():
-        _strip_colors()
+        _disable_colors()
         return
     if IS_WINDOWS:
         try:
-            import ctypes
-            k = ctypes.windll.kernel32
-            h = k.GetStdHandle(-11)
-            m = ctypes.c_ulong()
-            k.GetConsoleMode(h, ctypes.byref(m))
-            k.SetConsoleMode(h, m.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32 = ctypes.windll.kernel32
+            handle   = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode     = ctypes.c_ulong()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
         except Exception:
-            _strip_colors()
+            _disable_colors()
 
-def info(msg: str) -> None:  print(f"{C.BOLD}{C.CYAN}info:{C.RESET} {msg}")
-def warn(msg: str) -> None:  print(f"{C.BOLD}{C.YELLOW}warn:{C.RESET} {msg}")
-def err(msg: str)  -> None:  print(f"{C.BOLD}{C.RED}error:{C.RESET} {msg}", file=sys.stderr)
-def step(msg: str) -> None:  print(f"  {C.BOLD}{C.BLUE}»{C.RESET} {msg}")
-def ok(msg: str)   -> None:  print(f"  {C.BOLD}{C.GREEN}✓{C.RESET} {msg}")
-def ko(msg: str)   -> None:  print(f"  {C.BOLD}{C.RED}✗{C.RESET} {msg}")
 
-def ask(prompt: str, default: str = "y") -> bool:
+def info(msg: str) -> None: print(f"{Color.BOLD}{Color.CYAN}info:{Color.RESET} {msg}")
+def warn(msg: str) -> None: print(f"{Color.BOLD}{Color.YELLOW}warn:{Color.RESET} {msg}")
+def fail(msg: str) -> None: print(f"{Color.BOLD}{Color.RED}error:{Color.RESET} {msg}", file=sys.stderr)
+def step(msg: str) -> None: print(f"  {Color.BOLD}{Color.BLUE}»{Color.RESET} {msg}")
+def good(msg: str) -> None: print(f"  {Color.BOLD}{Color.GREEN}✓{Color.RESET} {msg}")
+def bad(msg: str)  -> None: print(f"  {Color.BOLD}{Color.RED}✗{Color.RESET} {msg}")
+
+
+def ask_yes_no(prompt: str, default: str = "y") -> bool:
     suffix = "[Y/n]" if default.lower() == "y" else "[y/N]"
     while True:
         try:
-            a = input(f"{C.BOLD}?{C.RESET} {prompt} {C.DIM}{suffix}{C.RESET} ").strip().lower()
+            reply = input(f"{Color.BOLD}?{Color.RESET} {prompt} "
+                          f"{Color.DIM}{suffix}{Color.RESET} ").strip().lower()
         except EOFError:
-            a = ""
-        if not a:
-            a = default.lower()
-        if a in ("y", "yes"): return True
-        if a in ("n", "no"):  return False
+            reply = ""
+        if not reply:
+            reply = default.lower()
+        if reply in ("y", "yes"):
+            return True
+        if reply in ("n", "no"):
+            return False
 
-def choose(prompt: str, options: list[tuple[str, str, str]]) -> str:
+
+def ask_choice(prompt: str, options: list[tuple[str, str, str]]) -> str:
     print()
-    print(f"{C.BOLD}{prompt}{C.RESET}")
-    for i, (_, label, desc) in enumerate(options, 1):
-        print(f"  {C.BOLD}{i}){C.RESET} {C.BOLD}{label}{C.RESET}")
+    print(f"{Color.BOLD}{prompt}{Color.RESET}")
+    for idx, (_, label, desc) in enumerate(options, 1):
+        print(f"  {Color.BOLD}{idx}){Color.RESET} {Color.BOLD}{label}{Color.RESET}")
         if desc:
-            print(f"     {C.DIM}{desc}{C.RESET}")
+            print(f"     {Color.DIM}{desc}{Color.RESET}")
     while True:
         try:
-            a = input(f"\n{C.BOLD}>{C.RESET} choose [1-{len(options)}]: ").strip()
+            reply = input(f"\n{Color.BOLD}>{Color.RESET} "
+                          f"choose [1-{len(options)}]: ").strip()
         except EOFError:
-            a = "1"
-        if a.isdigit() and 1 <= int(a) <= len(options):
-            return options[int(a) - 1][0]
+            reply = "1"
+        if reply.isdigit() and 1 <= int(reply) <= len(options):
+            return options[int(reply) - 1][0]
+
 
 def banner(title: str) -> None:
     width = 56
@@ -103,9 +119,18 @@ def banner(title: str) -> None:
     top = "╭" + "─" * inner + "╮"
     bot = "╰" + "─" * inner + "╯"
     print()
-    print(f"{C.BOLD}{C.CYAN}{top}{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}│{C.RESET}{' ' * lp}{C.BOLD}{title}{C.RESET}{' ' * rp}{C.BOLD}{C.CYAN}│{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}{bot}{C.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}{top}{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}│{Color.RESET}"
+          f"{' ' * lp}{Color.BOLD}{title}{Color.RESET}{' ' * rp}"
+          f"{Color.BOLD}{Color.CYAN}│{Color.RESET}")
+    print(f"{Color.BOLD}{Color.CYAN}{bot}{Color.RESET}")
+    print()
+
+
+def project_banner() -> None:
+    """Display the project identity — shown on install and uninstall."""
+    print(f"{Color.BOLD}{Color.MAGENTA}{PROJECT_TAGLINE}{Color.RESET}")
+    print(f"{Color.DIM}{PROJECT_GITHUB}{Color.RESET}")
     print()
 
 # ───────────────────────────── system check ────────────────────────────
@@ -115,29 +140,30 @@ def check_system() -> None:
     if IS_WINDOWS:
         v = sys.getwindowsversion()
         if v.major < 10:
-            ko(f"Windows {v.major}.{v.minor}  (need Windows 10 or later)")
+            bad(f"Windows {v.major}.{v.minor}  (need Windows 10 or later)")
             sys.exit(1)
-        ok(f"Windows {v.major}.{v.minor} (build {v.build})")
+        good(f"Windows {v.major}.{v.minor} (build {v.build})")
     elif IS_LINUX:
-        rel = platform.release()
+        release = platform.release()
         try:
-            major = int(rel.split(".", 1)[0])
+            major = int(release.split(".", 1)[0])
         except ValueError:
             major = 0
         if major < 6:
-            ko(f"Linux kernel {rel}  (need kernel 6 or later)")
+            bad(f"Linux kernel {release}  (need kernel 6 or later)")
             sys.exit(1)
-        ok(f"Linux kernel {rel}")
+        good(f"Linux kernel {release}")
     else:
-        ko(f"Unsupported platform: {sys.platform}")
+        bad(f"Unsupported platform: {sys.platform}")
         sys.exit(1)
 
 # ───────────────────────────── path layout ─────────────────────────────
 
 def install_paths() -> dict:
     if IS_WINDOWS:
-        base = Path(os.environ.get("LOCALAPPDATA",
-                                   Path.home() / "AppData" / "Local")) / "Programs" / "get"
+        base = Path(os.environ.get(
+            "LOCALAPPDATA", Path.home() / "AppData" / "Local"
+        )) / "Programs" / "get"
         return {
             "root":      base,
             "binary":    base / "get.exe",
@@ -145,7 +171,7 @@ def install_paths() -> dict:
             "man":       None,
             "path_dirs": [base, base / "bin"],
         }
-    home = Path.home()
+    home  = Path.home()
     local = home / ".local"
     return {
         "root":      local / "share" / "get",
@@ -155,16 +181,16 @@ def install_paths() -> dict:
         "path_dirs": [local / "bin", local / "share" / "get" / "bin"],
     }
 
+
 def find_installed() -> Path | None:
-    p = install_paths()
-    if p["binary"].exists():
-        return p["binary"]
+    paths = install_paths()
+    if paths["binary"].exists():
+        return paths["binary"]
     found = shutil.which("get")
     if found:
-        fp = Path(found).resolve()
-        # Ignore the copy that lives next to this script.
-        if fp.parent != SCRIPT_DIR:
-            return fp
+        resolved = Path(found).resolve()
+        if resolved.parent != SCRIPT_DIR:
+            return resolved
     return None
 
 # ───────────────────────────── file helpers ────────────────────────────
@@ -175,108 +201,137 @@ def copy_file(src: Path, dst: Path) -> None:
     if not IS_WINDOWS:
         os.chmod(dst, 0o755)
 
+
+def remove_file(p: Path) -> None:
+    if not p.exists():
+        return
+    step(f"Removing {p}")
+    try:
+        p.unlink()
+        good("removed")
+    except OSError as e:
+        bad(f"failed: {e}")
+
+
+def prune_empty_parents(start: Path, stop_at: Path) -> None:
+    try:
+        stop_at = stop_at.resolve()
+    except OSError:
+        return
+    cur = start
+    while cur.exists() and cur.resolve() != stop_at:
+        try:
+            cur.rmdir()
+        except OSError:
+            break
+        cur = cur.parent
+
 # ─────────────────────────── PATH management ───────────────────────────
 
 def _notify_env_change_windows() -> None:
     try:
-        import ctypes
         HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
-        res = ctypes.c_long()
+        result = ctypes.c_long()
         ctypes.windll.user32.SendMessageTimeoutW(
             HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
-            SMTO_ABORTIFHUNG, 5000, ctypes.byref(res),
+            SMTO_ABORTIFHUNG, 5000, ctypes.byref(result),
         )
     except Exception:
         pass
 
-def path_add_windows(dirs: list[Path]) -> bool:
+
+def path_add_windows(dirs: Iterable[Path]) -> bool:
     import winreg
     changed = False
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment",
                         0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
         try:
-            cur, _ = winreg.QueryValueEx(k, "Path")
+            current, _ = winreg.QueryValueEx(k, "Path")
         except FileNotFoundError:
-            cur = ""
-        parts = [p for p in cur.split(";") if p]
-        low = {p.lower() for p in parts}
+            current = ""
+        parts    = [p for p in current.split(";") if p]
+        existing = {p.lower() for p in parts}
         for d in dirs:
-            s = str(d)
-            if s.lower() not in low:
-                parts.append(s)
-                low.add(s.lower())
+            value = str(d)
+            if value.lower() not in existing:
+                parts.append(value)
+                existing.add(value.lower())
                 changed = True
         if changed:
             winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
             _notify_env_change_windows()
     return changed
 
-def path_remove_windows(dirs: list[Path]) -> bool:
+
+def path_remove_windows(dirs: Iterable[Path]) -> bool:
     import winreg
-    rm = {str(d).lower() for d in dirs}
+    targets = {str(d).lower() for d in dirs}
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment",
                         0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
         try:
-            cur, _ = winreg.QueryValueEx(k, "Path")
+            current, _ = winreg.QueryValueEx(k, "Path")
         except FileNotFoundError:
             return False
-        parts = [p for p in cur.split(";") if p]
-        new = [p for p in parts if p.lower() not in rm]
-        if len(new) == len(parts):
+        parts = [p for p in current.split(";") if p]
+        kept  = [p for p in parts if p.lower() not in targets]
+        if len(kept) == len(parts):
             return False
-        winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(new))
+        winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(kept))
         _notify_env_change_windows()
     return True
 
-def path_add_linux(dirs: list[Path]) -> bool:
-    lines = [MARK_BEGIN]
+
+def path_add_linux(dirs: Iterable[Path]) -> bool:
+    lines = [RC_MARK_BEGIN]
     for d in dirs:
         lines.append(
-            f'case ":$PATH:" in *":{d}:"*) ;; *) export PATH="{d}:$PATH" ;; esac'
+            f'case ":$PATH:" in *":{d}:"*) ;; '
+            f'*) export PATH="{d}:$PATH" ;; esac'
         )
-    lines.append(MARK_END)
+    lines.append(RC_MARK_END)
     block = "\n" + "\n".join(lines) + "\n"
 
     changed = False
-    home = Path.home()
+    home    = Path.home()
     for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
         if not rc.exists() and rc.name != ".profile":
             continue
         content = rc.read_text() if rc.exists() else ""
-        if MARK_BEGIN in content:
+        if RC_MARK_BEGIN in content:
             continue
         with rc.open("a") as f:
             f.write(block)
         changed = True
     return changed
 
+
 def path_remove_linux() -> bool:
     changed = False
-    home = Path.home()
+    home    = Path.home()
     for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
         if not rc.exists():
             continue
         content = rc.read_text()
-        if MARK_BEGIN not in content:
+        if RC_MARK_BEGIN not in content:
             continue
-        out, skip = [], False
+        kept, skip = [], False
         for line in content.splitlines(keepends=True):
-            if MARK_BEGIN in line:
+            if RC_MARK_BEGIN in line:
                 skip = True
                 continue
-            if MARK_END in line:
+            if RC_MARK_END in line:
                 skip = False
                 continue
             if not skip:
-                out.append(line)
-        # trim orphan blank lines at end
-        text = "".join(out).rstrip() + "\n"
-        rc.write_text(text)
+                kept.append(line)
+        rc.write_text("".join(kept).rstrip() + "\n")
         changed = True
     return changed
 
+
 def add_to_path(dirs: list[Path]) -> bool:
     return path_add_windows(dirs) if IS_WINDOWS else path_add_linux(dirs)
+
 
 def remove_from_path(dirs: list[Path]) -> bool:
     return path_remove_windows(dirs) if IS_WINDOWS else path_remove_linux()
@@ -284,11 +339,11 @@ def remove_from_path(dirs: list[Path]) -> bool:
 # ─────────────────────────────── install ───────────────────────────────
 
 def install() -> None:
-    paths = install_paths()
-
+    paths   = install_paths()
     src_bin = SCRIPT_DIR / ("get.exe" if IS_WINDOWS else "get")
+
     if not src_bin.exists():
-        err(f"source binary not found: {src_bin}")
+        fail(f"source binary not found: {src_bin}")
         sys.exit(1)
 
     extra_src = SCRIPT_DIR / "bin"
@@ -296,7 +351,7 @@ def install() -> None:
 
     mode = "minimal"
     if has_extra:
-        mode = choose(
+        mode = ask_choice(
             "Installation type",
             [
                 ("full",    "Full installation",
@@ -312,71 +367,76 @@ def install() -> None:
 
     print()
     info("The following paths will be used:")
-    print(f"     {C.DIM}binary   :{C.RESET} {paths['binary']}")
+    print(f"     {Color.DIM}binary   :{Color.RESET} {paths['binary']}")
     if mode == "full":
-        print(f"     {C.DIM}extra bin:{C.RESET} {paths['extra_bin']}")
+        print(f"     {Color.DIM}extra bin:{Color.RESET} {paths['extra_bin']}")
     if paths["man"]:
-        print(f"     {C.DIM}man page :{C.RESET} {paths['man']}")
+        print(f"     {Color.DIM}man page :{Color.RESET} {paths['man']}")
     for d in path_dirs:
-        print(f"     {C.DIM}PATH  +=  {C.RESET} {d}")
+        print(f"     {Color.DIM}PATH  +=  {Color.RESET} {d}")
     print()
 
-    if not ask("Proceed with installation?"):
+    if not ask_yes_no("Proceed with installation?"):
         info("installation cancelled")
         sys.exit(0)
 
     print()
     step(f"Installing binary  →  {paths['binary']}")
     copy_file(src_bin, paths["binary"])
-    ok("binary installed")
+    good("binary installed")
 
     if paths["man"]:
         man_src = SCRIPT_DIR / "get.1"
         if man_src.exists():
             step(f"Installing man page →  {paths['man']}")
             copy_file(man_src, paths["man"])
-            ok("man page installed")
+            good("man page installed")
         else:
             warn("get.1 not found, skipping man page")
 
     if mode == "full":
         step(f"Installing extras  →  {paths['extra_bin']}")
         paths["extra_bin"].mkdir(parents=True, exist_ok=True)
-        n = 0
+        count = 0
         for item in extra_src.iterdir():
             if item.is_file():
                 copy_file(item, paths["extra_bin"] / item.name)
-                n += 1
-        ok(f"installed {n} extra tool(s)")
+                count += 1
+        good(f"installed {count} extra tool(s)")
 
     step("Configuring PATH")
     if add_to_path(path_dirs):
-        ok("PATH updated")
+        good("PATH updated")
     else:
-        ok("PATH already configured")
+        good("PATH already configured")
 
     _finish_install(paths)
+
 
 def _finish_install(paths: dict) -> None:
     print()
     banner("get is installed — enjoy! 🎉")
+    project_banner()
 
     info("To get started, open a new terminal and run:")
-    print(f"     {C.BOLD}get version{C.RESET}    {C.DIM}# verify installation{C.RESET}")
-    print(f"     {C.BOLD}get help{C.RESET}       {C.DIM}# show command help{C.RESET}")
+    print(f"     {Color.BOLD}get version{Color.RESET}"
+          f"    {Color.DIM}# verify installation{Color.RESET}")
+    print(f"     {Color.BOLD}get help{Color.RESET}"
+          f"       {Color.DIM}# show command help{Color.RESET}")
     if IS_LINUX:
-        print(f"     {C.BOLD}man get{C.RESET}        {C.DIM}# read the manual{C.RESET}")
+        print(f"     {Color.BOLD}man get{Color.RESET}"
+              f"        {Color.DIM}# read the manual{Color.RESET}")
     print()
 
     if IS_LINUX:
         info(f"current shell users can reload the PATH with:  "
-             f"{C.BOLD}source ~/.profile{C.RESET}")
+             f"{Color.BOLD}source ~/.profile{Color.RESET}")
     else:
         info("open a new terminal window so the updated PATH takes effect.")
 
     print()
-    info(f"To remove get later, run this script again:")
-    print(f"     {C.BOLD}python {Path(__file__).name}{C.RESET}")
+    info("To remove get later, run this script again:")
+    print(f"     {Color.BOLD}python {Path(__file__).name}{Color.RESET}")
     print()
 
 # ────────────────────────────── uninstall ──────────────────────────────
@@ -385,71 +445,49 @@ def uninstall(existing: Path) -> None:
     paths = install_paths()
 
     print()
-    info(f"Found existing installation at: {C.BOLD}{existing}{C.RESET}")
-    if not ask("Uninstall get?"):
+    info(f"Found existing installation at: "
+         f"{Color.BOLD}{existing}{Color.RESET}")
+    if not ask_yes_no("Uninstall get?"):
         info("uninstall cancelled")
         sys.exit(0)
 
     print()
-    _try_remove_file(existing)
+    remove_file(existing)
     if paths["binary"] != existing:
-        _try_remove_file(paths["binary"])
+        remove_file(paths["binary"])
 
     if paths["extra_bin"].exists():
         step(f"Removing {paths['extra_bin']}")
         try:
             shutil.rmtree(paths["extra_bin"])
-            ok("extra bin removed")
+            good("extra bin removed")
         except OSError as e:
-            ko(f"failed: {e}")
+            bad(f"failed: {e}")
 
     if paths["man"]:
-        _try_remove_file(paths["man"])
-        _try_remove_empty_parents(paths["man"].parent, stop_at=Path.home())
+        remove_file(paths["man"])
+        prune_empty_parents(paths["man"].parent, stop_at=Path.home())
 
     if paths["root"].exists():
         try:
-            # remove only if empty
             paths["root"].rmdir()
         except OSError:
             pass
 
     step("Cleaning PATH")
     if remove_from_path(paths["path_dirs"]):
-        ok("PATH cleaned")
+        good("PATH cleaned")
     else:
-        ok("PATH already clean")
+        good("PATH already clean")
 
     print()
     banner("get has been uninstalled")
+    project_banner()
     if IS_LINUX:
         info("restart your shell to refresh the environment.")
     else:
         info("open a new terminal so the updated PATH takes effect.")
     print()
-
-def _try_remove_file(p: Path) -> None:
-    if not p.exists():
-        return
-    step(f"Removing {p}")
-    try:
-        p.unlink()
-        ok("removed")
-    except OSError as e:
-        ko(f"failed: {e}")
-
-def _try_remove_empty_parents(start: Path, stop_at: Path) -> None:
-    cur = start
-    try:
-        stop_at = stop_at.resolve()
-    except OSError:
-        return
-    while cur.exists() and cur.resolve() != stop_at:
-        try:
-            cur.rmdir()
-        except OSError:
-            break
-        cur = cur.parent
 
 # ─────────────────────────────── entry ─────────────────────────────────
 
@@ -457,8 +495,9 @@ def main() -> None:
     _enable_ansi()
 
     existing = find_installed()
-    title = "get uninstaller" if existing else "get installer"
+    title    = "get uninstaller" if existing else "get installer"
     banner(title)
+    project_banner()
 
     check_system()
 
@@ -467,10 +506,11 @@ def main() -> None:
     else:
         install()
 
+
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print()
-        err("interrupted")
+        fail("interrupted")
         sys.exit(130)

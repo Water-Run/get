@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-18
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -54,8 +54,19 @@ const CACHE_CHECK_MAX_TOKENS* = 32
 
 ## Builds the shared context block included in both instance and
 ## agent system prompts: read-only constraints, format rules,
-## tool selection guidance, system information, bundled tools,
-## optional custom prompt, and optional command-pattern note.
+## shell-specific syntax rules, tool selection guidance, system
+## information, bundled tools, optional custom prompt, and
+## optional command-pattern note.
+##
+## The shell-specific section is derived from the ``shell``
+## parameter and injects a strong, family-appropriate syntax
+## contract (PowerShell / cmd.exe / POSIX).  This is necessary
+## because the generic phrase "use correct syntax for this
+## shell" has proven too weak in practice: models routinely
+## produce Unix-style ``pwd`` / ``ls`` / ``grep`` invocations
+## even when the target shell is PowerShell, relying on alias
+## compatibility that breaks as soon as pipelines or flags
+## diverge from the alias surface.
 ##
 ## :param info: System information snapshot.
 ## :param shell: The shell that will execute commands.
@@ -105,7 +116,8 @@ func implBuildBaseContext(
     "read-only sub-commands).")
   lines.add(
     fmt"- The command must work in {shell}. " &
-    "Ensure correct syntax for this shell.")
+    "Ensure correct syntax for this shell, " &
+    "following the shell-specific rules below.")
   lines.add(
     "- Prefer using bundled tools listed below " &
     "when they fit the task; they are already " &
@@ -114,6 +126,137 @@ func implBuildBaseContext(
     "- Verify your command mentally before " &
     "outputting — check flag names, argument " &
     "order, and shell quoting.")
+
+  # Shell-specific hard rules.  Detection is case-insensitive
+  # and matches on substrings so that absolute paths or
+  # alternate spellings (``pwsh``, ``powershell.exe``) still
+  # resolve correctly.
+  let shellLower = toLowerAscii(shell)
+  if shellLower.contains("powershell") or
+      shellLower.contains("pwsh"):
+    lines.add("")
+    lines.add(
+      "POWERSHELL-SPECIFIC RULES (MANDATORY):")
+    lines.add(
+      "- The target shell is PowerShell. You " &
+      "MUST use native PowerShell cmdlets, NOT " &
+      "Unix-style aliases or POSIX utilities. " &
+      "Even when an alias exists (e.g. `pwd`, " &
+      "`ls`, `cat`, `ps`, `cp`, `mv`), ALWAYS " &
+      "prefer the full cmdlet form. This rule " &
+      "is not optional.")
+    lines.add(
+      "- Required cmdlet mappings you MUST " &
+      "follow for read-only operations:")
+    lines.add(
+      "    pwd           -> Get-Location")
+    lines.add(
+      "    ls / dir      -> Get-ChildItem")
+    lines.add(
+      "    cat / type    -> Get-Content")
+    lines.add(
+      "    ps            -> Get-Process")
+    lines.add(
+      "    grep          -> Select-String")
+    lines.add(
+      "    head / tail   -> Select-Object " &
+      "-First N / -Last N")
+    lines.add(
+      "    wc -l         -> (Get-Content ...)" &
+      ".Count  or  Measure-Object -Line")
+    lines.add(
+      "    which / where -> Get-Command")
+    lines.add(
+      "    env           -> Get-ChildItem Env:")
+    lines.add(
+      "    df / du       -> Get-PSDrive  or  " &
+      "Get-Volume")
+    lines.add(
+      "    uname / id    -> $PSVersionTable, " &
+      "[Environment]::OSVersion, whoami")
+    lines.add(
+      "    curl / wget   -> Invoke-WebRequest " &
+      "(read-only: -Method Get only, no -OutFile)")
+    lines.add(
+      "- PowerShell pipelines pass OBJECTS, not " &
+      "text. Use `| Select-Object`, " &
+      "`| Where-Object { $_.Prop -eq ... }`, " &
+      "`| Sort-Object`, `| Measure-Object` with " &
+      "script blocks instead of awk/sed/cut.")
+    lines.add(
+      "- Use backtick (`) for line continuation," &
+      " NEVER backslash. Use `;` to chain on a " &
+      "single line. Prefer `;` over `&&` because " &
+      "`&&` is only available in PowerShell 7+; " &
+      "if you are unsure of the host version, " &
+      "avoid `&&`.")
+    lines.add(
+      "- Quote arguments with single quotes to " &
+      "suppress variable expansion; use double " &
+      "quotes only when you intend `$var` " &
+      "interpolation.")
+    lines.add(
+      "- Native Windows tools (ipconfig, " &
+      "systeminfo, netstat, tasklist, " &
+      "Get-NetIPAddress, Get-NetAdapter) ARE " &
+      "allowed and often preferable. Prefer " &
+      "Get-NetIPAddress / Get-NetAdapter over " &
+      "ipconfig when a structured result is " &
+      "needed.")
+    lines.add(
+      "- Forbidden in PowerShell (write-mode): " &
+      "Set-Content, Add-Content, Clear-Content, " &
+      "New-Item, Remove-Item, Move-Item, " &
+      "Rename-Item, Out-File, Tee-Object, " &
+      "Stop-Process, Stop-Service, Start-Service," &
+      " Set-* cmdlets, any use of `>` or `>>` " &
+      "redirection.")
+  elif shellLower.contains("cmd"):
+    lines.add("")
+    lines.add("CMD.EXE-SPECIFIC RULES:")
+    lines.add(
+      "- The target shell is cmd.exe. Use " &
+      "classic Windows shell syntax: `dir`, " &
+      "`type`, `where`, `set`, `findstr`, " &
+      "`ipconfig`, `systeminfo`, `tasklist`.")
+    lines.add(
+      "- Chain commands with `&` (always) or " &
+      "`&&` (only on success). Use `^` for line " &
+      "continuation.")
+    lines.add(
+      "- Variables use `%VAR%` expansion. " &
+      "Quote paths with spaces using double " &
+      "quotes.")
+    lines.add(
+      "- Forbidden (write-mode): `del`, " &
+      "`erase`, `rd`, `rmdir`, `move`, `copy`, " &
+      "`xcopy`, `mkdir`, `md`, `ren`, `rename`, " &
+      "`attrib`, redirects `>` and `>>`.")
+  else:
+    lines.add("")
+    lines.add("BASH / POSIX SHELL RULES:")
+    lines.add(
+      "- The target shell is a POSIX-compatible " &
+      "shell (bash, zsh, sh). Use standard POSIX " &
+      "utilities: `ls`, `cat`, `grep`, `find`, " &
+      "`awk`, `sed`, `head`, `tail`, `wc`, " &
+      "`cut`, `sort`, `uniq`, `xargs`, `stat`, " &
+      "`uname`, `id`, `df`, `du`.")
+    lines.add(
+      "- Chain commands with `&&` (on success) " &
+      "or `||` (on failure). Use `\\` for line " &
+      "continuation.")
+    lines.add(
+      "- Quote variable expansions as \"$var\" " &
+      "to prevent word splitting. Use single " &
+      "quotes for literal text.")
+    lines.add(
+      "- Forbidden (write-mode): `rm`, `rmdir`," &
+      " `mv`, `cp`, `mkdir`, `touch`, `chmod`, " &
+      "`chown`, `tee`, `dd`, `install`, `ln`, " &
+      "redirects `>` and `>>`, `xargs` piped " &
+      "into any of the above.")
+
   lines.add("")
   lines.add("TOOL SELECTION GUIDANCE:")
   lines.add(
@@ -170,7 +313,7 @@ func implBuildBaseContext(
       "pattern, respond with a plain text " &
       "explanation instead.")
   result = lines.join("\n")
-
+  
 # ---------------------------------------------------------------------------
 # Public API — instance mode prompt
 # ---------------------------------------------------------------------------

@@ -18,10 +18,10 @@ Download: [GitHub Release](https://github.com/Water-Run/get/releases)
 
 ## Installation and Uninstallation
 
-The project ships with a Python installer script `install_get.py` that handles installation and PATH configuration automatically:
+The project ships with a Python installer script `get_ready.py` that handles installation and PATH configuration automatically:
 
 ```bash
-python3 install_get.py
+python3 get_ready.py
 ```
 
 After installation, run `get version` to verify. If already installed, the script switches to uninstall mode.
