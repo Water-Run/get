@@ -19,6 +19,7 @@ import utils
 import cache
 import config
 import exec
+import get
 import llm
 import logger
 import prompt
@@ -530,6 +531,34 @@ suite "setConfigOption":
 suite "cache hashes":
   ## Tests for the three-level hash computation.
 
+  test "parseCacheDecisionForTest exact tokens":
+    check parseCacheDecisionForTest("GLOBAL_COMMAND") ==
+      cdGlobalCommand
+    check parseCacheDecisionForTest("GLOBAL_RESULT") ==
+      cdGlobalResult
+    check parseCacheDecisionForTest("CONTEXT_COMMAND") ==
+      cdContextCommand
+    check parseCacheDecisionForTest("CONTEXT_RESULT") ==
+      cdContextResult
+    check parseCacheDecisionForTest("NOCACHE") ==
+      cdNoCache
+
+  test "parseCacheDecisionForTest normalises hyphen and spaces":
+    check parseCacheDecisionForTest("global-command") ==
+      cdGlobalCommand
+    check parseCacheDecisionForTest(" context result ") ==
+      cdContextResult
+
+  test "parseCacheDecisionForTest avoids nocache overshadow":
+    let raw =
+      "Decision: GLOBAL_COMMAND, not nocache"
+    check parseCacheDecisionForTest(raw) ==
+      cdGlobalCommand
+
+  test "parseCacheDecisionForTest falls back to nocache":
+    check parseCacheDecisionForTest("unknown") ==
+      cdNoCache
+
   test "computeQueryHash is deterministic":
     let h1 = computeQueryHash("test query")
     let h2 = computeQueryHash("test query")
@@ -596,6 +625,43 @@ suite "cache hashes":
       none(string), none(string))
     check h1 != h2
 
+  test "parseCacheDecisionForTest escaped underscores":
+    check parseCacheDecisionForTest(
+      "GLOBAL\\_COMMAND") == cdGlobalCommand
+    check parseCacheDecisionForTest(
+      "CONTEXT\\_RESULT") == cdContextResult
+
+  test "parseCacheDecisionForTest markdown bold":
+    check parseCacheDecisionForTest(
+      "**GLOBAL_RESULT**") == cdGlobalResult
+    check parseCacheDecisionForTest(
+      "`CONTEXT_COMMAND`") == cdContextCommand
+
+  test "parseCacheDecisionForTest NO_CACHE variant":
+    check parseCacheDecisionForTest(
+      "NO_CACHE") == cdNoCache
+    check parseCacheDecisionForTest(
+      "no cache") == cdNoCache
+
+  test "parseCacheDecisionForTest keyword pairs":
+    check parseCacheDecisionForTest(
+      "global, command") == cdGlobalCommand
+    check parseCacheDecisionForTest(
+      "context result") == cdContextResult
+
+  test "parseCacheDecisionForTest verbose response":
+    check parseCacheDecisionForTest(
+      "I recommend GLOBAL_COMMAND because " &
+      "the output changes") == cdGlobalCommand
+
+  test "parseCacheDecisionForTest long unrelated text":
+    # Keyword pairs disabled for long responses
+    # to avoid false positives.
+    check parseCacheDecisionForTest(
+      "I do not have enough context to " &
+      "determine the result properly here") ==
+      cdNoCache
+
 # ---------------------------------------------------------------------------
 # cache — seen tracking tests
 # ---------------------------------------------------------------------------
@@ -637,6 +703,53 @@ suite "cache seen":
     for i in 0 ..< 5:
       markSeen(store, fmt"h{i}", 3, 0)
     check store.seen.len <= 3
+
+  test "isNoCacheDecided false for empty store":
+    let store = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
+    check not isNoCacheDecided(store, "abc", 30)
+
+  test "markNoCacheDecided then isNoCacheDecided":
+    var store = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
+    markNoCacheDecided(store, "abc", 1000, 30)
+    check isNoCacheDecided(store, "abc", 30)
+    check not isNoCacheDecided(store, "xyz", 30)
+
+  test "isNoCacheDecided false when expired":
+    let old = epochTime().int64 - (31 * 86400)
+    let store = CacheStore(
+      entries: @[], seen: @[],
+      nocache: @[NoCacheEntry(
+        queryHash: "old", timestamp: old)])
+    check not isNoCacheDecided(store, "old", 30)
+
+  test "markNoCacheDecided replaces existing":
+    var store = CacheStore(
+      entries: @[], seen: @[],
+      nocache: @[NoCacheEntry(
+        queryHash: "dup", timestamp: 100)])
+    markNoCacheDecided(store, "dup", 1000, 30)
+    check store.nocache.len == 1
+    check store.nocache[0].timestamp > 100
+
+  test "cleanCache removes nocache decisions":
+    var store = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
+    markNoCacheDecided(store, "x", 1000, 30)
+    saveCache(store)
+    discard cleanCache()
+    let loaded = loadCache()
+    check loaded.nocache.len == 0
+
+  test "unsetCacheEntries removes nocache entry":
+    var store = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
+    markNoCacheDecided(store,
+      computeQueryHash("my query"),
+      1000, 30)
+    discard unsetCacheEntries(store, "my query")
+    check store.nocache.len == 0
 
 # ---------------------------------------------------------------------------
 # cache — persistence and lookup tests
@@ -1064,7 +1177,7 @@ suite "prompt":
 
   test "buildCacheCheckMessages mentions all modes":
     let msgs = buildCacheCheckMessages(
-      "cpu usage", "top -bn1", "50%", 1)
+      "cpu usage", "top -bn1", "50%")
     check msgs.len == 2
     check msgs[0].content.contains("GLOBAL_COMMAND")
     check msgs[0].content.contains("GLOBAL_RESULT")
@@ -1074,11 +1187,13 @@ suite "prompt":
       "CONTEXT_RESULT")
     check msgs[0].content.contains("NOCACHE")
 
-  test "buildCacheCheckMessages multi-round note":
+  test "buildCacheCheckMessages handles plain text":
     let msgs = buildCacheCheckMessages(
-      "query", "cmd", "out", 3)
-    check msgs[0].content.contains("3")
-    check msgs[0].content.contains("exploration")
+      "what does rm do", "",
+      "rm removes files")
+    check msgs.len == 2
+    check msgs[1].content.contains("(none")
+    check msgs[0].content.contains("pure text")
 
 # ---------------------------------------------------------------------------
 # llm connectivity (optional)

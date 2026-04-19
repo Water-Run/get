@@ -375,6 +375,11 @@ Default:
 .TP
 .BI "hide\-process " bool
 Suppress intermediate output; display only the final result.
+When enabled,
+.B get
+also suppresses its own warning/progress text for the query path
+(for example external-display checks, model advisory warnings, and
+cache-decision progress text).
 Default:
 .IR false .
 .TP
@@ -650,6 +655,8 @@ Only when the same query is executed a second time (or when the
 flag is explicitly passed) does
 .B get
 invoke the LLM to determine the optimal caching strategy.
+In normal process mode, this step shows the progress text:
+.I checking whether to cache...
 .PP
 Five caching strategies are supported:
 .TP
@@ -701,6 +708,8 @@ When the configuration option
 is set to
 .IR false ,
 all caching logic is completely disabled, including seen tracking.
+When process output is not hidden, this condition emits:
+.I warning: cache is disabled in config; all cache logic is bypassed
 .PP
 Cache behaviour is controlled by
 .BR cache ,

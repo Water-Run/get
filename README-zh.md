@@ -139,9 +139,13 @@ get set command-pattern ""     # 清空，禁用模式过滤
 
 ### 缓存
 
-`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询被再次执行 (或显式传入 `--cache`) 时, `get` 才会调用 LLM 判断最优缓存策略. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
+`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询被再次执行 (或显式传入 `--cache`) 时, `get` 才会调用 LLM 判断最优缓存策略. 在该判定阶段（当未隐藏过程输出时），会显示进度文本 `checking whether to cache...`. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
 
 全局条目在任意工作目录下生效; 上下文条目仅在原始查询的目录下生效.
+
+当启用 `hide-process` 时, `get` 会抑制自身中间进度与 warning 文案（包括缓存判定提示与 external-display 检查），仅输出最终结果或必要错误。
+
+当配置 `cache=false` 且未启用 `hide-process` 时, 会输出 warning: `warning: cache is disabled in config; all cache logic is bypassed`.
 
 ```bash
 get cache                     # 显示缓存状态

@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-18
+## :Date: 2026-04-19
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
@@ -23,9 +23,6 @@
 
 import std/[asyncdispatch, httpclient, json, os,
             strformat, strutils]
-
-when defined(windows):
-  import std/osproc
 
 import style
 import utils
@@ -72,16 +69,21 @@ type
 
 ## Detects the system proxy configuration.
 ##
-## Environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY in
-## both upper- and lower-case) take precedence.  On Windows the
-## function falls back to the user's Internet Settings registry
-## keys when no environment variable is present.  It also
-## handles the per-protocol "http=...;https=..." format that
-## Windows uses when different proxies are configured for each
-## scheme.
+## Environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY
+## in both upper- and lower-case) take precedence.  On Windows
+## the function falls back to the user's Internet Settings
+## registry keys when no environment variable is set.  The
+## per-protocol ``http=...;https=...`` format that Windows
+## uses when different proxies are configured for each scheme
+## is handled correctly.
 ##
-## :returns: The proxy URL (e.g. "http://127.0.0.1:7890"), or
-##           an empty string when no proxy is configured.
+## On Windows the registry is read via the Win32 Registry API
+## directly (RegOpenKeyExW / RegQueryValueExW), avoiding the
+## overhead and output-format dependency of spawning a
+## ``reg.exe`` child process on every LLM request.
+##
+## :returns: The proxy URL (e.g. "http://127.0.0.1:7890"),
+##           or an empty string when no proxy is configured.
 proc implDetectSystemProxy(): string =
   for name in ["HTTPS_PROXY", "https_proxy",
                "HTTP_PROXY",  "http_proxy",
@@ -92,31 +94,30 @@ proc implDetectSystemProxy(): string =
 
   when defined(windows):
     try:
-      let (enOut, enCode) = execCmdEx(
-        "reg query \"HKCU\\Software\\Microsoft\\" &
-        "Windows\\CurrentVersion\\Internet " &
-        "Settings\" /v ProxyEnable")
-      if enCode != 0 or not enOut.contains("0x1"):
+      let subKey = newWideCString(
+        "Software\\Microsoft\\Windows\\" &
+        "CurrentVersion\\Internet Settings")
+      var hKey: ImplRegHandle
+      let openRet = implRegOpenKeyExW(
+        IMPL_HKCU, subKey, 0'u32,
+        IMPL_KEY_READ, addr hKey)
+      if openRet != IMPL_REG_OK:
+        return ""
+      defer:
+        discard implRegCloseKey(hKey)
+
+      let proxyEnable = implRegReadDword(
+        hKey, "ProxyEnable")
+      if proxyEnable != 1:
         return ""
 
-      let (srvOut, srvCode) = execCmdEx(
-        "reg query \"HKCU\\Software\\Microsoft\\" &
-        "Windows\\CurrentVersion\\Internet " &
-        "Settings\" /v ProxyServer")
-      if srvCode != 0:
-        return ""
-
-      var srv = ""
-      for line in srvOut.splitLines():
-        let idx = line.find("REG_SZ")
-        if idx >= 0 and
-            line.contains("ProxyServer"):
-          srv = line[idx + "REG_SZ".len .. ^1].
-            strip()
-          break
+      var srv = implRegReadString(
+        hKey, "ProxyServer")
       if srv.len == 0:
         return ""
 
+      # Handle per-protocol format:
+      # "http=host:port;https=host:port"
       if srv.contains("="):
         var httpsProxy = ""
         var httpProxy  = ""
@@ -143,7 +144,7 @@ proc implDetectSystemProxy(): string =
       discard
 
   result = ""
-
+  
 # ---------------------------------------------------------------------------
 # Private helpers — error classification
 # ---------------------------------------------------------------------------
@@ -261,26 +262,33 @@ proc implPostRequest(
 # ---------------------------------------------------------------------------
 
 ## Waits for the future while printing elapsed-time progress.
+## The displayed label is configurable so that callers can show
+## context-specific text (e.g. "checking cache decision")
+## instead of the generic "requesting".
 ##
 ## :param fut: The future for the in-flight request.
 ## :param timeoutSec: Maximum wait in seconds (0 = no limit).
 ## :param hideProcess: Suppress progress when true.
 ## :param sk: The active output style.
+## :param spinnerLabel: Text shown beside the spinner (vivid)
+##                      or before the dots (plain).
 ## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
 proc implAwaitWithProgress(
   fut: Future[string],
   timeoutSec: int,
   hideProcess: bool,
-  sk: StyleKind
+  sk: StyleKind,
+  spinnerLabel: string
 ): Future[string] {.async.} =
   var elapsed = 0
   var lineOpen = false
+  let initialMsg = spinnerLabel & "..."
   if not hideProcess:
     if sk == skVivid:
-      writeSpinner(0, "requesting...")
+      writeSpinner(0, initialMsg)
     else:
-      stderr.write("requesting")
+      stderr.write(spinnerLabel)
       stderr.flushFile()
       lineOpen = true
   while not fut.finished:
@@ -290,10 +298,10 @@ proc implAwaitWithProgress(
       if sk == skVivid:
         let msg =
           if timeoutSec > 0:
-            fmt"requesting... {elapsed}" &
+            fmt"{spinnerLabel}... {elapsed}" &
             fmt"/{timeoutSec}s"
           else:
-            fmt"requesting... {elapsed}s"
+            fmt"{spinnerLabel}... {elapsed}s"
         writeSpinner(elapsed, msg)
       else:
         if elapsed <= 10:
@@ -385,6 +393,7 @@ proc implParseResponse(body: string): LlmResponse =
 ## :param timeoutSec: Maximum seconds to wait (0 = no limit).
 ## :param hideProcess: Suppress progress when true.
 ## :param sk: The active output style.
+## :param spinnerLabel: Text shown in the progress indicator.
 ## :returns: A populated LlmResponse on success.
 ## :raises: LlmApiError: On timeout, HTTP error, network
 ##                       failure, or malformed JSON.
@@ -399,7 +408,8 @@ proc sendLlmRequest*(
   apiKey: string,
   timeoutSec: int = 300,
   hideProcess: bool = false,
-  sk: StyleKind = skSimp
+  sk: StyleKind = skSimp,
+  spinnerLabel: string = "requesting"
 ): LlmResponse =
   if apiKey.len == 0:
     raise newException(GetError,
@@ -430,7 +440,8 @@ proc sendLlmRequest*(
       let fut = implPostRequest(
         client, endpoint, bodyStr)
       let respBody = await implAwaitWithProgress(
-        fut, timeoutSec, hideProcess, sk)
+        fut, timeoutSec, hideProcess, sk,
+        spinnerLabel)
       result = implParseResponse(respBody)
     finally:
       client.close()

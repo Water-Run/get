@@ -1,6 +1,6 @@
 # `get` -- get anything from your computer
 
-[中文](README.zh.md)
+[中文](README-zh.md)
 
 `get` is a compact command-line binary tool that calls a Large Language Model (LLM) via natural language to generate shell commands, then executes them on your device to retrieve any information you need.
 
@@ -139,9 +139,13 @@ get set command-pattern ""     # Disable pattern filtering
 
 ### Cache
 
-`get` uses a deferred-decision caching mechanism. Queries are not cached on first execution. Only when a query is repeated (or `--cache` is explicitly passed) does `get` invoke the LLM to determine the optimal caching strategy. Five strategies are supported: `GLOBAL_COMMAND` (cache the command globally, re-execute on hit), `GLOBAL_RESULT` (cache the output globally, return directly), `CONTEXT_COMMAND` (cache the command for the current directory context, re-execute on hit), `CONTEXT_RESULT` (cache the output for the current directory context, return directly), or `NOCACHE` (do not cache).
+`get` uses a deferred-decision caching mechanism. Queries are not cached on first execution. Only when a query is repeated (or `--cache` is explicitly passed) does `get` invoke the LLM to determine the optimal caching strategy. During this decision step, `get` shows `checking whether to cache...` as progress text (when process output is not hidden). Five strategies are supported: `GLOBAL_COMMAND` (cache the command globally, re-execute on hit), `GLOBAL_RESULT` (cache the output globally, return directly), `CONTEXT_COMMAND` (cache the command for the current directory context, re-execute on hit), `CONTEXT_RESULT` (cache the output for the current directory context, return directly), or `NOCACHE` (do not cache).
 
 Global entries work across any working directory; context entries are tied to the directory where the query was originally executed.
+
+When `hide-process` is enabled, `get` suppresses its own intermediate progress and warning text (including cache checks and external-display checks), and only prints the final result or required errors.
+
+When config `cache` is `false`, `get` emits a warning in normal process mode: `warning: cache is disabled in config; all cache logic is bypassed`.
 
 ```bash
 get cache                       # Show cache status

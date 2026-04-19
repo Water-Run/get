@@ -363,17 +363,20 @@ func implEffectiveShell(cfg: Config): string =
 ##
 ## :param cfg: The loaded configuration.
 ## :param sk: The active output style (for warnings).
+## :param hideProcess: Suppress warnings when true.
 ## :returns: The pattern string to use.
 proc implEffectivePattern(
   cfg: Config,
-  sk: StyleKind
+  sk: StyleKind,
+  hideProcess: bool
 ): string =
   if cfg.commandPattern.isSome:
     let pat = cfg.commandPattern.get
     if pat.len == 0:
-      styleWarning(sk,
-        "warning: command-pattern is empty — " &
-        "no forbidden command filtering is active")
+      if not hideProcess:
+        styleWarning(sk,
+          "warning: command-pattern is empty — " &
+          "no forbidden command filtering is active")
       return ""
     return pat
   result = DEFAULT_COMMAND_PATTERN
@@ -466,25 +469,128 @@ proc implSafetyCheck(
 # Private helpers — cache decision
 # ---------------------------------------------------------------------------
 
+## Parses a raw cache decision string into a CacheDecision.
+##
+## The parser applies a three-tier strategy:
+##
+##   Tier 1 — Exact match after stripping all non-alphanumeric
+##            characters and uppercasing (handles backslash-
+##            escaped underscores, Markdown emphasis, quotation
+##            marks, and similar formatting noise).
+##   Tier 2 — Substring match for the compound token (handles
+##            verbose responses that embed the token in a
+##            sentence).
+##   Tier 3 — Keyword-pair fallback (GLOBAL/CONTEXT +
+##            COMMAND/RESULT), applied only to short responses
+##            (≤ 30 alphanumeric characters) to avoid false
+##            positives in lengthy explanations.
+##
+## Concrete cache modes are always checked before NOCACHE so
+## that a response containing both a mode name and the word
+## "nocache" resolves in favour of caching.
+##
+## :param raw: The raw model output.
+## :returns: A parsed CacheDecision value.
+func implParseCacheDecision(
+  raw: string
+): CacheDecision =
+  # Strip every non-alphanumeric character and
+  # uppercase, so "GLOBAL\_COMMAND", `GLOBAL_COMMAND`,
+  # **GLOBAL_COMMAND**, "global-command" all collapse
+  # to "GLOBALCOMMAND".
+  var clean = newStringOfCap(raw.len)
+  for ch in raw:
+    if ch in {'A' .. 'Z', 'a' .. 'z',
+              '0' .. '9'}:
+      clean.add(ch)
+  clean = toUpperAscii(clean)
+  if clean.len == 0:
+    return cdNoCache
+
+  # --- Tier 1: exact match on stripped token ---
+  case clean
+  of "GLOBALCOMMAND":
+    return cdGlobalCommand
+  of "GLOBALRESULT":
+    return cdGlobalResult
+  of "CONTEXTCOMMAND":
+    return cdContextCommand
+  of "CONTEXTRESULT":
+    return cdContextResult
+  of "NOCACHE", "NOCACHING":
+    return cdNoCache
+  else:
+    discard
+
+  # --- Tier 2: compound-token substring ---
+  # Check CONTEXT before GLOBAL (more specific).
+  if clean.contains("CONTEXTRESULT"):
+    return cdContextResult
+  if clean.contains("CONTEXTCOMMAND"):
+    return cdContextCommand
+  if clean.contains("GLOBALRESULT"):
+    return cdGlobalResult
+  if clean.contains("GLOBALCOMMAND"):
+    return cdGlobalCommand
+
+  # --- Tier 3: keyword-pair fallback ---
+  # Only for short responses to prevent false
+  # positives when the model writes a full sentence
+  # that coincidentally contains both "context" and
+  # "result".
+  if clean.len <= 30:
+    let hasGlobal = clean.contains("GLOBAL")
+    let hasContext = clean.contains("CONTEXT")
+    let hasCommand = clean.contains("COMMAND")
+    let hasResult = clean.contains("RESULT")
+    if hasContext and hasResult:
+      return cdContextResult
+    if hasContext and hasCommand:
+      return cdContextCommand
+    if hasGlobal and hasResult:
+      return cdGlobalResult
+    if hasGlobal and hasCommand:
+      return cdGlobalCommand
+
+  # NOCACHE as substring (verbose refusal).
+  if clean.contains("NOCACHE"):
+    return cdNoCache
+
+  result = cdNoCache
+
+when defined(getTest):
+  ## Exposes cache decision parsing for test builds.
+  ##
+  ## :param raw: The raw model output.
+  ## :returns: A parsed CacheDecision value.
+  func parseCacheDecisionForTest*(raw: string): CacheDecision =
+    result = implParseCacheDecision(raw)
+
 ## Asks the LLM whether and how a query result should be
-## cached.  Returns cdNoCache on any failure so that caching
-## defaults to off.
+## cached.  Returns none on any failure so that callers can
+## distinguish "decided NOCACHE" from "decision step failed".
+## A dedicated spinner label is passed to sendLlmRequest so
+## the progress indicator shows context-specific text.
+##
+## When the LLM call fails, a warning is emitted in normal
+## process mode so that the user can diagnose connectivity
+## or configuration issues affecting the cache pipeline.
 ##
 ## :param query: The original user query.
-## :param command: The final command.
+## :param command: The final command, or empty for plain text.
 ## :param output: The full output.
 ## :param cfg: The loaded configuration.
 ## :param key: The API key.
-## :param rounds: Number of agent rounds used.
-## :returns: The cache decision.
+## :param sk: The active output style.
+## :returns: The cache decision, or none on failure.
 proc implCacheDecision(
   query: string,
   command: string,
   output: string,
   cfg: Config,
   key: string,
-  rounds: int = 1
-): CacheDecision =
+  sk: StyleKind
+): Option[CacheDecision] =
   try:
     let preview =
       if output.len > CACHE_CHECK_PREVIEW_LEN:
@@ -493,11 +599,11 @@ proc implCacheDecision(
       else:
         output
     let msgs = buildCacheCheckMessages(
-      query, command, preview, rounds)
+      query, command, preview)
     let req = LlmRequest(
       model: cfg.model,
       messages: msgs,
-      maxTokens: CACHE_CHECK_MAX_TOKENS
+      maxTokens: cfg.maxToken
     )
     let resp = sendLlmRequest(
       req,
@@ -506,24 +612,18 @@ proc implCacheDecision(
       timeoutSec = (
         if cfg.timeout > 0: min(cfg.timeout, 30)
         else: 30),
-      hideProcess = true
+      hideProcess = cfg.hideProcess,
+      sk = sk,
+      spinnerLabel = "checking cache decision"
     )
-    let answer = toUpperAscii(
-      resp.content.strip())
-    if answer.contains("NOCACHE"):
-      result = cdNoCache
-    elif answer.contains("GLOBAL_RESULT"):
-      result = cdGlobalResult
-    elif answer.contains("GLOBAL_COMMAND"):
-      result = cdGlobalCommand
-    elif answer.contains("CONTEXT_RESULT"):
-      result = cdContextResult
-    elif answer.contains("CONTEXT_COMMAND"):
-      result = cdContextCommand
-    else:
-      result = cdNoCache
-  except CatchableError:
-    result = cdNoCache
+    result = some(implParseCacheDecision(
+      resp.content))
+  except CatchableError as e:
+    if not cfg.hideProcess:
+      styleWarning(sk,
+        fmt"warning: cache decision failed: " &
+        fmt"{e.msg}")
+    result = none(CacheDecision)
 
 # ---------------------------------------------------------------------------
 # Private helpers — model strength warning
@@ -542,93 +642,116 @@ proc implWarnIfWeakModel(
       not isKnownStrongModel(model):
     styleWarning(sk, MODEL_STRENGTH_WARNING)
 
-# ---------------------------------------------------------------------------
-# Private helpers — cache storage
-# ---------------------------------------------------------------------------
-
-## Persists a cache entry based on the cache decision.  Also
-## marks the query as seen.  Performs a single load-save cycle.
+## Handles the entire post-execution cache pipeline:
 ##
-## :param decision: The LLM's caching recommendation.
-## :param cc: The cache context with hash keys.
-## :param query: The user query.
-## :param command: The final command.
-## :param output: The final output.
+##   1. When caching is disabled or the context says so, do
+##      nothing.
+##   2. First-time query -> just mark as seen.
+##   3. Previously decided NOCACHE -> print remembered notice,
+##      mark seen, skip the LLM decision call entirely.
+##   4. Nothing to cache (empty command and output) -> mark seen.
+##   5. Run the cache-decision LLM call, print the result,
+##      then persist the entry (or the NOCACHE memory).
+##
+## :param cc: The cache context with hash keys and seen flag.
+## :param query: The original user query.
+## :param command: The final command, or empty for plain text.
+## :param output: The final output text.
 ## :param cfg: The loaded configuration.
+## :param key: The API key.
 ## :param sk: The active output style.
-proc implStoreCache(
-  decision: CacheDecision,
+proc implHandleCacheOutcome(
   cc: CacheContext,
   query: string,
   command: string,
   output: string,
   cfg: Config,
+  key: string,
   sk: StyleKind
 ) =
+  if not cc.useCache:
+    return
   var store = loadCache()
+  # Case 1: first time seeing this query.
+  if not cc.wasSeen:
+    markSeen(store, cc.queryHash,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+    return
+  # Case 2: query was already decided as NOCACHE.
+  if isNoCacheDecided(store, cc.queryHash,
+      cfg.cacheExpiry):
+    if not cfg.hideProcess:
+      styleProgress(sk,
+        "cache decision: nocache (remembered)")
+    markSeen(store, cc.queryHash,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+    return
+  # Case 3: nothing worth deciding on.
+  if command.len == 0 and output.len == 0:
+    markSeen(store, cc.queryHash,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+    return
+  # Case 4: invoke the LLM decision.
+  let decisionOpt = implCacheDecision(
+    query, command, output, cfg, key, sk)
+  if decisionOpt.isNone:
+    if not cfg.hideProcess:
+      styleProgress(sk,
+        "cache decision: failed (skipped)")
+    markSeen(store, cc.queryHash,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+    saveCache(store)
+    return
+  let decision = decisionOpt.get
+  if not cfg.hideProcess:
+    let label = case decision
+      of cdGlobalCommand:
+        "global-command (command cached)"
+      of cdGlobalResult:
+        "global-result (output cached)"
+      of cdContextCommand:
+        "context-command (command cached)"
+      of cdContextResult:
+        "context-result (output cached)"
+      of cdNoCache:
+        "nocache (remembered, will skip next time)"
+    styleProgress(sk, "cache decision: " & label)
+  let ts = getTime().toUnix()
   case decision
   of cdGlobalResult:
-    let entry = CacheEntry(
-      hash: cc.globalHash,
-      scope: csGlobal,
-      cacheMode: cmResult,
-      query: query,
-      command: command,
-      output: output,
-      timestamp: getTime().toUnix())
-    addCacheEntry(store, entry,
+    addCacheEntry(store, CacheEntry(
+      hash: cc.globalHash, scope: csGlobal,
+      cacheMode: cmResult, query: query,
+      command: command, output: output,
+      timestamp: ts),
       cfg.cacheMaxEntries, cfg.cacheExpiry)
   of cdGlobalCommand:
-    let entry = CacheEntry(
-      hash: cc.globalHash,
-      scope: csGlobal,
-      cacheMode: cmCommand,
-      query: query,
-      command: command,
-      output: "",
-      timestamp: getTime().toUnix())
-    addCacheEntry(store, entry,
+    addCacheEntry(store, CacheEntry(
+      hash: cc.globalHash, scope: csGlobal,
+      cacheMode: cmCommand, query: query,
+      command: command, output: "",
+      timestamp: ts),
       cfg.cacheMaxEntries, cfg.cacheExpiry)
   of cdContextResult:
-    let entry = CacheEntry(
-      hash: cc.contextHash,
-      scope: csContext,
-      cacheMode: cmResult,
-      query: query,
-      command: command,
-      output: output,
-      timestamp: getTime().toUnix())
-    addCacheEntry(store, entry,
+    addCacheEntry(store, CacheEntry(
+      hash: cc.contextHash, scope: csContext,
+      cacheMode: cmResult, query: query,
+      command: command, output: output,
+      timestamp: ts),
       cfg.cacheMaxEntries, cfg.cacheExpiry)
   of cdContextCommand:
-    let entry = CacheEntry(
-      hash: cc.contextHash,
-      scope: csContext,
-      cacheMode: cmCommand,
-      query: query,
-      command: command,
-      output: "",
-      timestamp: getTime().toUnix())
-    addCacheEntry(store, entry,
+    addCacheEntry(store, CacheEntry(
+      hash: cc.contextHash, scope: csContext,
+      cacheMode: cmCommand, query: query,
+      command: command, output: "",
+      timestamp: ts),
       cfg.cacheMaxEntries, cfg.cacheExpiry)
   of cdNoCache:
-    if not cfg.hideProcess:
-      styleProgress(sk, "(result not cached)")
-  markSeen(store, cc.queryHash,
-    cfg.cacheMaxEntries, cfg.cacheExpiry)
-  saveCache(store)
-
-## Marks the query as seen without storing a cache entry.
-## Used on first execution when the query has not been seen
-## before.
-##
-## :param cc: The cache context with the query hash.
-## :param cfg: The loaded configuration.
-proc implMarkSeenOnly(
-  cc: CacheContext,
-  cfg: Config
-) =
-  var store = loadCache()
+    markNoCacheDecided(store, cc.queryHash,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
   markSeen(store, cc.queryHash,
     cfg.cacheMaxEntries, cfg.cacheExpiry)
   saveCache(store)
@@ -663,7 +786,8 @@ proc implInstanceFlow(
   effectivePattern: string,
   cc: CacheContext
 ) =
-  styleSeparator(sk, DIV_THIN)
+  if not cfg.hideProcess:
+    styleSeparator(sk, DIV_THIN)
   let patternOpt =
     if effectivePattern.len > 0:
       some(effectivePattern)
@@ -676,17 +800,12 @@ proc implInstanceFlow(
 
   let cmd = extractCodeBlock(resp.content)
   if cmd.isNone:
-    styleSeparator(sk, DIV_SECTION)
+    if not cfg.hideProcess:
+      styleSeparator(sk, DIV_SECTION)
     styleResult(sk, resp.content, binDir,
       extDisplay, false)
-    if cc.useCache:
-      if cc.wasSeen:
-        let decision = implCacheDecision(
-          query, "", resp.content, cfg, key, 1)
-        implStoreCache(decision, cc, query,
-          "", resp.content, cfg, sk)
-      else:
-        implMarkSeenOnly(cc, cfg)
+    implHandleCacheOutcome(cc, query, "",
+      resp.content, cfg, key, sk)
     if cfg.log:
       logExecution(query, "(none)",
         resp.content, 0, cfg.logMaxEntries)
@@ -706,7 +825,8 @@ proc implInstanceFlow(
   let execRes = executeCommand(
     command, shell, info.binDir)
 
-  styleSeparator(sk, DIV_SECTION)
+  if not cfg.hideProcess:
+    styleSeparator(sk, DIV_SECTION)
   var finalOutput = execRes.output.strip()
   if finalOutput.len > 0:
     styleResult(sk, finalOutput, info.binDir,
@@ -717,15 +837,8 @@ proc implInstanceFlow(
       fmt"{execRes.exitCode}"
     styleError(sk, finalOutput)
 
-  if cc.useCache:
-    if cc.wasSeen and
-        (finalOutput.len > 0 or command.len > 0):
-      let decision = implCacheDecision(
-        query, command, finalOutput, cfg, key, 1)
-      implStoreCache(decision, cc, query,
-        command, finalOutput, cfg, sk)
-    else:
-      implMarkSeenOnly(cc, cfg)
+  implHandleCacheOutcome(cc, query, command,
+    finalOutput, cfg, key, sk)
 
   if cfg.log:
     logExecution(query, command,
@@ -859,7 +972,8 @@ proc implAgentFlow(
       lastExitCode = execRes.exitCode
       finalOutput = execRes.output.strip()
 
-      styleSeparator(sk, DIV_SECTION)
+      if not cfg.hideProcess:
+        styleSeparator(sk, DIV_SECTION)
       if finalOutput.len > 0:
         styleResult(sk, finalOutput, info.binDir,
           extDisplay, false)
@@ -900,7 +1014,8 @@ proc implAgentFlow(
         finalOutput =
           fmt"command exited with code " &
           fmt"{execRes.exitCode}"
-        styleSeparator(sk, DIV_SECTION)
+        if not cfg.hideProcess:
+          styleSeparator(sk, DIV_SECTION)
         styleError(sk, finalOutput)
       else:
         if not cfg.hideProcess:
@@ -910,7 +1025,8 @@ proc implAgentFlow(
         let interpretResp = implLlmCall(
           interpretMsgs, cfg, key, sk)
         finalOutput = interpretResp.content
-        styleSeparator(sk, DIV_SECTION)
+        if not cfg.hideProcess:
+          styleSeparator(sk, DIV_SECTION)
         styleResult(sk, finalOutput, info.binDir,
           extDisplay, true)
 
@@ -927,7 +1043,8 @@ proc implAgentFlow(
       lastCommand = ""
       lastExitCode = 0
 
-      styleSeparator(sk, DIV_SECTION)
+      if not cfg.hideProcess:
+        styleSeparator(sk, DIV_SECTION)
       styleResult(sk, finalOutput, info.binDir,
         extDisplay, false)
 
@@ -945,17 +1062,8 @@ proc implAgentFlow(
       styleError(sk, finalOutput)
 
   # Cache decision (deferred).
-  if cc.useCache:
-    if cc.wasSeen and
-        (finalOutput.len > 0 or
-         lastCommand.len > 0):
-      let decision = implCacheDecision(
-        query, lastCommand, finalOutput, cfg,
-        key, roundsUsed)
-      implStoreCache(decision, cc, query,
-        lastCommand, finalOutput, cfg, sk)
-    else:
-      implMarkSeenOnly(cc, cfg)
+  implHandleCacheOutcome(cc, query, lastCommand,
+    finalOutput, cfg, key, sk)
 
   if lastExitCode != 0:
     quit(lastExitCode)
@@ -1231,13 +1339,15 @@ proc implHandleQuery(
   let binDir = getBundledBinDir()
   let extDisplay = cfg.externalDisplay
 
-  styleExternalDisplayCheck(sk, extDisplay, binDir)
-  implWarnIfWeakModel(cfg.model, sk)
+  if not cfg.hideProcess:
+    styleExternalDisplayCheck(
+      sk, extDisplay, binDir)
+    implWarnIfWeakModel(cfg.model, sk)
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
   let effectivePattern = implEffectivePattern(
-    cfg, sk)
+    cfg, sk, cfg.hideProcess)
 
   # Build cache context.  When cache is disabled, all fields
   # remain at zero/false and no cache logic is executed.
@@ -1245,6 +1355,10 @@ proc implHandleQuery(
   let useCache = cfg.cache and (not noCache)
   let forceCache =
     ov.forceCache.isSome and ov.forceCache.get
+  if (not cfg.cache) and (not cfg.hideProcess):
+    styleWarning(sk,
+      "warning: cache is disabled in config; " &
+      "all cache logic is bypassed")
   var cc = CacheContext(
     useCache: useCache,
     wasSeen: false,
@@ -1336,9 +1450,11 @@ proc implHandleQuery(
 proc implMain() =
   initAnsi()
 
+  let cfgForWarn = loadConfig()
+
   let envWarning = checkEnvironment()
-  if envWarning.len > 0:
-    let cfgForWarn = loadConfig()
+  if envWarning.len > 0 and
+      not cfgForWarn.hideProcess:
     styleWarning(
       toStyleKind(cfgForWarn.vivid), envWarning)
 

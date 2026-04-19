@@ -18,4 +18,4 @@ requires "regex >= 0.25.0"
 # Tasks
 
 task test, "Run all tests":
-  exec "nimble c -r --path:src test.nim"
+  exec "nimble c -r -d:getTest --path:src test.nim"

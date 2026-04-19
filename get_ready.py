@@ -459,17 +459,140 @@ def run_get(binary: Path, *args: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def detect_current_shell() -> "str | None":
-    if IS_LINUX:
-        shell_path = os.environ.get("SHELL", "")
-        if shell_path:
-            name = Path(shell_path).name.lower()
-            if name in ("bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh"):
+# Only these shells are auto-detected. Anything else -> return None ->
+# configure_shell() keeps the built-in default and makes no changes.
+_LINUX_SHELLS = ("bash", "zsh", "fish")
+_WINDOWS_SHELLS = ("powershell", "pwsh", "cmd")
+
+
+def _normalize_name(raw: str, allowed: tuple) -> "str | None":
+    """Map a raw process/executable name to an allowed shell identifier."""
+    if not raw:
+        return None
+    name = Path(raw.strip()).name.lower()
+    # Strip leading dash from login shells, e.g. "-bash"
+    name = name.lstrip("-")
+    # Strip Windows .exe suffix
+    if name.endswith(".exe"):
+        name = name[:-4]
+    # Handle version-suffixed names, e.g. "bash-5.2"
+    base = name.split("-", 1)[0].split(".", 1)[0]
+    for known in allowed:
+        if name == known or base == known:
+            return known
+    return None
+
+
+def _linux_shell_from_parent() -> "str | None":
+    """Read /proc/<ppid>/comm to identify the running interactive shell."""
+    try:
+        ppid = os.getppid()
+        comm = Path(f"/proc/{ppid}/comm")
+        if comm.exists():
+            name = _normalize_name(comm.read_text(), _LINUX_SHELLS)
+            if name:
                 return name
-    elif IS_WINDOWS:
-        if os.environ.get("PSModulePath"):
-            return "powershell"
+        exe = Path(f"/proc/{ppid}/exe")
+        if exe.exists():
+            name = _normalize_name(os.readlink(exe), _LINUX_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def _linux_shell_from_env() -> "str | None":
+    return _normalize_name(os.environ.get("SHELL", ""), _LINUX_SHELLS)
+
+
+def _linux_shell_from_passwd() -> "str | None":
+    try:
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        return _normalize_name(entry.pw_shell, _LINUX_SHELLS)
+    except Exception:
+        return None
+
+
+def _windows_shell_from_parent() -> "str | None":
+    """Identify the parent shell on Windows via WMI / tasklist."""
+    try:
+        ppid = os.getppid()
+    except Exception:
+        return None
+
+    # Try PowerShell's CIM query first -- accurate and usually available.
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={ppid}')"
+                ".Name",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            name = _normalize_name(result.stdout, _WINDOWS_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+
+    # Fallback: tasklist
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {ppid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # CSV: "image","pid",...
+            first = result.stdout.strip().splitlines()[0]
+            image = first.split(",", 1)[0].strip().strip('"')
+            name = _normalize_name(image, _WINDOWS_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def _windows_shell_from_env() -> "str | None":
+    # PowerShell sets PSModulePath; pwsh 7+ also sets POSH_* vars in some setups.
+    if os.environ.get("PSModulePath"):
+        # Can't reliably distinguish powershell vs pwsh from env alone,
+        # assume Windows PowerShell (more common as default shell).
+        return "powershell"
+    # ComSpec typically points to cmd.exe when running inside cmd.
+    comspec = os.environ.get("ComSpec", "")
+    if comspec and _normalize_name(comspec, _WINDOWS_SHELLS) == "cmd":
         return "cmd"
+    return None
+
+
+def detect_current_shell() -> "str | None":
+    """
+    Return one of the auto-detectable shells, or None if unknown.
+
+    Linux   : bash, zsh, fish
+    Windows : powershell, pwsh, cmd
+
+    Any other shell (sh, dash, ksh, tcsh, nushell, xonsh, ...) returns None
+    so that the caller keeps the built-in default and makes no changes.
+    """
+    if IS_LINUX:
+        # Parent process is the most reliable source -- correctly handles
+        # `exec fish` or stale $SHELL after `chsh` without re-login.
+        return (
+            _linux_shell_from_parent()
+            or _linux_shell_from_env()
+            or _linux_shell_from_passwd()
+        )
+    if IS_WINDOWS:
+        return (
+            _windows_shell_from_parent()
+            or _windows_shell_from_env()
+        )
     return None
 
 # ---------------------------------------------------------------------------
@@ -599,6 +722,11 @@ def configure_advanced(binary: Path) -> None:
         "Cache may causes occasional issues."
     )
     info("Clear cache with: get cache --clean")
+    cache_enabled = ask_yes_no("Enable cache?", default="y")
+    step(f"Running: get set cache {str(cache_enabled).lower()}")
+    if run_get(binary, "set", "cache", str(cache_enabled).lower()):
+        good(f"cache = {str(cache_enabled).lower()}")
+    print()
 
     # vivid (default: true)
     info(

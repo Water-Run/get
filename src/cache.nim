@@ -81,11 +81,20 @@ type
     queryHash*: string ## MD5 of the query text.
     timestamp*: int64  ## Unix epoch seconds.
 
+## Records that a query has been evaluated by the cache
+## decision LLM and explicitly classified as NOCACHE, so that
+## subsequent executions can skip the decision call entirely.
+type
+  NoCacheEntry* = object
+    queryHash*: string ## MD5 of the query text.
+    timestamp*: int64  ## Unix epoch seconds.
+
 ## In-memory representation of the cache file.
 type
   CacheStore* = object
-    entries*: seq[CacheEntry] ## Cached results.
-    seen*: seq[SeenEntry]     ## Seen-query tracker.
+    entries*: seq[CacheEntry]    ## Cached results.
+    seen*: seq[SeenEntry]        ## Seen-query tracker.
+    nocache*: seq[NoCacheEntry]  ## NOCACHE decisions.
 
 ## Groups the cache-related state that the main dispatcher
 ## passes into the instance and agent flow functions.
@@ -253,7 +262,9 @@ proc computeContextHash*(
 ## when the file does not exist or cannot be parsed.  Old-
 ## format files (top-level JSON Array) are migrated
 ## transparently: entries are assigned csContext scope and
-## cmResult mode.
+## cmResult mode; seen and nocache are left empty.  The new
+## object format includes "entries", "seen", and "nocache"
+## arrays.
 ##
 ## :returns: The loaded cache store.
 ##
@@ -263,7 +274,8 @@ proc computeContextHash*(
 proc loadCache*(): CacheStore =
   let path = getCacheFilePath()
   if not fileExists(path):
-    return CacheStore(entries: @[], seen: @[])
+    return CacheStore(
+      entries: @[], seen: @[], nocache: @[])
   try:
     let content = readFile(path)
     let node = parseJson(content)
@@ -285,10 +297,12 @@ proc loadCache*(): CacheStore =
         if entry.hash.len > 0:
           entries.add(entry)
       return CacheStore(
-        entries: entries, seen: @[])
+        entries: entries, seen: @[], nocache: @[])
     if node.kind != JObject:
-      return CacheStore(entries: @[], seen: @[])
-    # New format: { "entries": [...], "seen": [...] }
+      return CacheStore(
+        entries: @[], seen: @[], nocache: @[])
+    # New format: { "entries": [...], "seen": [...],
+    #               "nocache": [...] }
     var entries: seq[CacheEntry] = @[]
     let eNode = node{"entries"}
     if not eNode.isNil and eNode.kind == JArray:
@@ -319,13 +333,28 @@ proc loadCache*(): CacheStore =
               0).int64)
         if se.queryHash.len > 0:
           seen.add(se)
+    var nocache: seq[NoCacheEntry] = @[]
+    let nNode = node{"nocache"}
+    if not nNode.isNil and nNode.kind == JArray:
+      for item in nNode:
+        let ne = NoCacheEntry(
+          queryHash:
+            item{"queryHash"}.getStr(""),
+          timestamp:
+            item{"timestamp"}.getBiggestInt(
+              0).int64)
+        if ne.queryHash.len > 0:
+          nocache.add(ne)
     result = CacheStore(
-      entries: entries, seen: seen)
+      entries: entries,
+      seen: seen,
+      nocache: nocache)
   except JsonParsingError, IOError:
-    result = CacheStore(entries: @[], seen: @[])
+    result = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
 
 ## Writes the cache store to disk as a JSON object with
-## "entries" and "seen" arrays.
+## "entries", "seen", and "nocache" arrays.
 ##
 ## :param store: The cache store to persist.
 ##
@@ -349,9 +378,15 @@ proc saveCache*(store: CacheStore) =
     sArr.add(%*{
       "queryHash": s.queryHash,
       "timestamp": s.timestamp})
+  var nArr = newJArray()
+  for n in store.nocache:
+    nArr.add(%*{
+      "queryHash": n.queryHash,
+      "timestamp": n.timestamp})
   let root = %*{
     "entries": eArr,
-    "seen":    sArr}
+    "seen":    sArr,
+    "nocache": nArr}
   try:
     writeFile(path, pretty(root, 2) & "\n")
   except IOError:
@@ -426,8 +461,75 @@ proc markSeen*(
     kept = kept[kept.len - maxEntries .. ^1]
   store.seen = kept
 
+## Checks whether a query has been explicitly decided as
+## NOCACHE by a prior cache-decision LLM call.  A hit on this
+## predicate allows callers to skip the decision step.
+##
+## :param store: The loaded cache store.
+## :param queryHash: The query-text hash to check.
+## :param expiryDays: Maximum age in days (0 = never expire).
+## :returns: true when the query has a live NOCACHE decision.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     let store = CacheStore(entries: @[], seen: @[],
+##                            nocache: @[])
+##     assert not isNoCacheDecided(store, "abc", 30)
+proc isNoCacheDecided*(
+  store: CacheStore,
+  queryHash: string,
+  expiryDays: int
+): bool =
+  let now = epochTime().int64
+  for n in store.nocache:
+    if n.queryHash == queryHash:
+      if expiryDays <= 0:
+        return true
+      let maxAge = expiryDays.int64 * 86400'i64
+      if (now - n.timestamp) <= maxAge:
+        return true
+      else:
+        return false
+  result = false
+
+## Records a query as explicitly decided to be not cached.
+## Replaces any existing entry for the same hash, enforces the
+## expiry window, and caps the list at maxEntries.
+##
+## :param store: The cache store to mutate.
+## :param queryHash: The query-text hash to record.
+## :param maxEntries: Maximum nocache entries (0 = unlimited).
+## :param expiryDays: Expiry in days (0 = no purge).
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard
+proc markNoCacheDecided*(
+  store: var CacheStore,
+  queryHash: string,
+  maxEntries: int,
+  expiryDays: int
+) =
+  let now = epochTime().int64
+  var kept: seq[NoCacheEntry] = @[]
+  for n in store.nocache:
+    if n.queryHash != queryHash:
+      kept.add(n)
+  kept.add(NoCacheEntry(
+    queryHash: queryHash, timestamp: now))
+  if expiryDays > 0:
+    let maxAge = expiryDays.int64 * 86400'i64
+    var fresh: seq[NoCacheEntry] = @[]
+    for n in kept:
+      if (now - n.timestamp) <= maxAge:
+        fresh.add(n)
+    kept = fresh
+  if maxEntries > 0 and kept.len > maxEntries:
+    kept = kept[kept.len - maxEntries .. ^1]
+  store.nocache = kept
+
 # ---------------------------------------------------------------------------
-# Private helpers — seen removal
+# Private helpers — seen/nocache removal
 # ---------------------------------------------------------------------------
 
 ## Removes all seen entries matching a query hash.
@@ -443,6 +545,20 @@ proc implRemoveSeen(
     if s.queryHash != queryHash:
       kept.add(s)
   store.seen = kept
+
+## Removes all nocache-decision entries matching a query hash.
+##
+## :param store: The cache store to mutate.
+## :param queryHash: The hash to remove.
+proc implRemoveNoCache(
+  store: var CacheStore,
+  queryHash: string
+) =
+  var kept: seq[NoCacheEntry] = @[]
+  for n in store.nocache:
+    if n.queryHash != queryHash:
+      kept.add(n)
+  store.nocache = kept
 
 # ---------------------------------------------------------------------------
 # Public API — lookup
@@ -571,6 +687,7 @@ proc unsetCacheEntries*(
   store.entries = kept
   let qh = computeQueryHash(query)
   implRemoveSeen(store, qh)
+  implRemoveNoCache(store, qh)
   result = removed
 
 # ---------------------------------------------------------------------------
@@ -589,6 +706,7 @@ proc cleanCache*(): int =
   result = store.entries.len
   store.entries = @[]
   store.seen = @[]
+  store.nocache = @[]
   saveCache(store)
 
 ## Removes cache entries matching a query and persists.
@@ -652,6 +770,8 @@ proc displayCacheInfo*(
     $crCount)
   styleKeyValue(sk, "seen entries",
     $store.seen.len)
+  styleKeyValue(sk, "nocache decisions",
+    $store.nocache.len)
   styleKeyValue(sk, "max entries",
     formatIntOrDisable(maxEntries))
   let expiryStr =
