@@ -640,41 +640,80 @@ is emitted.
 .\"
 .\" ====================================================================
 .SH CACHING
-Query results are cached keyed by the MD5 digest of the following
-fields joined by
-.BR | :
-query text (lowercased and stripped), current working directory,
-shell, model, instance flag, system prompt (if set), command pattern
-(if set), host OS, and CPU architecture.
-.PP
-Before storing a new entry,
 .B get
-sends a lightweight LLM probe (timeout capped at 30 s, max 32 tokens)
-to choose the caching strategy:
+uses a deferred-decision caching mechanism.
+Queries are
+.B not cached on first execution.
+The first run merely records the query in a lightweight "seen" set.
+Only when the same query is executed a second time (or when the
+.B --cache
+flag is explicitly passed) does
+.B get
+invoke the LLM to determine the optimal caching strategy.
+.PP
+Five caching strategies are supported:
 .TP
-.B RESULT
-Output is stable (e.g.\& system version, project structure, static
-configuration).
-The final output is stored and returned directly on cache hits.
+.B GLOBAL_COMMAND
+The command works in any directory; the output changes over time.
+Only the command is cached globally.
+On a hit the command is re-executed through the full safety pipeline
+to produce fresh output.
 .TP
-.B COMMAND
-Command is reusable but output is volatile (e.g.\& current time, CPU
-usage, running processes).
-Only the command is stored; on a hit it is re-executed through the
-full safety pipeline to produce fresh output.
+.B GLOBAL_RESULT
+The answer is universally stable (e.g.& OS name, command syntax).
+The output is cached globally and returned directly on a hit.
+.TP
+.B CONTEXT_COMMAND
+The command depends on the current working directory; the output may
+change.
+Only the command is cached for this directory context.
+On a hit it is re-executed.
+.TP
+.B CONTEXT_RESULT
+The result is stable within the same working directory (e.g.&
+directory name, static config file content).
+The output is cached for this context and returned directly.
 .TP
 .B NOCACHE
 Neither command nor output is cached.
 .PP
+Three hash levels are used.
+A
+.I query hash
+(MD5 of the lowercased query text) tracks the "seen" set.
+A
+.I global hash
+(query + shell + model + flags + OS + arch, without the working
+directory) keys global entries.
+A
+.I context hash
+(global hash fields plus the working directory) keys context entries.
+.PP
+On a cache lookup the four possible hit types are checked in
+priority order:
+context result (most precise, fastest),
+global result,
+context command,
+global command.
+.PP
+When the configuration option
+.B cache
+is set to
+.IR false ,
+all caching logic is completely disabled, including seen tracking.
+.PP
 Cache behaviour is controlled by
 .BR cache ,
-.BR cache\-expiry ,
+.BR cache-expiry ,
 and
-.BR cache\-max\-entries .
+.BR cache-max-entries .
 Use
-.B \-\-no\-cache
+.B --no-cache
 to bypass the cache for a single query.
-.\"
+Use
+.B --cache
+to force the caching pipeline for a single query (triggers the LLM
+decision immediately, without waiting for a second execution).
 .\" ====================================================================
 .SH LOGGING
 Each query execution is appended to the log file in timestamped lines

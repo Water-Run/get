@@ -524,65 +524,135 @@ suite "setConfigOption":
     saveConfig(defaultConfig())
 
 # ---------------------------------------------------------------------------
-# cache tests
+# cache — hash tests
 # ---------------------------------------------------------------------------
 
-suite "cache":
-  ## Tests for hash computation, cache persistence, lookup,
-  ## eviction, cache modes, and management commands.
+suite "cache hashes":
+  ## Tests for the three-level hash computation.
 
-  test "computeCacheHash is deterministic":
-    let h1 = computeCacheHash(
-      "test query", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    let h2 = computeCacheHash(
-      "test query", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
+  test "computeQueryHash is deterministic":
+    let h1 = computeQueryHash("test query")
+    let h2 = computeQueryHash("test query")
     check h1 == h2
     check h1.len == 32
 
-  test "computeCacheHash differs for queries":
-    let h1 = computeCacheHash(
-      "query one", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    let h2 = computeCacheHash(
-      "query two", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    check h1 != h2
-
-  test "computeCacheHash differs for cwd":
-    let h1 = computeCacheHash(
-      "test", "/home", "bash", "gpt",
-      false, none(string), none(string))
-    let h2 = computeCacheHash(
-      "test", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    check h1 != h2
-
-  test "computeCacheHash differs for instance":
-    let h1 = computeCacheHash(
-      "test", "/tmp", "bash", "gpt",
-      true, none(string), none(string))
-    let h2 = computeCacheHash(
-      "test", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    check h1 != h2
-
-  test "computeCacheHash normalises query case":
-    let h1 = computeCacheHash(
-      "Test Query", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
-    let h2 = computeCacheHash(
-      "test query", "/tmp", "bash", "gpt",
-      false, none(string), none(string))
+  test "computeQueryHash normalises case":
+    let h1 = computeQueryHash("Test Query")
+    let h2 = computeQueryHash("test query")
     check h1 == h2
 
-  test "save and load cache round-trip cmResult":
-    var store = CacheStore(entries: @[])
+  test "computeQueryHash differs for queries":
+    let h1 = computeQueryHash("query one")
+    let h2 = computeQueryHash("query two")
+    check h1 != h2
+
+  test "computeGlobalHash is deterministic":
+    let h1 = computeGlobalHash("test", "bash",
+      "gpt", false, none(string), none(string))
+    let h2 = computeGlobalHash("test", "bash",
+      "gpt", false, none(string), none(string))
+    check h1 == h2
+    check h1.len == 32
+
+  test "computeGlobalHash differs for model":
+    let h1 = computeGlobalHash("test", "bash",
+      "gpt-a", false, none(string), none(string))
+    let h2 = computeGlobalHash("test", "bash",
+      "gpt-b", false, none(string), none(string))
+    check h1 != h2
+
+  test "computeContextHash includes cwd":
+    let h1 = computeContextHash("test", "/home",
+      "bash", "gpt", false,
+      none(string), none(string))
+    let h2 = computeContextHash("test", "/tmp",
+      "bash", "gpt", false,
+      none(string), none(string))
+    check h1 != h2
+
+  test "computeContextHash differs from global":
+    let gh = computeGlobalHash("test", "bash",
+      "gpt", false, none(string), none(string))
+    let ch = computeContextHash("test", "/tmp",
+      "bash", "gpt", false,
+      none(string), none(string))
+    check gh != ch
+
+  test "computeContextHash normalises query":
+    let h1 = computeContextHash("Test", "/tmp",
+      "bash", "gpt", false,
+      none(string), none(string))
+    let h2 = computeContextHash("test", "/tmp",
+      "bash", "gpt", false,
+      none(string), none(string))
+    check h1 == h2
+
+  test "computeContextHash differs for instance":
+    let h1 = computeContextHash("test", "/tmp",
+      "bash", "gpt", true,
+      none(string), none(string))
+    let h2 = computeContextHash("test", "/tmp",
+      "bash", "gpt", false,
+      none(string), none(string))
+    check h1 != h2
+
+# ---------------------------------------------------------------------------
+# cache — seen tracking tests
+# ---------------------------------------------------------------------------
+
+suite "cache seen":
+  ## Tests for the deferred-decision seen mechanism.
+
+  test "isSeen returns false for empty store":
+    let store = CacheStore(
+      entries: @[], seen: @[])
+    check not isSeen(store, "abc", 30)
+
+  test "markSeen then isSeen returns true":
+    var store = CacheStore(
+      entries: @[], seen: @[])
+    markSeen(store, "abc", 1000, 30)
+    check isSeen(store, "abc", 30)
+
+  test "isSeen returns false when expired":
+    let old = epochTime().int64 - (31 * 86400)
+    let store = CacheStore(
+      entries: @[],
+      seen: @[SeenEntry(
+        queryHash: "old", timestamp: old)])
+    check not isSeen(store, "old", 30)
+
+  test "markSeen replaces existing entry":
+    var store = CacheStore(
+      entries: @[],
+      seen: @[SeenEntry(
+        queryHash: "dup", timestamp: 100)])
+    markSeen(store, "dup", 1000, 30)
+    check store.seen.len == 1
+    check store.seen[0].timestamp > 100
+
+  test "markSeen enforces max entries":
+    var store = CacheStore(
+      entries: @[], seen: @[])
+    for i in 0 ..< 5:
+      markSeen(store, fmt"h{i}", 3, 0)
+    check store.seen.len <= 3
+
+# ---------------------------------------------------------------------------
+# cache — persistence and lookup tests
+# ---------------------------------------------------------------------------
+
+suite "cache persistence":
+  ## Tests for cache save, load, lookup, and management.
+
+  test "save and load round-trip context result":
+    var store = CacheStore(
+      entries: @[], seen: @[])
     let entry = CacheEntry(
-      hash: "abc123", query: "test query",
-      command: "echo hello", output: "hello",
+      hash: "ctx1", scope: csContext,
       cacheMode: cmResult,
+      query: "test query",
+      command: "echo hello", output: "hello",
       timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     saveCache(store)
@@ -590,135 +660,229 @@ suite "cache":
     check loaded.entries.len >= 1
     var found = false
     for e in loaded.entries:
-      if e.hash == "abc123":
-        check e.query == "test query"
-        check e.command == "echo hello"
-        check e.output == "hello"
+      if e.hash == "ctx1":
+        check e.scope == csContext
         check e.cacheMode == cmResult
+        check e.output == "hello"
         found = true
     check found
     discard cleanCache()
 
-  test "save and load cache round-trip cmCommand":
-    var store = CacheStore(entries: @[])
+  test "save and load round-trip global command":
+    var store = CacheStore(
+      entries: @[], seen: @[])
     let entry = CacheEntry(
-      hash: "cmd456", query: "cpu usage",
-      command: "top -bn1", output: "",
+      hash: "glb1", scope: csGlobal,
       cacheMode: cmCommand,
+      query: "disk space",
+      command: "df -h", output: "",
       timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     saveCache(store)
     let loaded = loadCache()
     var found = false
     for e in loaded.entries:
-      if e.hash == "cmd456":
+      if e.hash == "glb1":
+        check e.scope == csGlobal
         check e.cacheMode == cmCommand
-        check e.command == "top -bn1"
-        check e.output == ""
         found = true
     check found
     discard cleanCache()
 
-  test "lookupCache returns entry when fresh":
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "fresh1", query: "q",
-        command: "cmd", output: "out",
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix())])
-    let hit = lookupCache(store, "fresh1", 30)
+  test "save and load preserves seen list":
+    var store = CacheStore(
+      entries: @[], seen: @[])
+    markSeen(store, "seen1", 1000, 30)
+    markSeen(store, "seen2", 1000, 30)
+    saveCache(store)
+    let loaded = loadCache()
+    check loaded.seen.len == 2
+    discard cleanCache()
+
+  test "lookupCache priority context result first":
+    let now = getTime().toUnix()
+    let store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "gh", scope: csGlobal,
+          cacheMode: cmResult,
+          query: "q", command: "c",
+          output: "global", timestamp: now),
+        CacheEntry(hash: "ch", scope: csContext,
+          cacheMode: cmResult,
+          query: "q", command: "c",
+          output: "context", timestamp: now)],
+      seen: @[])
+    let hit = lookupCache(store, "gh", "ch", 30)
     check hit.isSome
-    check hit.get.output == "out"
-    check hit.get.cacheMode == cmResult
+    check hit.get.output == "context"
+    check hit.get.scope == csContext
+
+  test "lookupCache global result over context cmd":
+    let now = getTime().toUnix()
+    let store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "gh", scope: csGlobal,
+          cacheMode: cmResult,
+          query: "q", command: "c",
+          output: "global-r", timestamp: now),
+        CacheEntry(hash: "ch", scope: csContext,
+          cacheMode: cmCommand,
+          query: "q", command: "c",
+          output: "", timestamp: now)],
+      seen: @[])
+    let hit = lookupCache(store, "gh", "ch", 30)
+    check hit.isSome
+    check hit.get.output == "global-r"
+    check hit.get.scope == csGlobal
+
+  test "lookupCache context cmd over global cmd":
+    let now = getTime().toUnix()
+    let store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "gh", scope: csGlobal,
+          cacheMode: cmCommand,
+          query: "q", command: "g-cmd",
+          output: "", timestamp: now),
+        CacheEntry(hash: "ch", scope: csContext,
+          cacheMode: cmCommand,
+          query: "q", command: "c-cmd",
+          output: "", timestamp: now)],
+      seen: @[])
+    let hit = lookupCache(store, "gh", "ch", 30)
+    check hit.isSome
+    check hit.get.command == "c-cmd"
 
   test "lookupCache returns none when expired":
     let old = getTime().toUnix() - (31 * 86400)
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "old1", query: "q",
-        command: "cmd", output: "out",
-        cacheMode: cmResult, timestamp: old)])
-    let hit = lookupCache(store, "old1", 30)
+    let store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "old", scope: csContext,
+          cacheMode: cmResult,
+          query: "q", command: "c",
+          output: "stale", timestamp: old)],
+      seen: @[])
+    let hit = lookupCache(store, "x", "old", 30)
     check hit.isNone
 
-  test "lookupCache returns none for missing hash":
-    var store = CacheStore(entries: @[])
-    let hit = lookupCache(store, "missing", 30)
+  test "lookupCache returns none for no match":
+    let store = CacheStore(
+      entries: @[], seen: @[])
+    let hit = lookupCache(
+      store, "miss", "miss", 30)
     check hit.isNone
 
-  test "addCacheEntry replaces existing hash":
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "dup", query: "old",
-        command: "old-cmd", output: "old-out",
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix() - 100)])
+  test "addCacheEntry replaces same hash+scope":
+    var store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "dup", scope: csContext,
+          cacheMode: cmResult,
+          query: "old", command: "old-cmd",
+          output: "old-out",
+          timestamp: getTime().toUnix() - 100)],
+      seen: @[])
     let entry = CacheEntry(
-      hash: "dup", query: "new",
-      command: "new-cmd", output: "new-out",
+      hash: "dup", scope: csContext,
       cacheMode: cmCommand,
+      query: "new", command: "new-cmd",
+      output: "",
       timestamp: getTime().toUnix())
     addCacheEntry(store, entry, 1000, 30)
     check store.entries.len == 1
     check store.entries[0].query == "new"
     check store.entries[0].cacheMode == cmCommand
 
+  test "addCacheEntry keeps different scope":
+    var store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "h1", scope: csGlobal,
+          cacheMode: cmResult,
+          query: "q", command: "c",
+          output: "g",
+          timestamp: getTime().toUnix())],
+      seen: @[])
+    let entry = CacheEntry(
+      hash: "h1", scope: csContext,
+      cacheMode: cmResult,
+      query: "q", command: "c",
+      output: "c",
+      timestamp: getTime().toUnix())
+    addCacheEntry(store, entry, 1000, 30)
+    check store.entries.len == 2
+
   test "addCacheEntry enforces max entries":
-    var store = CacheStore(entries: @[])
+    var store = CacheStore(
+      entries: @[], seen: @[])
     for i in 0 ..< 5:
       let e = CacheEntry(
-        hash: fmt"h{i}", query: fmt"q{i}",
-        command: "", output: "",
+        hash: fmt"h{i}", scope: csContext,
         cacheMode: cmResult,
+        query: fmt"q{i}", command: "",
+        output: "",
         timestamp:
           getTime().toUnix() - (5 - i).int64)
       addCacheEntry(store, e, 3, 30)
     check store.entries.len <= 3
 
   test "unsetCacheEntries removes matching query":
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "a1", query: "system version",
-        command: "uname -a", output: "Linux",
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix()),
-      CacheEntry(
-        hash: "b2", query: "disk usage",
-        command: "df -h", output: "50G",
-        cacheMode: cmCommand,
-        timestamp: getTime().toUnix())])
+    var store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "a1", scope: csGlobal,
+          cacheMode: cmResult,
+          query: "system version",
+          command: "uname -a", output: "Linux",
+          timestamp: getTime().toUnix()),
+        CacheEntry(hash: "b2", scope: csContext,
+          cacheMode: cmCommand,
+          query: "disk usage",
+          command: "df -h", output: "",
+          timestamp: getTime().toUnix())],
+      seen: @[
+        SeenEntry(
+          queryHash: computeQueryHash(
+            "system version"),
+          timestamp: getTime().toUnix())])
     let removed = unsetCacheEntries(
       store, "system version")
     check removed == 1
     check store.entries.len == 1
     check store.entries[0].query == "disk usage"
+    # Seen entry for that query also removed.
+    for s in store.seen:
+      check s.queryHash !=
+        computeQueryHash("system version")
 
   test "unsetCacheEntries case-insensitive":
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "ci", query: "System Version",
-        command: "", output: "",
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix())])
+    var store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "ci", scope: csContext,
+          cacheMode: cmResult,
+          query: "System Version",
+          command: "", output: "",
+          timestamp: getTime().toUnix())],
+      seen: @[])
     let removed = unsetCacheEntries(
       store, "system version")
     check removed == 1
     check store.entries.len == 0
 
-  test "cleanCache removes all entries":
-    var store = CacheStore(entries: @[
-      CacheEntry(
-        hash: "x", query: "q",
-        command: "", output: "",
-        cacheMode: cmResult,
-        timestamp: getTime().toUnix())])
+  test "cleanCache removes entries and seen":
+    var store = CacheStore(
+      entries: @[
+        CacheEntry(hash: "x", scope: csContext,
+          cacheMode: cmResult,
+          query: "q", command: "", output: "",
+          timestamp: getTime().toUnix())],
+      seen: @[
+        SeenEntry(queryHash: "s1",
+          timestamp: getTime().toUnix())])
     saveCache(store)
     let removed = cleanCache()
     check removed == 1
     let loaded = loadCache()
     check loaded.entries.len == 0
+    check loaded.seen.len == 0
 
-  test "backward compat: missing cacheMode":
+  test "backward compat: old JSON array format":
     let path = getCacheFilePath()
     let content = """[
   {
@@ -733,7 +897,9 @@ suite "cache":
     writeFile(path, content)
     let loaded = loadCache()
     check loaded.entries.len == 1
+    check loaded.entries[0].scope == csContext
     check loaded.entries[0].cacheMode == cmResult
+    check loaded.seen.len == 0
     discard cleanCache()
 
 # ---------------------------------------------------------------------------
@@ -900,8 +1066,12 @@ suite "prompt":
     let msgs = buildCacheCheckMessages(
       "cpu usage", "top -bn1", "50%", 1)
     check msgs.len == 2
-    check msgs[0].content.contains("RESULT")
-    check msgs[0].content.contains("COMMAND")
+    check msgs[0].content.contains("GLOBAL_COMMAND")
+    check msgs[0].content.contains("GLOBAL_RESULT")
+    check msgs[0].content.contains(
+      "CONTEXT_COMMAND")
+    check msgs[0].content.contains(
+      "CONTEXT_RESULT")
     check msgs[0].content.contains("NOCACHE")
 
   test "buildCacheCheckMessages multi-round note":

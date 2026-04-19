@@ -139,13 +139,15 @@ get set command-pattern ""     # Disable pattern filtering
 
 ### Cache
 
-`get` caches query output keyed by a hash of the query text and execution context. Before storing, the LLM determines the caching strategy: `RESULT` (output is stable — cache the result directly), `COMMAND` (cache only the command and re-execute on hit), or `NOCACHE` (do not cache).
+`get` uses a deferred-decision caching mechanism. Queries are not cached on first execution. Only when a query is repeated (or `--cache` is explicitly passed) does `get` invoke the LLM to determine the optimal caching strategy. Five strategies are supported: `GLOBAL_COMMAND` (cache the command globally, re-execute on hit), `GLOBAL_RESULT` (cache the output globally, return directly), `CONTEXT_COMMAND` (cache the command for the current directory context, re-execute on hit), `CONTEXT_RESULT` (cache the output for the current directory context, return directly), or `NOCACHE` (do not cache).
+
+Global entries work across any working directory; context entries are tied to the directory where the query was originally executed.
 
 ```bash
 get cache                       # Show cache status
-get cache --clean               # Clear all cache entries
+get cache --clean               # Clear all cache entries and seen records
 get cache --unset "system version"  # Remove cache entries matching the query
-get set cache false             # Disable caching
+get set cache false             # Disable caching (disables all cache logic)
 ```
 
 ### Log

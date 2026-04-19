@@ -139,13 +139,15 @@ get set command-pattern ""     # 清空，禁用模式过滤
 
 ### 缓存
 
-`get` 将查询输出缓存, 键值为查询文本和执行上下文的哈希. 存储前由 LLM 判断缓存策略: `RESULT`（输出稳定, 直接缓存结果）、`COMMAND`（只缓存命令, 命中时重新执行）、`NOCACHE`（不缓存）.
+`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询被再次执行 (或显式传入 `--cache`) 时, `get` 才会调用 LLM 判断最优缓存策略. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
+
+全局条目在任意工作目录下生效; 上下文条目仅在原始查询的目录下生效.
 
 ```bash
 get cache                     # 显示缓存状态
-get cache --clean             # 清除所有缓存条目
+get cache --clean             # 清除所有缓存条目和已见记录
 get cache --unset "系统版本"  # 移除匹配查询的缓存条目
-get set cache false           # 禁用缓存
+get set cache false           # 禁用缓存 (停用所有缓存逻辑)
 ```
 
 ### 日志

@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-18
+## :Date: 2026-04-19
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -127,10 +127,6 @@ func implBuildBaseContext(
     "outputting — check flag names, argument " &
     "order, and shell quoting.")
 
-  # Shell-specific hard rules.  Detection is case-insensitive
-  # and matches on substrings so that absolute paths or
-  # alternate spellings (``pwsh``, ``powershell.exe``) still
-  # resolve correctly.
   let shellLower = toLowerAscii(shell)
   if shellLower.contains("powershell") or
       shellLower.contains("pwsh"):
@@ -313,7 +309,7 @@ func implBuildBaseContext(
       "pattern, respond with a plain text " &
       "explanation instead.")
   result = lines.join("\n")
-  
+
 # ---------------------------------------------------------------------------
 # Public API — instance mode prompt
 # ---------------------------------------------------------------------------
@@ -488,15 +484,14 @@ func buildAgentInitMessages*(
     LlmMessage(role: "user", content: query)
   ]
 
-## Extends the conversation history with the assistant's previous
-## response and the execution result for the next agent round.
-## Includes urgency text that increases with each round.
+## Extends the conversation history with the assistant's
+## previous response and the execution result for the next
+## agent round.  Includes urgency text that increases with
+## each round.
 ##
 ## :param history: Existing conversation messages.
 ## :param assistantResponse: The LLM's raw response text.
-## :param command: The command that was actually executed (may
-##                 differ from the LLM's suggestion after
-##                 double-check revision).
+## :param command: The command that was actually executed.
 ## :param output: The captured command output.
 ## :param exitCode: The command's exit code.
 ## :param nextRound: The upcoming round number (1-based).
@@ -681,18 +676,23 @@ func buildInterpretMessages*(
 # Public API — cache-worthiness check prompt
 # ---------------------------------------------------------------------------
 
-## Builds the message list for the cache-worthiness check.  The
-## model evaluates whether the query result is stable enough to
-## cache and, if so, whether the output or just the command should
-## be cached.  Three possible responses:
-##   RESULT  — output is stable, cache for direct reuse.
-##   COMMAND — command is reusable but output volatile, cache
-##             the command for re-execution.
-##   NOCACHE — do not cache anything.
+## Builds the message list for the five-mode cache-worthiness
+## check.  The model evaluates whether the query result is
+## stable enough to cache, whether the scope is global or
+## context-bound, and whether the command or the result should
+## be stored.  Five possible responses:
+##
+##   GLOBAL_COMMAND  — command works in any directory; output
+##                     changes over time.
+##   GLOBAL_RESULT   — answer is universally stable; no
+##                     directory or time dependency.
+##   CONTEXT_COMMAND — command depends on the current
+##                     directory; output may change.
+##   CONTEXT_RESULT  — result is stable in the same directory.
+##   NOCACHE         — do not cache anything.
 ##
 ## :param query: The original user query.
-## :param command: The final command that was executed (may be
-##                 empty for direct text answers).
+## :param command: The final command that was executed.
 ## :param outputPreview: A truncated preview of the output.
 ## :param rounds: Number of agent rounds used (1 for instance).
 ## :returns: A two-element seq (system, user) of LlmMessage.
@@ -711,39 +711,56 @@ func buildCacheCheckMessages*(
   var sysLines: seq[string] = @[]
   sysLines.add(
     "Determine how this query result should be " &
-    "cached for future reuse.")
+    "cached. Reply with exactly one of: " &
+    "GLOBAL_COMMAND, GLOBAL_RESULT, " &
+    "CONTEXT_COMMAND, CONTEXT_RESULT, or " &
+    "NOCACHE.")
   sysLines.add("")
   sysLines.add(
-    "Reply with exactly one of: RESULT, COMMAND," &
-    " or NOCACHE.")
-  sysLines.add("")
-  sysLines.add(
-    "RESULT — The output is STABLE. The same " &
-    "query would produce identical or nearly " &
-    "identical output when run again in the same " &
-    "working directory. Cache the final output " &
-    "for immediate reuse. Examples: system " &
-    "version, installed software versions, " &
-    "project structure, file contents, static " &
-    "configuration, code analysis.")
-  sysLines.add("")
-  sysLines.add(
-    "COMMAND — The command is correct and " &
-    "reusable, but the output is VOLATILE and " &
+    "GLOBAL_COMMAND — The command works in ANY " &
+    "directory and does not depend on the " &
+    "current working directory, but the output " &
     "changes over time. Cache the command for " &
-    "re-execution so the LLM does not need to " &
-    "regenerate it. Examples: current time, " &
-    "CPU/memory usage, running processes, disk " &
-    "space, network status, live metrics, git " &
-    "status with uncommitted changes.")
+    "re-execution. Examples: system version " &
+    "command, disk space check, network status, " &
+    "running processes, CPU usage, installed " &
+    "package version check.")
   sysLines.add("")
   sysLines.add(
-    "NOCACHE — Neither the command nor the output" &
-    " should be cached. The query is too context-" &
-    "dependent or ephemeral for caching to be " &
-    "useful. Examples: queries about transient " &
-    "errors, ambiguous requests that may require " &
-    "different commands next time.")
+    "GLOBAL_RESULT — The answer is universally " &
+    "stable. It does not depend on the working " &
+    "directory or change over time. Cache the " &
+    "result for immediate reuse. Examples: " &
+    "how to use a specific command, what a " &
+    "concept means, static system property " &
+    "(e.g. OS name, architecture), installed " &
+    "software version.")
+  sysLines.add("")
+  sysLines.add(
+    "CONTEXT_COMMAND — The command depends on " &
+    "the current working directory (e.g. " &
+    "scans files in '.'), and the output may " &
+    "change over time. Cache the command for " &
+    "re-execution in the same directory. " &
+    "Examples: file listing, code statistics, " &
+    "git status, directory size, grep results.")
+  sysLines.add("")
+  sysLines.add(
+    "CONTEXT_RESULT — The result is stable " &
+    "within the same working directory and " &
+    "unlikely to change. Cache the result for " &
+    "direct reuse. Examples: current directory " &
+    "name, static config file content, project " &
+    "name from a manifest, source file content.")
+  sysLines.add("")
+  sysLines.add(
+    "NOCACHE — Do not cache. The query is too " &
+    "ephemeral, ambiguous, or context-dependent " &
+    "for caching to be useful. Examples: " &
+    "transient error investigation, one-off " &
+    "exploratory queries, queries whose " &
+    "commands depend on intermediate results " &
+    "from previous exploration rounds.")
   if rounds > 1:
     sysLines.add("")
     sysLines.add(

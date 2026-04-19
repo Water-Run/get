@@ -22,6 +22,13 @@
 ## Every command — whether intermediate or final — passes through
 ## all safety layers before execution: forbidden-command pattern,
 ## double-check LLM review, and optional manual confirmation.
+##
+## Caching uses a deferred-decision mechanism: the first execution
+## of a query merely marks it as "seen"; only on the second
+## execution (or when --cache is explicitly passed) does the tool
+## invoke the LLM to choose a caching strategy.  When the global
+## config option ``cache`` is false, all caching logic — including
+## seen tracking — is completely disabled.
 
 {.experimental: "strictFuncs".}
 
@@ -182,7 +189,8 @@ type
 # Private helpers — usage errors
 # ---------------------------------------------------------------------------
 
-## Raises a GetError whose message includes the standard help hint.
+## Raises a GetError whose message includes the standard help
+## hint.
 ##
 ## :param msg: A concise description of the problem.
 proc implUsageError(
@@ -407,11 +415,11 @@ proc implDoubleCheck(
   else:
     result = command
 
-## Runs all safety layers on a command: forbidden-command pattern,
-## double-check review, and manual confirmation.  Returns the
-## (possibly revised) command.  Quits with a non-zero exit code
-## if any check rejects the command, or if the user declines
-## manual confirmation.
+## Runs all safety layers on a command: forbidden-command
+## pattern, double-check review, and manual confirmation.
+## Returns the (possibly revised) command.  Quits with a
+## non-zero exit code if any check rejects the command, or
+## if the user declines manual confirmation.
 ##
 ## :param command: The raw command from the LLM.
 ## :param query: The original user query.
@@ -430,7 +438,6 @@ proc implSafetyCheck(
   sk: StyleKind,
   effectivePattern: string
 ): string =
-  # Layer 1: Forbidden command pattern.
   if effectivePattern.len > 0:
     if not validateCommandPattern(
         command, effectivePattern):
@@ -442,14 +449,12 @@ proc implSafetyCheck(
           "rejected by forbidden pattern", 1,
           cfg.logMaxEntries)
       quit(1)
-  # Layer 2: Double-check LLM review.
   var checked = command
   if cfg.doubleCheck:
     checked = implDoubleCheck(
       command, query, info, cfg, key, sk)
     if checked != command and not cfg.hideProcess:
       styleCommand(sk, "revised command", checked)
-  # Layer 3: Manual confirmation.
   if cfg.manualConfirm:
     let showCmd = cfg.hideProcess
     if not confirmExecution(checked, sk, showCmd):
@@ -461,7 +466,9 @@ proc implSafetyCheck(
 # Private helpers — cache decision
 # ---------------------------------------------------------------------------
 
-## Asks the LLM whether a query result should be cached and how.
+## Asks the LLM whether and how a query result should be
+## cached.  Returns cdNoCache on any failure so that caching
+## defaults to off.
 ##
 ## :param query: The original user query.
 ## :param command: The final command.
@@ -470,7 +477,7 @@ proc implSafetyCheck(
 ## :param key: The API key.
 ## :param rounds: Number of agent rounds used.
 ## :returns: The cache decision.
-proc implCheckShouldCache(
+proc implCacheDecision(
   query: string,
   command: string,
   output: string,
@@ -505,12 +512,18 @@ proc implCheckShouldCache(
       resp.content.strip())
     if answer.contains("NOCACHE"):
       result = cdNoCache
-    elif answer.contains("COMMAND"):
-      result = cdCommand
+    elif answer.contains("GLOBAL_RESULT"):
+      result = cdGlobalResult
+    elif answer.contains("GLOBAL_COMMAND"):
+      result = cdGlobalCommand
+    elif answer.contains("CONTEXT_RESULT"):
+      result = cdContextResult
+    elif answer.contains("CONTEXT_COMMAND"):
+      result = cdContextCommand
     else:
-      result = cdCommand
+      result = cdNoCache
   except CatchableError:
-    result = cdResult
+    result = cdNoCache
 
 # ---------------------------------------------------------------------------
 # Private helpers — model strength warning
@@ -533,10 +546,11 @@ proc implWarnIfWeakModel(
 # Private helpers — cache storage
 # ---------------------------------------------------------------------------
 
-## Persists a cache entry based on the cache decision.
+## Persists a cache entry based on the cache decision.  Also
+## marks the query as seen.  Performs a single load-save cycle.
 ##
 ## :param decision: The LLM's caching recommendation.
-## :param cacheHash: The context hash.
+## :param cc: The cache context with hash keys.
 ## :param query: The user query.
 ## :param command: The final command.
 ## :param output: The final output.
@@ -544,43 +558,80 @@ proc implWarnIfWeakModel(
 ## :param sk: The active output style.
 proc implStoreCache(
   decision: CacheDecision,
-  cacheHash: string,
+  cc: CacheContext,
   query: string,
   command: string,
   output: string,
   cfg: Config,
   sk: StyleKind
 ) =
+  var store = loadCache()
   case decision
-  of cdResult:
-    var store = loadCache()
+  of cdGlobalResult:
     let entry = CacheEntry(
-      hash: cacheHash,
+      hash: cc.globalHash,
+      scope: csGlobal,
+      cacheMode: cmResult,
       query: query,
       command: command,
       output: output,
-      cacheMode: cmResult,
-      timestamp: getTime().toUnix()
-    )
+      timestamp: getTime().toUnix())
     addCacheEntry(store, entry,
       cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
-  of cdCommand:
-    var store = loadCache()
+  of cdGlobalCommand:
     let entry = CacheEntry(
-      hash: cacheHash,
+      hash: cc.globalHash,
+      scope: csGlobal,
+      cacheMode: cmCommand,
       query: query,
       command: command,
       output: "",
-      cacheMode: cmCommand,
-      timestamp: getTime().toUnix()
-    )
+      timestamp: getTime().toUnix())
     addCacheEntry(store, entry,
       cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
+  of cdContextResult:
+    let entry = CacheEntry(
+      hash: cc.contextHash,
+      scope: csContext,
+      cacheMode: cmResult,
+      query: query,
+      command: command,
+      output: output,
+      timestamp: getTime().toUnix())
+    addCacheEntry(store, entry,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
+  of cdContextCommand:
+    let entry = CacheEntry(
+      hash: cc.contextHash,
+      scope: csContext,
+      cacheMode: cmCommand,
+      query: query,
+      command: command,
+      output: "",
+      timestamp: getTime().toUnix())
+    addCacheEntry(store, entry,
+      cfg.cacheMaxEntries, cfg.cacheExpiry)
   of cdNoCache:
     if not cfg.hideProcess:
       styleProgress(sk, "(result not cached)")
+  markSeen(store, cc.queryHash,
+    cfg.cacheMaxEntries, cfg.cacheExpiry)
+  saveCache(store)
+
+## Marks the query as seen without storing a cache entry.
+## Used on first execution when the query has not been seen
+## before.
+##
+## :param cc: The cache context with the query hash.
+## :param cfg: The loaded configuration.
+proc implMarkSeenOnly(
+  cc: CacheContext,
+  cfg: Config
+) =
+  var store = loadCache()
+  markSeen(store, cc.queryHash,
+    cfg.cacheMaxEntries, cfg.cacheExpiry)
+  saveCache(store)
 
 # ---------------------------------------------------------------------------
 # Private helpers — instance flow
@@ -599,8 +650,7 @@ proc implStoreCache(
 ## :param shell: The effective shell.
 ## :param info: System information snapshot.
 ## :param effectivePattern: Forbidden-command regex.
-## :param useCache: Whether caching is active.
-## :param cacheHash: The precomputed context hash.
+## :param cc: Cache context with hashes and seen state.
 proc implInstanceFlow(
   query: string,
   cfg: Config,
@@ -611,8 +661,7 @@ proc implInstanceFlow(
   shell: string,
   info: SysInfo,
   effectivePattern: string,
-  useCache: bool,
-  cacheHash: string
+  cc: CacheContext
 ) =
   styleSeparator(sk, DIV_THIN)
   let patternOpt =
@@ -627,15 +676,17 @@ proc implInstanceFlow(
 
   let cmd = extractCodeBlock(resp.content)
   if cmd.isNone:
-    # Direct text answer.
     styleSeparator(sk, DIV_SECTION)
     styleResult(sk, resp.content, binDir,
       extDisplay, false)
-    if useCache:
-      let decision = implCheckShouldCache(
-        query, "", resp.content, cfg, key, 1)
-      implStoreCache(decision, cacheHash, query,
-        "", resp.content, cfg, sk)
+    if cc.useCache:
+      if cc.wasSeen:
+        let decision = implCacheDecision(
+          query, "", resp.content, cfg, key, 1)
+        implStoreCache(decision, cc, query,
+          "", resp.content, cfg, sk)
+      else:
+        implMarkSeenOnly(cc, cfg)
     if cfg.log:
       logExecution(query, "(none)",
         resp.content, 0, cfg.logMaxEntries)
@@ -645,12 +696,10 @@ proc implInstanceFlow(
   if not cfg.hideProcess:
     styleCommand(sk, "command", command)
 
-  # Safety checks.
   command = implSafetyCheck(
     command, query, info, cfg, key, sk,
     effectivePattern)
 
-  # Execute.
   if not cfg.hideProcess:
     styleSeparator(sk, DIV_WARN)
     styleProgress(sk, "executing...")
@@ -668,21 +717,21 @@ proc implInstanceFlow(
       fmt"{execRes.exitCode}"
     styleError(sk, finalOutput)
 
-  # Cache.
-  if useCache and
-      (finalOutput.len > 0 or command.len > 0):
-    let decision = implCheckShouldCache(
-      query, command, finalOutput, cfg, key, 1)
-    implStoreCache(decision, cacheHash, query,
-      command, finalOutput, cfg, sk)
+  if cc.useCache:
+    if cc.wasSeen and
+        (finalOutput.len > 0 or command.len > 0):
+      let decision = implCacheDecision(
+        query, command, finalOutput, cfg, key, 1)
+      implStoreCache(decision, cc, query,
+        command, finalOutput, cfg, sk)
+    else:
+      implMarkSeenOnly(cc, cfg)
 
-  # Log.
   if cfg.log:
     logExecution(query, command,
       execRes.output, execRes.exitCode,
       cfg.logMaxEntries)
 
-  # Exit code propagation.
   if execRes.exitCode != 0:
     quit(execRes.exitCode)
 
@@ -703,8 +752,7 @@ proc implInstanceFlow(
 ## :param shell: The effective shell.
 ## :param info: System information snapshot.
 ## :param effectivePattern: Forbidden-command regex.
-## :param useCache: Whether caching is active.
-## :param cacheHash: The precomputed context hash.
+## :param cc: Cache context with hashes and seen state.
 proc implAgentFlow(
   query: string,
   cfg: Config,
@@ -715,8 +763,7 @@ proc implAgentFlow(
   shell: string,
   info: SysInfo,
   effectivePattern: string,
-  useCache: bool,
-  cacheHash: string
+  cc: CacheContext
 ) =
   let maxRounds =
     if cfg.maxRounds > 0: cfg.maxRounds
@@ -748,7 +795,6 @@ proc implAgentFlow(
       messages, cfg, key, sk)
     var parsed = extractAgentAction(resp.content)
 
-    # At max round, force CONTINUE → FINAL.
     if parsed.action == aaContinue and
         round >= maxRounds:
       parsed = (action: aaFinal,
@@ -892,24 +938,25 @@ proc implAgentFlow(
       terminated = true
       break
 
-  # Fallback when loop exhausts without termination
-  # (should not happen due to CONTINUE→FINAL forcing).
   if not terminated:
     if finalOutput.len == 0:
       finalOutput = "(no result after " &
         fmt"{roundsUsed} rounds)"
       styleError(sk, finalOutput)
 
-  # Cache decision.
-  if useCache and
-      (finalOutput.len > 0 or lastCommand.len > 0):
-    let decision = implCheckShouldCache(
-      query, lastCommand, finalOutput, cfg, key,
-      roundsUsed)
-    implStoreCache(decision, cacheHash, query,
-      lastCommand, finalOutput, cfg, sk)
+  # Cache decision (deferred).
+  if cc.useCache:
+    if cc.wasSeen and
+        (finalOutput.len > 0 or
+         lastCommand.len > 0):
+      let decision = implCacheDecision(
+        query, lastCommand, finalOutput, cfg,
+        key, roundsUsed)
+      implStoreCache(decision, cc, query,
+        lastCommand, finalOutput, cfg, sk)
+    else:
+      implMarkSeenOnly(cc, cfg)
 
-  # Exit code propagation.
   if lastExitCode != 0:
     quit(lastExitCode)
 
@@ -918,13 +965,6 @@ proc implAgentFlow(
 # ---------------------------------------------------------------------------
 
 ## Handles `get set <option> [value...]`.
-##
-## When the argument list has more than one element (i.e. the
-## user passed an explicit value, including an explicit empty
-## string such as ``get set command-pattern ""``) the
-## ``explicit`` flag is set to true.  When only the option name
-## is present (``get set command-pattern``), ``explicit`` is
-## false and options that support it restore their default.
 ##
 ## :param args: Arguments after "set".
 proc implHandleSet(args: seq[string]) =
@@ -957,7 +997,8 @@ proc implHandleConfig(args: seq[string]) =
       let key = loadKey()
       if key.isSome:
         styleKeyValue(sk, "key",
-          "set (encrypted storage, value cannot be retrieved)")
+          "set (encrypted storage, " &
+          "value cannot be retrieved)")
       else:
         styleKeyValue(sk, "key", "not set")
     of "url":
@@ -1043,7 +1084,8 @@ proc implHandleCache(args: seq[string]) =
   of "--clean":
     let removed = cleanCache()
     styleSuccess(sk,
-      fmt"cache cleared. ({removed} entries removed)")
+      fmt"cache cleared. ({removed} entries " &
+      "removed, seen list cleared)")
   of "--unset":
     if args.len < 2:
       implUsageError(
@@ -1056,10 +1098,12 @@ proc implHandleCache(args: seq[string]) =
         fmt" for ""{query}"".")
     else:
       styleInfo(sk,
-        fmt"no cache entry found for ""{query}"".")
+        fmt"no cache entry found for " &
+        "\"" & query & "\".")
   else:
     implUsageError(
-      fmt"unknown argument '{args[0]}' for 'cache'")
+      fmt"unknown argument '{args[0]}' " &
+      "for 'cache'")
 
 ## Handles `get log` and `get log --clean`.
 ##
@@ -1106,7 +1150,8 @@ proc implHandleGet(args: seq[string]) =
     styleValue(sk, APP_GITHUB)
   else:
     implUsageError(
-      fmt"unknown option '{args[0]}' for 'get get'")
+      fmt"unknown option '{args[0]}' " &
+      "for 'get get'")
 
 ## Handles `get isok`.
 proc implHandleIsOk() =
@@ -1156,8 +1201,8 @@ proc implHandleIsOk() =
 # Private helpers — query flow
 # ---------------------------------------------------------------------------
 
-## Handles a natural-language query by dispatching to instance or
-## agent flow based on configuration.
+## Handles a natural-language query by dispatching to instance
+## or agent flow based on configuration.
 ##
 ## :param query: The user's natural-language query.
 ## :param ov: Per-invocation override flags.
@@ -1194,29 +1239,54 @@ proc implHandleQuery(
   let effectivePattern = implEffectivePattern(
     cfg, sk)
 
-  # Cache lookup.
+  # Build cache context.  When cache is disabled, all fields
+  # remain at zero/false and no cache logic is executed.
   let noCache = ov.noCache
   let useCache = cfg.cache and (not noCache)
-  var cacheHash = ""
+  let forceCache =
+    ov.forceCache.isSome and ov.forceCache.get
+  var cc = CacheContext(
+    useCache: useCache,
+    wasSeen: false,
+    queryHash: "",
+    globalHash: "",
+    contextHash: "")
+
   if useCache:
-    cacheHash = computeCacheHash(
+    cc.queryHash = computeQueryHash(query)
+    cc.globalHash = computeGlobalHash(
+      query, shell, cfg.model, cfg.instance,
+      cfg.systemPrompt, cfg.commandPattern)
+    cc.contextHash = computeContextHash(
       query, cwd, shell, cfg.model,
       cfg.instance, cfg.systemPrompt,
       cfg.commandPattern)
+
     let store = loadCache()
     let hit = lookupCache(
-      store, cacheHash, cfg.cacheExpiry)
+      store, cc.globalHash, cc.contextHash,
+      cfg.cacheExpiry)
     if hit.isSome:
       case hit.get.cacheMode
       of cmResult:
         if not cfg.hideProcess:
-          styleProgress(sk, "(cached: result)")
+          let label =
+            if hit.get.scope == csGlobal:
+              "(cached: global result)"
+            else:
+              "(cached: context result)"
+          styleProgress(sk, label)
         styleResult(sk, hit.get.output,
           binDir, extDisplay)
         return
       of cmCommand:
         if not cfg.hideProcess:
-          styleProgress(sk, "(cached: command)")
+          let label =
+            if hit.get.scope == csGlobal:
+              "(cached: global command)"
+            else:
+              "(cached: context command)"
+          styleProgress(sk, label)
           styleCommand(sk, "command",
             hit.get.command)
         let execRes = executeCommand(
@@ -1237,21 +1307,26 @@ proc implHandleQuery(
           quit(execRes.exitCode)
         return
 
+    # Determine wasSeen: true when the query was previously
+    # seen or when --cache forces immediate caching.
+    cc.wasSeen =
+      isSeen(store, cc.queryHash,
+        cfg.cacheExpiry) or forceCache
+
   # Collect system information.
   if not cfg.hideProcess:
     styleProgress(sk,
       "collecting system info...")
   let info = collectSysInfo(shell)
 
-  # Dispatch to instance or agent flow.
   if cfg.instance:
     implInstanceFlow(query, cfg, key.get, sk,
       binDir, extDisplay, shell, info,
-      effectivePattern, useCache, cacheHash)
+      effectivePattern, cc)
   else:
     implAgentFlow(query, cfg, key.get, sk,
       binDir, extDisplay, shell, info,
-      effectivePattern, useCache, cacheHash)
+      effectivePattern, cc)
 
 # ---------------------------------------------------------------------------
 # Private helpers — top-level dispatcher
