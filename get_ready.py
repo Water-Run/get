@@ -587,6 +587,18 @@ def configure_advanced(binary: Path) -> None:
         if run_get(binary, "set", "system-prompt", system_prompt):
             good("system-prompt configured")
     print()
+    
+    # cache (default: true)
+    info(
+        "cache: Enable the cache system for repeated queries."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    warn(
+        "After the first execution is recorded, repeating the same query may trigger "
+        "one extra LLM request to decide whether and how to cache it. "
+        "Cache may causes occasional issues."
+    )
+    info("Clear cache with: get cache --clean")
 
     # vivid (default: true)
     info(

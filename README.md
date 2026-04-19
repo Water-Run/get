@@ -14,12 +14,12 @@ get "code structure in the current directory"
 get "latest get version at https://github.com/Water-Run/get"
 ```
 
-## Installation & Uninstallation
+## Installation
 
 Download from [GitHub Release](https://github.com/Water-Run/get/releases). After extracting, run the bundled Python installation script `get_ready.py` to automatically complete installation and PATH configuration:
 
 ```bash
-python3 get_ready.py
+python get_ready.py
 ```
 
 Follow the on-screen instructions. Once done, run `get version` to verify the installation.

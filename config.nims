@@ -1,3 +1,10 @@
+#[
+config.nims
+https://github.com/Water-Run/get
+
+update at: 2026-04-19
+]#
+
 switch("define", "ssl")
 
 when defined(release):

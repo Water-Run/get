@@ -508,7 +508,7 @@ proc implCheckShouldCache(
     elif answer.contains("COMMAND"):
       result = cdCommand
     else:
-      result = cdResult
+      result = cdCommand
   except CatchableError:
     result = cdResult
 

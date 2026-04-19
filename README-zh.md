@@ -14,12 +14,12 @@ get "当前目录下的代码结构"
 get "https://github.com/Water-Run/get 上最新的 get 版本"
 ```
 
-## 安装与卸载
+## 安装
 
 从[GitHub Release](https://github.com/Water-Run/get/releases)下载. 解压后, 运行附带 Python 安装脚本 `get_ready.py`, 自动完成安装和 PATH 配置:
 
 ```bash
-python3 get_ready.py
+python get_ready.py
 ```
 
 按照要求的指引进行. 完成后, 运行 `get version` 校验安装.  

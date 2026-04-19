@@ -35,3 +35,9 @@ desktop.ini
 !.env.example
 nimble.develop
 nimble.paths
+
+# Compiled executables
+*.exe
+!src/bin/*.exe
+/get
+/test
