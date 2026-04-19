@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-18
+## :Date: 2026-04-19
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
@@ -97,7 +97,9 @@ set options:
                        (integer or false, default: 20480)
   max-rounds         max agent loop rounds (non-instance)
                        (integer or false, default: 3)
-  command-pattern    forbidden command regex
+  command-pattern    forbidden command regex; omit value to
+                       restore the built-in default, use ""
+                       to disable filtering entirely
                        (string, default: built-in blocklist)
   system-prompt      custom system prompt
                        (string, default: empty)
@@ -152,7 +154,10 @@ examples:
   get set url https://api.openai.com/v1
   get set timeout false
   get set max-rounds 5
+  get set command-pattern
+  get set command-pattern ""
   get config --model
+  get config --command-pattern
   get cache --clean
   get log --clean"""
 
@@ -914,14 +919,22 @@ proc implAgentFlow(
 
 ## Handles `get set <option> [value...]`.
 ##
+## When the argument list has more than one element (i.e. the
+## user passed an explicit value, including an explicit empty
+## string such as ``get set command-pattern ""``) the
+## ``explicit`` flag is set to true.  When only the option name
+## is present (``get set command-pattern``), ``explicit`` is
+## false and options that support it restore their default.
+##
 ## :param args: Arguments after "set".
 proc implHandleSet(args: seq[string]) =
   if args.len == 0:
     implUsageError("missing option name for 'set'")
   let optName = args[0]
+  let explicit = args.len > 1
   let value =
     if args.len > 1: args[1 .. ^1].join(" ") else: ""
-  setConfigOption(optName, value)
+  setConfigOption(optName, value, explicit)
 
 ## Handles `get config`, `get config --reset`, and
 ## `get config --<option>`.
@@ -944,7 +957,7 @@ proc implHandleConfig(args: seq[string]) =
       let key = loadKey()
       if key.isSome:
         styleKeyValue(sk, "key",
-          "set (" & maskString(key.get) & ")")
+          "set (encrypted storage, value cannot be retrieved)")
       else:
         styleKeyValue(sk, "key", "not set")
     of "url":
@@ -971,10 +984,13 @@ proc implHandleConfig(args: seq[string]) =
         formatIntOrDisable(cfg.maxRounds))
     of "command-pattern":
       let pat =
-        if cfg.commandPattern.isSome:
-          cfg.commandPattern.get
+        if cfg.commandPattern.isNone:
+          DEFAULT_COMMAND_PATTERN &
+            " (default: built-in)"
+        elif cfg.commandPattern.get.len == 0:
+          "(disabled)"
         else:
-          "(default: built-in)"
+          cfg.commandPattern.get
       styleKeyValue(sk, "command-pattern", pat)
     of "system-prompt":
       let pmt =
@@ -1071,11 +1087,12 @@ proc implHandleGet(args: seq[string]) =
   let (sk, _) = implLoadStyle(cfg)
   if args.len == 0:
     styleSeparator(sk, DIV_SECTION)
-    styleKeyValue(sk, "name", APP_NAME)
+    styleKeyValue(sk, "name",    APP_NAME)
     styleKeyValue(sk, "version", APP_VERSION)
-    styleKeyValue(sk, "intro", APP_INTRO)
+    styleKeyValue(sk, "author",  APP_AUTHOR)
+    styleKeyValue(sk, "intro",   APP_INTRO)
     styleKeyValue(sk, "license", APP_LICENSE)
-    styleKeyValue(sk, "github", APP_GITHUB)
+    styleKeyValue(sk, "github",  APP_GITHUB)
     styleSeparator(sk, DIV_FOOTER)
     return
   case args[0]
@@ -1193,13 +1210,13 @@ proc implHandleQuery(
       case hit.get.cacheMode
       of cmResult:
         if not cfg.hideProcess:
-          styleProgress(sk, "(cached result)")
+          styleProgress(sk, "(cached: result)")
         styleResult(sk, hit.get.output,
           binDir, extDisplay)
         return
       of cmCommand:
         if not cfg.hideProcess:
-          styleProgress(sk, "(cached command)")
+          styleProgress(sk, "(cached: command)")
           styleCommand(sk, "command",
             hit.get.command)
         let execRes = executeCommand(

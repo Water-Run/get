@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-18
+## :Date: 2026-04-19
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -342,8 +342,7 @@ proc implJsonToConfig(
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and
-      cmdNode.kind == JString and
-      cmdNode.getStr().len > 0:
+      cmdNode.kind == JString:
     result.commandPattern = some(cmdNode.getStr())
   else:
     result.commandPattern = none(string)
@@ -491,7 +490,12 @@ proc saveConfig*(cfg: Config) =
 # ---------------------------------------------------------------------------
 
 ## Prints every configuration option to stdout.  The API key is
-## masked with asterisks.
+## stored with platform-specific encryption and cannot be
+## retrieved; the display therefore only shows whether a key is
+## set.  When ``command-pattern`` is ``none`` (the default), the
+## full built-in regex is printed followed by "(default: built-in)"
+## so the user can see exactly what is active.  When it is set to
+## an empty string (disabled), "(disabled)" is shown.
 ##
 ## :param sk: The active output style.
 ##
@@ -502,12 +506,17 @@ proc displayConfig*(sk: StyleKind = skSimp) =
   let cfg = loadConfig()
   let key = loadKey()
   let keyDisplay =
-    if key.isSome: maskString(key.get) else: ""
-  let cmdPat =
-    if cfg.commandPattern.isSome:
-      cfg.commandPattern.get
+    if key.isSome:
+      "set (encrypted storage, value cannot be retrieved)"
     else:
-      "(default: built-in)"
+      "not set"
+  let cmdPat =
+    if cfg.commandPattern.isNone:
+      DEFAULT_COMMAND_PATTERN & " (default: built-in)"
+    elif cfg.commandPattern.get.len == 0:
+      "(disabled)"
+    else:
+      cfg.commandPattern.get
   let sysPmt =
     if cfg.systemPrompt.isSome:
       cfg.systemPrompt.get else: ""
@@ -563,14 +572,31 @@ proc resetConfig*() =
 ## Sets a single configuration option by its CLI kebab-case
 ## name.
 ##
+## For ``command-pattern`` specifically, behaviour depends on
+## both ``value`` and ``explicit``:
+##
+## - ``value`` non-empty -> set to that value (custom pattern).
+## - ``value`` empty, ``explicit = true`` -> set to ``some("")``
+##   (filtering disabled; triggered by
+##   ``get set command-pattern ""``).
+## - ``value`` empty, ``explicit = false`` -> set to
+##   ``none(string)`` (restore built-in default; triggered by
+##   ``get set command-pattern``).
+##
 ## :param name: The kebab-case option name.
 ## :param value: The new value, or empty to unset/reset.
+## :param explicit: When true, an empty value is treated as an
+##                  explicit clear rather than a reset signal.
 ## :raises: GetError: If the name is unknown or value invalid.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc setConfigOption*(name: string, value: string) =
+proc setConfigOption*(
+  name: string,
+  value: string,
+  explicit: bool = false
+) =
   if name == "key":
     if value.len == 0:
       saveKey(none(string))
@@ -606,7 +632,14 @@ proc setConfigOption*(name: string, value: string) =
       if safetyWarn.len > 0:
         styleWarning(toStyleKind(cfg.vivid),
           safetyWarn)
+    elif explicit:
+      # ``get set command-pattern ""`` - disable filtering.
+      cfg.commandPattern = some("")
+      styleWarning(toStyleKind(cfg.vivid),
+        "warning: command-pattern cleared - " &
+        "no forbidden command filtering is active")
     else:
+      # ``get set command-pattern`` (no value) - restore default.
       cfg.commandPattern = none(string)
   of "system-prompt":
     if value.len > 0:

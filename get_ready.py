@@ -410,6 +410,7 @@ def install() -> None:
     else:
         good("PATH already configured")
 
+    configure_shell_post_install(paths["binary"])
     _finish_install(paths)
 
 
@@ -488,6 +489,90 @@ def uninstall(existing: Path) -> None:
     else:
         info("open a new terminal so the updated PATH takes effect.")
     print()
+
+
+# ─────────────────────── optional shell config ─────────────────────────
+
+def detect_current_shell() -> "str | None":
+    """Detect the name of the user's current interactive shell.
+
+    On Linux/macOS the ``$SHELL`` environment variable is the most
+    reliable source. On Windows, the presence of ``PSModulePath``
+    signals a PowerShell session; otherwise cmd is assumed.
+
+    :returns: A normalised shell name string, or ``None`` when
+              detection is not possible.
+    """
+    if IS_LINUX:
+        shell_path = os.environ.get("SHELL", "")
+        if shell_path:
+            name = Path(shell_path).name.lower()
+            if name in (
+                "bash", "zsh", "fish",
+                "sh", "dash", "ksh", "tcsh",
+            ):
+                return name
+    elif IS_WINDOWS:
+        # PSModulePath is injected by every PowerShell host.
+        if os.environ.get("PSModulePath"):
+            return "powershell"
+        return "cmd"
+    return None
+
+
+def configure_shell_post_install(binary: Path) -> None:
+    """Optional post-install step: detect the current shell and
+    offer to configure it in get's persistent settings.
+
+    This function is a no-op when shell detection fails or when
+    the user declines. Any subprocess failure is reported but
+    does not abort the installation.
+
+    :param binary: The absolute path to the installed get binary.
+    """
+    detected = detect_current_shell()
+    if not detected:
+        return
+
+    print()
+    info(
+        f"Detected current shell: "
+        f"{Color.BOLD}{detected}{Color.RESET}"
+    )
+    if not ask_yes_no(
+        f"Configure get to use '{detected}' as the default shell?",
+        default="y",
+    ):
+        step("skipping shell configuration")
+        return
+
+    import subprocess
+
+    step(f"Running: get set shell {detected}")
+    try:
+        result = subprocess.run(
+            [str(binary), "set", "shell", detected],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            good(f"shell configured: {detected}")
+        else:
+            raw = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "(no output)"
+            )
+            bad(f"get set shell returned non-zero: {raw}")
+    except FileNotFoundError:
+        bad(
+            "get binary not found at expected path; "
+            "shell configuration skipped. "
+            f"Run manually: get set shell {detected}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        bad(f"could not configure shell: {exc}")
 
 # ─────────────────────────────── entry ─────────────────────────────────
 

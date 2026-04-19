@@ -3,7 +3,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-19
 ## :File: utils.nim
 ## :License: AGPL-3.0
 ##
@@ -29,7 +29,10 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "1.0.0"
+const APP_VERSION* = "1.0"
+
+## The author of the application.
+const APP_AUTHOR* = "WaterRun"
 
 ## One-line introduction shown by ``get get --intro``.
 const APP_INTRO* = "get anything from your computer"
@@ -91,14 +94,24 @@ const MODEL_STRENGTH_WARNING* =
 ## Default forbidden command pattern regex.  Commands matching
 ## this pattern are rejected before execution.  The pattern uses
 ## ``\b`` word boundaries to avoid false positives in paths or
-## arguments.  Users may override this via
-## ``get set command-pattern``.
+## arguments.
+##
+## ``md`` and ``rd`` are intentionally omitted: they are aliases
+## of ``mkdir``/``rmdir`` (already covered), but ``\bmd\b`` and
+## ``\brd\b`` produce false positives on file extensions such as
+## ``README.md``.  ``format`` is omitted because ``\bformat\b``
+## matches the ubiquitous ``--format`` flag used by many tools.
+##
+## Users may override this via ``get set command-pattern``.
+## Pass an empty string (``get set command-pattern ""``) to
+## disable the pattern entirely, or omit the value
+## (``get set command-pattern``) to restore this default.
 const DEFAULT_COMMAND_PATTERN* =
-  "\\b(rm|rmdir|del|rd|erase" &
+  "\\b(rm|rmdir|del|erase" &
   "|mv|move|cp|copy" &
-  "|mkdir|md|touch" &
+  "|mkdir|touch" &
   "|chmod|chown|chgrp" &
-  "|mkfs|dd|format|fdisk" &
+  "|mkfs|dd|fdisk" &
   "|kill|killall|pkill" &
   "|shutdown|reboot|halt|poweroff" &
   "|passwd|useradd|userdel|usermod" &

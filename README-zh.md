@@ -69,7 +69,7 @@ get "你的问题"
 | `timeout`           | 单次 API 请求超时时间                | 正整数 (秒) / `false` | `300`                                |
 | `max-token`         | 每次请求的最大 token 消耗            | 正整数 / `false`      | `20480`                              |
 | `max-rounds`        | Agent 模式的最大循环轮数             | 正整数 / `false`      | `3`                                  |
-| `command-pattern`   | 禁止命令正则匹配模式                 | 正则字符串            | 空 (使用内置默认)                    |
+| `command-pattern`   | 禁止命令正则匹配模式                 | 正则字符串            | 内置黑名单（不传值还原默认；传 `""` 清空） |
 | `system-prompt`     | 自定义系统提示词                     | 字符串                | 空                                   |
 | `shell`             | 用于执行命令的 Shell                 | 字符串                | Windows: `powershell`; Linux: `bash` |
 | `log`               | 是否记录每次请求和执行               | `true` / `false`      | `true`                               |
@@ -127,7 +127,13 @@ get config --reset        # 重置所有配置为默认值
 get config --<选项名>     # 显示单个选项的当前值
 ```
 
-`--<选项名>` 接受上方 `set` 表格中的所有选项名称. `get config --key` 显示密钥状态 (已设置/未设置), 值会被遮蔽. 禁用的整数选项显示 `false`.
+`--<选项名>` 接受上方 `set` 表格中的所有选项名称. `get config --key` 显示密钥是否已配置。存储值经加密处理，无法取回原文。禁用的整数选项显示 `false`.
+
+```bash
+get config --command-pattern   # 查看当前正则（默认时显示完整内置表达式）
+get set command-pattern        # 还原内置默认
+get set command-pattern ""     # 清空，禁用模式过滤
+```
 
 ## 命令参考
 

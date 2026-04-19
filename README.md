@@ -69,7 +69,7 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | `timeout`           | Timeout per API request                        | Positive integer (s) / `false`    | `300`                                |
 | `max-token`         | Maximum token consumption per request          | Positive integer / `false`        | `20480`                              |
 | `max-rounds`        | Maximum loop rounds in agent mode              | Positive integer / `false`        | `3`                                  |
-| `command-pattern`   | Regex pattern to block commands                | Regex string                      | Empty (uses built-in defaults)       |
+| `command-pattern`   | Regex pattern to block commands                | Regex string                      | Built-in blocklist (omit value to restore; `""` to disable) |
 | `system-prompt`     | Custom system prompt                           | String                            | Empty                                |
 | `shell`             | Shell used to execute commands                 | String                            | Windows: `powershell`; Linux: `bash` |
 | `log`               | Log each request and execution                 | `true` / `false`                  | `true`                               |
@@ -127,7 +127,13 @@ get config --reset        # Reset all configuration to defaults
 get config --<option>     # Show the current value of a single option
 ```
 
-`--<option>` accepts all option names from the `set` table above. `get config --key` shows the key status (set/unset) with the value masked. Disabled integer options display `false`.
+`--<option>` accepts all option names from the `set` table above. `get config --key` shows whether a key is configured. The stored value is encrypted and cannot be retrieved. Disabled integer options display `false`.
+
+```bash
+get config --command-pattern   # View active pattern (full regex when default)
+get set command-pattern        # Restore built-in default
+get set command-pattern ""     # Disable pattern filtering
+```
 
 ## Command Reference
 
@@ -155,7 +161,7 @@ get set log false    # Disable logging
 ### Miscellaneous
 
 ```bash
-get get             # Show basic information about get
+get get             # Show basic information about get (name, version, author, ...)
 get get --intro     # Show introduction
 get get --version   # Show version (equivalent to get version)
 get get --license   # Show license identifier

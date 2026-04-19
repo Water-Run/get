@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-19
 ## :File: test.nim
 ## :License: AGPL-3.0
 ##
@@ -42,7 +42,7 @@ suite "utils":
   test "APP constants are non-empty":
     check APP_NAME.len > 0
     check APP_VERSION.len > 0
-    check APP_VERSION == "1.0.0"
+    check APP_VERSION == "1.0"
     check APP_INTRO.len > 0
     check APP_LICENSE.len > 0
     check APP_GITHUB.len > 0
