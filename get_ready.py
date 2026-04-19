@@ -1,52 +1,63 @@
 #!/usr/bin/env python3
 """
-get_ready.py — installer / uninstaller for `get`.
+get_ready.py -- installer / uninstaller for `get`.
 
-Run this script to install `get` on your system. If `get` is already
-installed, running the script again switches to uninstall mode.
+Run this script to install `get` on your system.  If `get` is already
+installed, running the script again provides the option to uninstall.
 
 Expected layout next to this script:
 
     get_ready.py
-    get            (Linux binary)
-    get.exe        (Windows binary)
-    get.1          (Linux man page)
-    bin/           (optional, extra tools)
+    get              (Linux binary)
+    get.exe          (Windows binary)
+    get.1            (Linux man page, optional)
+    bin/             (optional extra tools directory)
 """
 from __future__ import annotations
 
 import ctypes
+import getpass
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
 
-# ─────────────────────────── environment flags ─────────────────────────
+# ---------------------------------------------------------------------------
+# Platform constants
+# ---------------------------------------------------------------------------
 
 IS_WINDOWS: bool = os.name == "nt"
 IS_LINUX:   bool = sys.platform.startswith("linux")
 SCRIPT_DIR: Path = Path(__file__).resolve().parent
 
-RC_MARK_BEGIN = "# >>> get installer >>>"
-RC_MARK_END   = "# <<< get installer <<<"
+RC_MARK_BEGIN: str = "# >>> get installer >>>"
+RC_MARK_END:   str = "# <<< get installer <<<"
 
-PROJECT_TAGLINE = "get - get anything from your computer"
-PROJECT_GITHUB  = "github: https://github.com/Water-Run/get"
+PROJECT_TAGLINE: str = "get -- get anything from your computer"
+PROJECT_GITHUB:  str = "https://github.com/Water-Run/get"
 
-# ─────────────────────────────── styling ───────────────────────────────
+DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else "bash"
+DEFAULT_URL:   str = "https://api.poe.com/v1"
+DEFAULT_MODEL: str = "gpt-5.3-codex"
+
+# ---------------------------------------------------------------------------
+# ANSI colors
+# ---------------------------------------------------------------------------
+
 
 class Color:
-    RESET  = "\033[0m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    RED    = "\033[31m"
-    GREEN  = "\033[32m"
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
     YELLOW = "\033[33m"
-    BLUE   = "\033[34m"
-    MAGENTA= "\033[35m"
-    CYAN   = "\033[36m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
 
 
 def _disable_colors() -> None:
@@ -62,28 +73,77 @@ def _enable_ansi() -> None:
     if IS_WINDOWS:
         try:
             kernel32 = ctypes.windll.kernel32
-            handle   = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-            mode     = ctypes.c_ulong()
+            handle = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_ulong()
             kernel32.GetConsoleMode(handle, ctypes.byref(mode))
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
         except Exception:
             _disable_colors()
 
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
 
-def info(msg: str) -> None: print(f"{Color.BOLD}{Color.CYAN}info:{Color.RESET} {msg}")
-def warn(msg: str) -> None: print(f"{Color.BOLD}{Color.YELLOW}warn:{Color.RESET} {msg}")
-def fail(msg: str) -> None: print(f"{Color.BOLD}{Color.RED}error:{Color.RESET} {msg}", file=sys.stderr)
-def step(msg: str) -> None: print(f"  {Color.BOLD}{Color.BLUE}»{Color.RESET} {msg}")
-def good(msg: str) -> None: print(f"  {Color.BOLD}{Color.GREEN}✓{Color.RESET} {msg}")
-def bad(msg: str)  -> None: print(f"  {Color.BOLD}{Color.RED}✗{Color.RESET} {msg}")
+
+def info(msg: str) -> None:
+    print(f"  {Color.CYAN}{Color.BOLD}info:{Color.RESET}  {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"  {Color.YELLOW}{Color.BOLD}warn:{Color.RESET}  {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  {Color.RED}{Color.BOLD}error:{Color.RESET} {msg}", file=sys.stderr)
+
+
+def step(msg: str) -> None:
+    print(f"    {Color.BLUE}{Color.BOLD}-->{Color.RESET} {msg}")
+
+
+def good(msg: str) -> None:
+    print(f"    {Color.GREEN}{Color.BOLD}[ok]{Color.RESET} {msg}")
+
+
+def bad(msg: str) -> None:
+    print(f"  {Color.RED}{Color.BOLD}[fail]{Color.RESET} {msg}")
+
+
+def banner(title: str) -> None:
+    inner = 58
+    bar = "-" * inner
+    pad = inner - len(title) - 2
+    lp = max(pad // 2, 0)
+    rp = max(pad - lp, 0)
+    print()
+    print(f"{Color.CYAN}{Color.BOLD}+{bar}+{Color.RESET}")
+    print(
+        f"{Color.CYAN}{Color.BOLD}|{Color.RESET}"
+        f"{' ' * (lp + 1)}{Color.BOLD}{title}{Color.RESET}{' ' * (rp + 1)}"
+        f"{Color.CYAN}{Color.BOLD}|{Color.RESET}"
+    )
+    print(f"{Color.CYAN}{Color.BOLD}+{bar}+{Color.RESET}")
+    print()
+
+
+def _print_github() -> None:
+    print()
+    print(f"  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}")
+    print()
+
+# ---------------------------------------------------------------------------
+# Input helpers
+# ---------------------------------------------------------------------------
 
 
 def ask_yes_no(prompt: str, default: str = "y") -> bool:
     suffix = "[Y/n]" if default.lower() == "y" else "[y/N]"
     while True:
         try:
-            reply = input(f"{Color.BOLD}?{Color.RESET} {prompt} "
-                          f"{Color.DIM}{suffix}{Color.RESET} ").strip().lower()
+            reply = input(
+                f"  {Color.BOLD}?{Color.RESET} {prompt} "
+                f"{Color.DIM}{suffix}{Color.RESET} "
+            ).strip().lower()
         except EOFError:
             reply = ""
         if not reply:
@@ -94,53 +154,57 @@ def ask_yes_no(prompt: str, default: str = "y") -> bool:
             return False
 
 
+def ask_input(prompt: str, hint: str = "") -> str:
+    hint_str = f" {Color.DIM}[{hint}]{Color.RESET}" if hint else ""
+    try:
+        reply = input(
+            f"  {Color.BOLD}>{Color.RESET} {prompt}{hint_str}: "
+        ).strip()
+    except EOFError:
+        reply = ""
+    return reply
+
+
+def ask_secret(prompt: str, hint: str = "") -> str:
+    """Prompt for sensitive text without echoing the input."""
+    hint_str = f" [{hint}]" if hint else ""
+    try:
+        reply = getpass.getpass(f"  > {prompt}{hint_str}: ").strip()
+    except Exception:
+        reply = ask_input(prompt, hint=hint)
+    return reply
+
+
 def ask_choice(prompt: str, options: list[tuple[str, str, str]]) -> str:
+    """Present a numbered menu and return the key of the selected option."""
     print()
-    print(f"{Color.BOLD}{prompt}{Color.RESET}")
+    print(f"  {Color.BOLD}{prompt}{Color.RESET}")
     for idx, (_, label, desc) in enumerate(options, 1):
-        print(f"  {Color.BOLD}{idx}){Color.RESET} {Color.BOLD}{label}{Color.RESET}")
+        print(f"    {Color.BOLD}{idx}){Color.RESET} {label}")
         if desc:
-            print(f"     {Color.DIM}{desc}{Color.RESET}")
+            print(f"       {Color.DIM}{desc}{Color.RESET}")
     while True:
         try:
-            reply = input(f"\n{Color.BOLD}>{Color.RESET} "
-                          f"choose [1-{len(options)}]: ").strip()
+            reply = input(
+                f"\n  {Color.BOLD}>{Color.RESET} "
+                f"Select [1-{len(options)}]: "
+            ).strip()
         except EOFError:
             reply = "1"
         if reply.isdigit() and 1 <= int(reply) <= len(options):
             return options[int(reply) - 1][0]
 
+# ---------------------------------------------------------------------------
+# System check
+# ---------------------------------------------------------------------------
 
-def banner(title: str) -> None:
-    width = 56
-    inner = width - 2
-    pad   = inner - len(title)
-    lp, rp = pad // 2, pad - pad // 2
-    top = "╭" + "─" * inner + "╮"
-    bot = "╰" + "─" * inner + "╯"
-    print()
-    print(f"{Color.BOLD}{Color.CYAN}{top}{Color.RESET}")
-    print(f"{Color.BOLD}{Color.CYAN}│{Color.RESET}"
-          f"{' ' * lp}{Color.BOLD}{title}{Color.RESET}{' ' * rp}"
-          f"{Color.BOLD}{Color.CYAN}│{Color.RESET}")
-    print(f"{Color.BOLD}{Color.CYAN}{bot}{Color.RESET}")
-    print()
-
-
-def project_banner() -> None:
-    """Display the project identity — shown on install and uninstall."""
-    print(f"{Color.BOLD}{Color.MAGENTA}{PROJECT_TAGLINE}{Color.RESET}")
-    print(f"{Color.DIM}{PROJECT_GITHUB}{Color.RESET}")
-    print()
-
-# ───────────────────────────── system check ────────────────────────────
 
 def check_system() -> None:
     step("Checking system compatibility")
     if IS_WINDOWS:
         v = sys.getwindowsversion()
         if v.major < 10:
-            bad(f"Windows {v.major}.{v.minor}  (need Windows 10 or later)")
+            bad(f"Windows {v.major}.{v.minor} -- Windows 10 or later is required")
             sys.exit(1)
         good(f"Windows {v.major}.{v.minor} (build {v.build})")
     elif IS_LINUX:
@@ -150,20 +214,24 @@ def check_system() -> None:
         except ValueError:
             major = 0
         if major < 6:
-            bad(f"Linux kernel {release}  (need kernel 6 or later)")
+            bad(f"Linux kernel {release} -- kernel 6 or later is required")
             sys.exit(1)
         good(f"Linux kernel {release}")
     else:
         bad(f"Unsupported platform: {sys.platform}")
         sys.exit(1)
 
-# ───────────────────────────── path layout ─────────────────────────────
+# ---------------------------------------------------------------------------
+# Install paths
+# ---------------------------------------------------------------------------
+
 
 def install_paths() -> dict:
     if IS_WINDOWS:
-        base = Path(os.environ.get(
-            "LOCALAPPDATA", Path.home() / "AppData" / "Local"
-        )) / "Programs" / "get"
+        localappdata = os.environ.get("LOCALAPPDATA") or str(
+            Path.home() / "AppData" / "Local"
+        )
+        base = Path(localappdata) / "Programs" / "get"
         return {
             "root":      base,
             "binary":    base / "get.exe",
@@ -171,7 +239,7 @@ def install_paths() -> dict:
             "man":       None,
             "path_dirs": [base, base / "bin"],
         }
-    home  = Path.home()
+    home = Path.home()
     local = home / ".local"
     return {
         "root":      local / "share" / "get",
@@ -182,7 +250,7 @@ def install_paths() -> dict:
     }
 
 
-def find_installed() -> Path | None:
+def find_installed() -> "Path | None":
     paths = install_paths()
     if paths["binary"].exists():
         return paths["binary"]
@@ -193,7 +261,10 @@ def find_installed() -> Path | None:
             return resolved
     return None
 
-# ───────────────────────────── file helpers ────────────────────────────
+# ---------------------------------------------------------------------------
+# File helpers
+# ---------------------------------------------------------------------------
+
 
 def copy_file(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -208,9 +279,9 @@ def remove_file(p: Path) -> None:
     step(f"Removing {p}")
     try:
         p.unlink()
-        good("removed")
+        good("Removed")
     except OSError as e:
-        bad(f"failed: {e}")
+        bad(f"Failed: {e}")
 
 
 def prune_empty_parents(start: Path, stop_at: Path) -> None:
@@ -226,15 +297,17 @@ def prune_empty_parents(start: Path, stop_at: Path) -> None:
             break
         cur = cur.parent
 
-# ─────────────────────────── PATH management ───────────────────────────
+# ---------------------------------------------------------------------------
+# PATH management
+# ---------------------------------------------------------------------------
+
 
 def _notify_env_change_windows() -> None:
     try:
-        HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG = 0xFFFF, 0x1A, 0x0002
         result = ctypes.c_long()
         ctypes.windll.user32.SendMessageTimeoutW(
-            HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
-            SMTO_ABORTIFHUNG, 5000, ctypes.byref(result),
+            0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000,
+            ctypes.byref(result),
         )
     except Exception:
         pass
@@ -243,13 +316,15 @@ def _notify_env_change_windows() -> None:
 def path_add_windows(dirs: Iterable[Path]) -> bool:
     import winreg
     changed = False
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment",
-                        0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment",
+        0, winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as k:
         try:
             current, _ = winreg.QueryValueEx(k, "Path")
         except FileNotFoundError:
             current = ""
-        parts    = [p for p in current.split(";") if p]
+        parts = [p for p in current.split(";") if p]
         existing = {p.lower() for p in parts}
         for d in dirs:
             value = str(d)
@@ -258,7 +333,8 @@ def path_add_windows(dirs: Iterable[Path]) -> bool:
                 existing.add(value.lower())
                 changed = True
         if changed:
-            winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+            winreg.SetValueEx(
+                k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
             _notify_env_change_windows()
     return changed
 
@@ -266,14 +342,16 @@ def path_add_windows(dirs: Iterable[Path]) -> bool:
 def path_remove_windows(dirs: Iterable[Path]) -> bool:
     import winreg
     targets = {str(d).lower() for d in dirs}
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment",
-                        0, winreg.KEY_READ | winreg.KEY_WRITE) as k:
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment",
+        0, winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as k:
         try:
             current, _ = winreg.QueryValueEx(k, "Path")
         except FileNotFoundError:
             return False
         parts = [p for p in current.split(";") if p]
-        kept  = [p for p in parts if p.lower() not in targets]
+        kept = [p for p in parts if p.lower() not in targets]
         if len(kept) == len(parts):
             return False
         winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(kept))
@@ -290,9 +368,8 @@ def path_add_linux(dirs: Iterable[Path]) -> bool:
         )
     lines.append(RC_MARK_END)
     block = "\n" + "\n".join(lines) + "\n"
-
     changed = False
-    home    = Path.home()
+    home = Path.home()
     for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
         if not rc.exists() and rc.name != ".profile":
             continue
@@ -307,14 +384,15 @@ def path_add_linux(dirs: Iterable[Path]) -> bool:
 
 def path_remove_linux() -> bool:
     changed = False
-    home    = Path.home()
+    home = Path.home()
     for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
         if not rc.exists():
             continue
         content = rc.read_text()
         if RC_MARK_BEGIN not in content:
             continue
-        kept, skip = [], False
+        kept: list[str] = []
+        skip = False
         for line in content.splitlines(keepends=True):
             if RC_MARK_BEGIN in line:
                 skip = True
@@ -336,134 +414,235 @@ def add_to_path(dirs: list[Path]) -> bool:
 def remove_from_path(dirs: list[Path]) -> bool:
     return path_remove_windows(dirs) if IS_WINDOWS else path_remove_linux()
 
-# ─────────────────────────────── install ───────────────────────────────
+# ---------------------------------------------------------------------------
+# get binary invocation
+# ---------------------------------------------------------------------------
 
-def install() -> None:
-    paths   = install_paths()
-    src_bin = SCRIPT_DIR / ("get.exe" if IS_WINDOWS else "get")
 
-    if not src_bin.exists():
-        fail(f"source binary not found: {src_bin}")
-        sys.exit(1)
-
-    extra_src = SCRIPT_DIR / "bin"
-    has_extra = extra_src.is_dir() and any(extra_src.iterdir())
-
-    mode = "minimal"
-    if has_extra:
-        mode = ask_choice(
-            "Installation type",
-            [
-                ("full",    "Full installation",
-                 "Install get, additional tools from bin/, and (Linux) man page."),
-                ("minimal", "Minimal installation",
-                 "Install get and (Linux) man page only."),
-            ],
-        )
-    else:
-        info("no bin/ directory found — minimal installation will be performed")
-
-    path_dirs = paths["path_dirs"][:1] if mode == "minimal" else paths["path_dirs"]
-
-    print()
-    info("The following paths will be used:")
-    print(f"     {Color.DIM}binary   :{Color.RESET} {paths['binary']}")
-    if mode == "full":
-        print(f"     {Color.DIM}extra bin:{Color.RESET} {paths['extra_bin']}")
-    if paths["man"]:
-        print(f"     {Color.DIM}man page :{Color.RESET} {paths['man']}")
-    for d in path_dirs:
-        print(f"     {Color.DIM}PATH  +=  {Color.RESET} {d}")
-    print()
-
-    if not ask_yes_no("Proceed with installation?"):
-        info("installation cancelled")
-        sys.exit(0)
-
-    print()
-    step(f"Installing binary  →  {paths['binary']}")
-    copy_file(src_bin, paths["binary"])
-    good("binary installed")
-
-    if paths["man"]:
-        man_src = SCRIPT_DIR / "get.1"
-        if man_src.exists():
-            step(f"Installing man page →  {paths['man']}")
-            copy_file(man_src, paths["man"])
-            good("man page installed")
+def run_get(binary: Path, *args: str) -> bool:
+    """
+    Invoke the installed get binary and return True on success.
+    The value following a 'key' argument is masked in diagnostic output.
+    """
+    display_args: list[str] = []
+    for i, a in enumerate(args):
+        if i > 0 and args[i - 1] == "key":
+            display_args.append("<hidden>")
         else:
-            warn("get.1 not found, skipping man page")
+            display_args.append(a)
+    cmd_display = "get " + " ".join(display_args)
 
-    if mode == "full":
-        step(f"Installing extras  →  {paths['extra_bin']}")
-        paths["extra_bin"].mkdir(parents=True, exist_ok=True)
-        count = 0
-        for item in extra_src.iterdir():
-            if item.is_file():
-                copy_file(item, paths["extra_bin"] / item.name)
-                count += 1
-        good(f"installed {count} extra tool(s)")
+    try:
+        result = subprocess.run(
+            [str(binary), *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return True
+        raw = result.stderr.strip() or result.stdout.strip() or "(no output)"
+        bad(f"'{cmd_display}' returned non-zero: {raw}")
+        return False
+    except FileNotFoundError:
+        bad(f"Binary not found: {binary}")
+        return False
+    except subprocess.TimeoutExpired:
+        bad(f"'{cmd_display}' timed out")
+        return False
+    except Exception as exc:
+        bad(f"Unexpected error: {exc}")
+        return False
 
-    step("Configuring PATH")
-    if add_to_path(path_dirs):
-        good("PATH updated")
-    else:
-        good("PATH already configured")
-
-    configure_shell_post_install(paths["binary"])
-    _finish_install(paths)
+# ---------------------------------------------------------------------------
+# Shell detection
+# ---------------------------------------------------------------------------
 
 
-def _finish_install(paths: dict) -> None:
-    print()
-    banner("get is installed — enjoy! 🎉")
-    project_banner()
-
-    info("To get started, open a new terminal and run:")
-    print(f"     {Color.BOLD}get version{Color.RESET}"
-          f"    {Color.DIM}# verify installation{Color.RESET}")
-    print(f"     {Color.BOLD}get help{Color.RESET}"
-          f"       {Color.DIM}# show command help{Color.RESET}")
+def detect_current_shell() -> "str | None":
     if IS_LINUX:
-        print(f"     {Color.BOLD}man get{Color.RESET}"
-              f"        {Color.DIM}# read the manual{Color.RESET}")
-    print()
+        shell_path = os.environ.get("SHELL", "")
+        if shell_path:
+            name = Path(shell_path).name.lower()
+            if name in ("bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh"):
+                return name
+    elif IS_WINDOWS:
+        if os.environ.get("PSModulePath"):
+            return "powershell"
+        return "cmd"
+    return None
 
-    if IS_LINUX:
-        info(f"current shell users can reload the PATH with:  "
-             f"{Color.BOLD}source ~/.profile{Color.RESET}")
+# ---------------------------------------------------------------------------
+# Post-install configuration
+# ---------------------------------------------------------------------------
+
+
+def configure_shell(binary: Path) -> None:
+    detected = detect_current_shell()
+    if detected is None or detected == DEFAULT_SHELL:
+        return
+    print()
+    info(
+        f"Detected shell: {Color.BOLD}{detected}{Color.RESET}  "
+        f"(configured default: {DEFAULT_SHELL})"
+    )
+    if not ask_yes_no(
+        f"Set '{detected}' as get's default shell?",
+        default="y",
+    ):
+        return
+    step(f"Running: get set shell {detected}")
+    if run_get(binary, "set", "shell", detected):
+        good(f"Shell set to '{detected}'")
     else:
-        info("open a new terminal window so the updated PATH takes effect.")
+        warn(
+            f"Shell configuration failed. Run manually: get set shell {detected}")
 
+
+def configure_model(binary: Path) -> None:
+    banner("LLM configuration")
+    info("Configure the LLM connection parameters.")
+    info("Leave a field empty to retain its built-in default or to skip.")
     print()
-    info("To remove get later, run this script again:")
-    print(f"     {Color.BOLD}python {Path(__file__).name}{Color.RESET}")
+
+    url = ask_input(
+        "API endpoint URL",
+        hint=f"leave empty for default: {DEFAULT_URL}",
+    )
+    if url:
+        step(f"Running: get set url {url}")
+        if run_get(binary, "set", "url", url):
+            good(f"URL set to '{url}'")
     print()
 
-# ────────────────────────────── uninstall ──────────────────────────────
+    model = ask_input(
+        "Model name",
+        hint=f"leave empty for default: {DEFAULT_MODEL}",
+    )
+    if model:
+        step(f"Running: get set model {model}")
+        if run_get(binary, "set", "model", model):
+            good(f"Model set to '{model}'")
+    print()
 
-def uninstall(existing: Path) -> None:
+    key = ask_secret("API key", hint="leave empty to skip")
+    if key:
+        step("Running: get set key <hidden>")
+        if run_get(binary, "set", "key", key):
+            good("API key configured")
+    else:
+        info("API key not set. Configure later with: get set key <your-key>")
+
+
+def configure_advanced(binary: Path) -> None:
+    banner("Advanced configuration")
+    info("Defaults are shown in brackets. Press Enter to accept the default.")
+    print()
+
+    # double-check (default: true)
+    info(
+        "double-check: Secondary LLM safety review of generated commands."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    double_check = ask_yes_no("Enable double-check?", default="y")
+    step(f"Running: get set double-check {str(double_check).lower()}")
+    if run_get(binary, "set", "double-check", str(double_check).lower()):
+        good(f"double-check = {str(double_check).lower()}")
+    print()
+
+    # manual-confirm (default: false)
+    info(
+        "manual-confirm: Require manual confirmation before executing each command."
+        f" {Color.DIM}[default: false]{Color.RESET}"
+    )
+    manual_confirm = ask_yes_no("Enable manual-confirm?", default="n")
+    step(f"Running: get set manual-confirm {str(manual_confirm).lower()}")
+    if run_get(binary, "set", "manual-confirm", str(manual_confirm).lower()):
+        good(f"manual-confirm = {str(manual_confirm).lower()}")
+    print()
+
+    # instance: only offered when both safety checks are disabled
+    if not double_check and not manual_confirm:
+        info(
+            "instance: Fast single-call mode; disables multi-round agent behavior."
+            f" {Color.DIM}[default: false]{Color.RESET}"
+        )
+        warn(
+            "In instance mode, performance and security will degrade."
+        )
+        instance = ask_yes_no("Enable instance?", default="n")
+        step(f"Running: get set instance {str(instance).lower()}")
+        if run_get(binary, "set", "instance", str(instance).lower()):
+            good(f"instance = {str(instance).lower()}")
+        print()
+
+    # system-prompt (default: empty)
+    info(
+        "system-prompt: Custom instruction prepended to every LLM request."
+        f" {Color.DIM}[default: empty]{Color.RESET}"
+    )
+    system_prompt = ask_input("System prompt", hint="leave empty to skip")
+    if system_prompt:
+        step("Running: get set system-prompt <value>")
+        if run_get(binary, "set", "system-prompt", system_prompt):
+            good("system-prompt configured")
+    print()
+
+    # vivid (default: true)
+    info(
+        "vivid: Colored output and animations in terminal display."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    vivid = ask_yes_no("Enable vivid?", default="y")
+    step(f"Running: get set vivid {str(vivid).lower()}")
+    if run_get(binary, "set", "vivid", str(vivid).lower()):
+        good(f"vivid = {str(vivid).lower()}")
+    print()
+
+    if not vivid:
+        # hide-process (default: false)
+        info(
+            "hide-process: Suppress intermediate step output during execution."
+            f" {Color.DIM}[default: false]{Color.RESET}"
+        )
+        hide_process = ask_yes_no("Enable hide-process?", default="n")
+        step(f"Running: get set hide-process {str(hide_process).lower()}")
+        if run_get(binary, "set", "hide-process", str(hide_process).lower()):
+            good(f"hide-process = {str(hide_process).lower()}")
+        print()
+
+        # external-display (default: true)
+        info(
+            "external-display: Use external tools (bat, mdcat) for rendering output."
+            f" {Color.DIM}[default: true]{Color.RESET}"
+        )
+        external_display = ask_yes_no("Enable external-display?", default="y")
+        step(
+            f"Running: get set external-display {str(external_display).lower()}")
+        if run_get(binary, "set", "external-display", str(external_display).lower()):
+            good(f"external-display = {str(external_display).lower()}")
+        print()
+
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+
+
+def do_uninstall(existing: Path) -> None:
     paths = install_paths()
-
     print()
-    info(f"Found existing installation at: "
-         f"{Color.BOLD}{existing}{Color.RESET}")
-    if not ask_yes_no("Uninstall get?"):
-        info("uninstall cancelled")
-        sys.exit(0)
 
-    print()
     remove_file(existing)
-    if paths["binary"] != existing:
+    if paths["binary"].resolve() != existing.resolve():
         remove_file(paths["binary"])
 
     if paths["extra_bin"].exists():
-        step(f"Removing {paths['extra_bin']}")
+        step(f"Removing extra tools: {paths['extra_bin']}")
         try:
             shutil.rmtree(paths["extra_bin"])
-            good("extra bin removed")
+            good("Extra tools removed")
         except OSError as e:
-            bad(f"failed: {e}")
+            bad(f"Failed: {e}")
 
     if paths["man"]:
         remove_file(paths["man"])
@@ -475,121 +654,181 @@ def uninstall(existing: Path) -> None:
         except OSError:
             pass
 
-    step("Cleaning PATH")
+    step("Cleaning PATH entries")
     if remove_from_path(paths["path_dirs"]):
-        good("PATH cleaned")
+        good("PATH entries removed")
     else:
-        good("PATH already clean")
+        good("PATH entries already absent")
 
     print()
-    banner("get has been uninstalled")
-    project_banner()
+    banner("uninstallation complete")
     if IS_LINUX:
-        info("restart your shell to refresh the environment.")
+        info("Restart your shell to refresh the environment.")
     else:
-        info("open a new terminal so the updated PATH takes effect.")
-    print()
+        info("Open a new terminal for PATH changes to take effect.")
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-# ─────────────────────── optional shell config ─────────────────────────
-
-def detect_current_shell() -> "str | None":
-    """Detect the name of the user's current interactive shell.
-
-    On Linux/macOS the ``$SHELL`` environment variable is the most
-    reliable source. On Windows, the presence of ``PSModulePath``
-    signals a PowerShell session; otherwise cmd is assumed.
-
-    :returns: A normalised shell name string, or ``None`` when
-              detection is not possible.
-    """
-    if IS_LINUX:
-        shell_path = os.environ.get("SHELL", "")
-        if shell_path:
-            name = Path(shell_path).name.lower()
-            if name in (
-                "bash", "zsh", "fish",
-                "sh", "dash", "ksh", "tcsh",
-            ):
-                return name
-    elif IS_WINDOWS:
-        # PSModulePath is injected by every PowerShell host.
-        if os.environ.get("PSModulePath"):
-            return "powershell"
-        return "cmd"
-    return None
-
-
-def configure_shell_post_install(binary: Path) -> None:
-    """Optional post-install step: detect the current shell and
-    offer to configure it in get's persistent settings.
-
-    This function is a no-op when shell detection fails or when
-    the user declines. Any subprocess failure is reported but
-    does not abort the installation.
-
-    :param binary: The absolute path to the installed get binary.
-    """
-    detected = detect_current_shell()
-    if not detected:
-        return
-
-    print()
-    info(
-        f"Detected current shell: "
-        f"{Color.BOLD}{detected}{Color.RESET}"
-    )
-    if not ask_yes_no(
-        f"Configure get to use '{detected}' as the default shell?",
-        default="y",
-    ):
-        step("skipping shell configuration")
-        return
-
-    import subprocess
-
-    step(f"Running: get set shell {detected}")
-    try:
-        result = subprocess.run(
-            [str(binary), "set", "shell", detected],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode == 0:
-            good(f"shell configured: {detected}")
-        else:
-            raw = (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or "(no output)"
-            )
-            bad(f"get set shell returned non-zero: {raw}")
-    except FileNotFoundError:
-        bad(
-            "get binary not found at expected path; "
-            "shell configuration skipped. "
-            f"Run manually: get set shell {detected}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        bad(f"could not configure shell: {exc}")
-
-# ─────────────────────────────── entry ─────────────────────────────────
 
 def main() -> None:
     _enable_ansi()
 
+    print()
+    print(f"{Color.BOLD}{Color.MAGENTA}{PROJECT_TAGLINE}{Color.RESET}")
+    print()
+
     existing = find_installed()
-    title    = "get uninstaller" if existing else "get installer"
-    banner(title)
-    project_banner()
 
-    check_system()
-
+    # ------------------------------------------------------------------
+    # Uninstall branch
+    # ------------------------------------------------------------------
     if existing:
-        uninstall(existing)
+        banner("uninstaller")
+        info(
+            f"Existing installation found: {Color.BOLD}{existing}{Color.RESET}")
+        print()
+        if not ask_yes_no("Uninstall get?", default="n"):
+            _print_github()
+            sys.exit(0)
+        do_uninstall(existing)
+        print()
+        if not ask_yes_no("Reinstall get?", default="n"):
+            _print_github()
+            sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Install branch
+    # ------------------------------------------------------------------
+    banner("installer")
+    check_system()
+    print()
+
+    src_bin = SCRIPT_DIR / ("get.exe" if IS_WINDOWS else "get")
+    if not src_bin.exists():
+        fail(f"Source binary not found: {src_bin}")
+        _print_github()
+        sys.exit(1)
+
+    info(f"Source binary: {src_bin}")
+    print()
+    if not ask_yes_no("Install get?", default="y"):
+        info("Installation cancelled.")
+        _print_github()
+        sys.exit(0)
+
+    # Installation type selection
+    extra_src = SCRIPT_DIR / "bin"
+    has_extra = extra_src.is_dir() and any(extra_src.iterdir())
+
+    if has_extra:
+        mode = ask_choice(
+            "Select installation type:",
+            [
+                (
+                    "full",
+                    "Full installation",
+                    "Install get, extra tools from bin/, and (Linux) man page.",
+                ),
+                (
+                    "minimal",
+                    "Minimal installation",
+                    "Install get and (Linux) man page only.",
+                ),
+            ],
+        )
     else:
-        install()
+        mode = "minimal"
+        info("No bin/ directory found -- performing minimal installation.")
+
+    paths = install_paths()
+    binary = paths["binary"]
+    path_dirs = paths["path_dirs"][:1] if mode == "minimal" else paths["path_dirs"]
+
+    # Confirm targets
+    print()
+    info("Installation targets:")
+    print(f"    binary    : {binary}")
+    if mode == "full":
+        print(f"    extra bin : {paths['extra_bin']}")
+    if paths["man"]:
+        print(f"    man page  : {paths['man']}")
+    for d in path_dirs:
+        print(f"    PATH +=   : {d}")
+    print()
+
+    if not ask_yes_no("Proceed with installation?", default="y"):
+        info("Installation cancelled.")
+        _print_github()
+        sys.exit(0)
+
+    print()
+
+    # Binary
+    step(f"Installing binary  -->  {binary}")
+    copy_file(src_bin, binary)
+    good("Binary installed")
+
+    # Man page
+    if paths["man"]:
+        man_src = SCRIPT_DIR / "get.1"
+        if man_src.exists():
+            step(f"Installing man page  -->  {paths['man']}")
+            copy_file(man_src, paths["man"])
+            good("Man page installed")
+        else:
+            warn("get.1 not found -- man page skipped")
+
+    # Extra tools
+    if mode == "full":
+        step(f"Installing extra tools  -->  {paths['extra_bin']}")
+        paths["extra_bin"].mkdir(parents=True, exist_ok=True)
+        count = 0
+        for item in extra_src.iterdir():
+            if item.is_file():
+                copy_file(item, paths["extra_bin"] / item.name)
+                count += 1
+        good(f"{count} extra tool(s) installed")
+
+    # PATH
+    step("Updating PATH")
+    if add_to_path(path_dirs):
+        good("PATH updated")
+    else:
+        good("PATH already configured")
+
+    # Shell
+    configure_shell(binary)
+
+    # LLM settings
+    print()
+    if ask_yes_no("Configure LLM connection settings now?", default="y"):
+        configure_model(binary)
+
+    # Advanced settings
+    print()
+    if ask_yes_no("Configure advanced settings now?", default="n"):
+        configure_advanced(binary)
+
+    # Completion
+    print()
+    banner("installation complete")
+    info("Open a new terminal and run the following to verify:")
+    print(f"    {Color.BOLD}get version{Color.RESET}"
+          f"  {Color.DIM}-- verify installation{Color.RESET}")
+    print(f"    {Color.BOLD}get isok{Color.RESET}"
+          f"     {Color.DIM}-- verify configuration{Color.RESET}")
+    print()
+    if IS_LINUX:
+        info(
+            "To reload PATH in the current session: "
+            f"{Color.BOLD}source ~/.profile{Color.RESET}"
+        )
+    else:
+        info("Open a new terminal for PATH changes to take effect.")
+
+    _print_github()
 
 
 if __name__ == "__main__":
@@ -597,5 +836,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print()
-        fail("interrupted")
+        fail("Interrupted.")
         sys.exit(130)
