@@ -122,6 +122,10 @@ set options:
                        (integer or false, default: 30)
   cache-max-entries  max cached entries
                        (integer or false, default: 1000)
+  cache-trigger-threshold
+                     number of prior executions required
+                       before triggering cache decision
+                       (integer or false, default: 1)
   log-max-entries    max log entries retained
                        (integer or false, default: 1000)
   vivid              vivid output mode with colours and animation
@@ -1161,6 +1165,10 @@ proc implHandleConfig(args: seq[string]) =
     of "cache-max-entries":
       styleKeyValue(sk, "cache-max-entries",
         formatIntOrDisable(cfg.cacheMaxEntries))
+    of "cache-trigger-threshold":
+      styleKeyValue(sk,
+        "cache-trigger-threshold",
+        formatIntOrDisable(cfg.cacheTriggerThreshold))
     of "log-max-entries":
       styleKeyValue(sk, "log-max-entries",
         formatIntOrDisable(cfg.logMaxEntries))
@@ -1421,11 +1429,18 @@ proc implHandleQuery(
           quit(execRes.exitCode)
         return
 
-    # Determine wasSeen: true when the query was previously
-    # seen or when --cache forces immediate caching.
+    # Determine whether cache decision should trigger.
+    # Decision runs when:
+    #   - --cache is present, or
+    #   - threshold is disabled (<= 0), or
+    #   - seen count has reached the configured threshold.
+    let seenCount = getSeenCount(
+      store, cc.queryHash, cfg.cacheExpiry)
+    let threshold = cfg.cacheTriggerThreshold
     cc.wasSeen =
-      isSeen(store, cc.queryHash,
-        cfg.cacheExpiry) or forceCache
+      forceCache or
+      threshold <= 0 or
+      seenCount >= threshold
 
   # Collect system information.
   if not cfg.hideProcess:

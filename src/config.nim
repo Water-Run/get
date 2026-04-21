@@ -63,6 +63,10 @@ const DEFAULT_CACHE_EXPIRY* = 30
 ## Default maximum number of cached entries.
 const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 
+## Default number of prior executions required before running
+## cache-decision classification.
+const DEFAULT_CACHE_TRIGGER_THRESHOLD* = 1
+
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
@@ -100,6 +104,7 @@ type
     cache*: bool                     ## Enable response cache.
     cacheExpiry*: int                ## Cache expiry in days.
     cacheMaxEntries*: int            ## Max cached entries.
+    cacheTriggerThreshold*: int      ## Prior-run threshold before decision.
     logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
     externalDisplay*: bool           ## Use bat/mdcat.
@@ -287,6 +292,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cache":           cfg.cache,
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
+    "cacheTriggerThreshold": cfg.cacheTriggerThreshold,
     "logMaxEntries":   cfg.logMaxEntries,
     "vivid":           cfg.vivid,
     "externalDisplay": cfg.externalDisplay,
@@ -331,6 +337,9 @@ proc implJsonToConfig(
     cacheMaxEntries:
       node{"cacheMaxEntries"}.getInt(
         defaults.cacheMaxEntries),
+    cacheTriggerThreshold:
+      node{"cacheTriggerThreshold"}.getInt(
+        defaults.cacheTriggerThreshold),
     logMaxEntries: node{"logMaxEntries"}.getInt(
       defaults.logMaxEntries),
     vivid: node{"vivid"}.getBool(defaults.vivid),
@@ -383,6 +392,8 @@ func defaultConfig*(): Config =
     cache:           DEFAULT_CACHE,
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
+    cacheTriggerThreshold:
+      DEFAULT_CACHE_TRIGGER_THRESHOLD,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
     vivid:           DEFAULT_VIVID,
     externalDisplay: DEFAULT_EXTERNAL_DISPLAY,
@@ -545,6 +556,9 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     formatIntOrDisable(cfg.cacheExpiry))
   styleKeyValue(sk, "cache-max-entries",
     formatIntOrDisable(cfg.cacheMaxEntries))
+  styleKeyValue(sk, "cache-trigger-threshold",
+    formatIntOrDisable(
+      cfg.cacheTriggerThreshold))
   styleKeyValue(sk, "log-max-entries",
     formatIntOrDisable(cfg.logMaxEntries))
   styleKeyValue(sk, "vivid", $cfg.vivid)
@@ -663,6 +677,10 @@ proc setConfigOption*(
   of "cache-max-entries":
     cfg.cacheMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_CACHE_MAX_ENTRIES)
+  of "cache-trigger-threshold":
+    cfg.cacheTriggerThreshold =
+      implParseIntOrDisable(value, name,
+        DEFAULT_CACHE_TRIGGER_THRESHOLD)
   of "log-max-entries":
     cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)

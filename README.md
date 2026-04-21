@@ -77,6 +77,7 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | `cache`             | Enable response caching                        | `true` / `false`                  | `true`                               |
 | `cache-expiry`      | Cache entry expiry in days                     | Positive integer (days) / `false` | `30`                                 |
 | `cache-max-entries` | Maximum number of cache entries to retain      | Positive integer / `false`        | `1000`                               |
+| `cache-trigger-threshold` | Number of prior executions required before cache decision | Positive integer / `false` | `1`                                  |
 | `log-max-entries`   | Maximum number of log entries to retain        | Positive integer / `false`        | `1000`                               |
 | `vivid`             | Enable vivid output mode (colors & animations) | `true` / `false`                  | `true`                               |
 | `external-display`  | Use bat/mdcat for rendering                    | `true` / `false`                  | `true`                               |
@@ -139,7 +140,7 @@ get set command-pattern ""     # Disable pattern filtering
 
 ### Cache
 
-`get` uses a deferred-decision caching mechanism. Queries are not cached on first execution. Only when a query is repeated (or `--cache` is explicitly passed) does `get` invoke the LLM to determine the optimal caching strategy. During this decision step, `get` shows `checking whether to cache...` as progress text (when process output is not hidden). Five strategies are supported: `GLOBAL_COMMAND` (cache the command globally, re-execute on hit), `GLOBAL_RESULT` (cache the output globally, return directly), `CONTEXT_COMMAND` (cache the command for the current directory context, re-execute on hit), `CONTEXT_RESULT` (cache the output for the current directory context, return directly), or `NOCACHE` (do not cache).
+`get` uses a deferred-decision caching mechanism. Queries are not cached on first execution. Cache strategy classification is triggered only after a query has been seen at least `cache-trigger-threshold` times (default `1`, which means classification on the second run), or when `--cache` is explicitly passed. During this decision step, `get` shows `checking whether to cache...` as progress text (when process output is not hidden). Five strategies are supported: `GLOBAL_COMMAND` (cache the command globally, re-execute on hit), `GLOBAL_RESULT` (cache the output globally, return directly), `CONTEXT_COMMAND` (cache the command for the current directory context, re-execute on hit), `CONTEXT_RESULT` (cache the output for the current directory context, return directly), or `NOCACHE` (do not cache).
 
 Global entries work across any working directory; context entries are tied to the directory where the query was originally executed.
 

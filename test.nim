@@ -301,6 +301,8 @@ suite "config defaults":
     check cfg.cacheExpiry == DEFAULT_CACHE_EXPIRY
     check cfg.cacheMaxEntries ==
       DEFAULT_CACHE_MAX_ENTRIES
+    check cfg.cacheTriggerThreshold ==
+      DEFAULT_CACHE_TRIGGER_THRESHOLD
     check cfg.logMaxEntries ==
       DEFAULT_LOG_MAX_ENTRIES
     check cfg.vivid == DEFAULT_VIVID
@@ -339,6 +341,7 @@ suite "config persistence round-trip":
       cache:           false,
       cacheExpiry:     7,
       cacheMaxEntries: 500,
+      cacheTriggerThreshold: 2,
       logMaxEntries:   200,
       vivid:           false,
       externalDisplay: false,
@@ -367,6 +370,8 @@ suite "config persistence round-trip":
       original.cacheExpiry
     check loaded.cacheMaxEntries ==
       original.cacheMaxEntries
+    check loaded.cacheTriggerThreshold ==
+      original.cacheTriggerThreshold
     check loaded.logMaxEntries ==
       original.logMaxEntries
     check loaded.vivid == original.vivid
@@ -482,6 +487,19 @@ suite "setConfigOption":
     cfg = loadConfig()
     check cfg.cacheMaxEntries ==
       DEFAULT_CACHE_MAX_ENTRIES
+    saveConfig(defaultConfig())
+
+  test "set cache-trigger-threshold":
+    setConfigOption("cache-trigger-threshold", "2")
+    var cfg = loadConfig()
+    check cfg.cacheTriggerThreshold == 2
+    setConfigOption("cache-trigger-threshold", "false")
+    cfg = loadConfig()
+    check cfg.cacheTriggerThreshold == 0
+    setConfigOption("cache-trigger-threshold", "")
+    cfg = loadConfig()
+    check cfg.cacheTriggerThreshold ==
+      DEFAULT_CACHE_TRIGGER_THRESHOLD
     saveConfig(defaultConfig())
 
   test "set log-max-entries":
@@ -703,6 +721,15 @@ suite "cache seen":
     for i in 0 ..< 5:
       markSeen(store, fmt"h{i}", 3, 0)
     check store.seen.len <= 3
+
+  test "markSeen increments seen count":
+    var store = CacheStore(
+      entries: @[], seen: @[], nocache: @[])
+    markSeen(store, "abc", 1000, 30)
+    markSeen(store, "abc", 1000, 30)
+    markSeen(store, "abc", 1000, 30)
+    check isSeen(store, "abc", 30)
+    check getSeenCount(store, "abc", 30) == 3
 
   test "isNoCacheDecided false for empty store":
     let store = CacheStore(

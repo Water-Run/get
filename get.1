@@ -401,6 +401,14 @@ Oldest entries are removed when the cap is exceeded.
 Default:
 .IR 1000 .
 .TP
+.BI "cache\-trigger\-threshold " "int | false"
+Number of prior executions required before triggering cache strategy
+classification.
+.B false
+means classify immediately on first execution.
+Default:
+.IR 1 .
+.TP
 .BI "log\-max\-entries " "int | false"
 Maximum number of log entries to retain.
 Oldest entries are removed when the cap is exceeded.
@@ -647,14 +655,16 @@ is emitted.
 .SH CACHING
 .B get
 uses a deferred-decision caching mechanism.
-Queries are
-.B not cached on first execution.
-The first run merely records the query in a lightweight "seen" set.
-Only when the same query is executed a second time (or when the
+By default, queries are
+.B not classified for caching on first execution.
+Classification starts only after the query has been seen at least
+.B cache\-trigger\-threshold
+times (default
+.IR 1 ),
+or when
 .B --cache
-flag is explicitly passed) does
-.B get
-invoke the LLM to determine the optimal caching strategy.
+is passed.
+The first run merely records the query in a lightweight "seen" set.
 In normal process mode, this step shows the progress text:
 .I checking whether to cache...
 .PP

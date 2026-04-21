@@ -77,6 +77,7 @@ get "你的问题"
 | `cache`             | 是否启用响应缓存                     | `true` / `false`      | `true`                               |
 | `cache-expiry`      | 缓存条目过期天数                     | 正整数 (天) / `false` | `30`                                 |
 | `cache-max-entries` | 缓存保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
+| `cache-trigger-threshold` | 触发缓存判定所需的历史执行次数   | 正整数 / `false`      | `1`                                  |
 | `log-max-entries`   | 日志保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
 | `vivid`             | 是否启用 vivid 输出模式 (颜色与动画) | `true` / `false`      | `true`                               |
 | `external-display`  | 是否使用 bat/mdcat 进行渲染          | `true` / `false`      | `true`                               |
@@ -139,7 +140,7 @@ get set command-pattern ""     # 清空，禁用模式过滤
 
 ### 缓存
 
-`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询被再次执行 (或显式传入 `--cache`) 时, `get` 才会调用 LLM 判断最优缓存策略. 在该判定阶段（当未隐藏过程输出时），会显示进度文本 `checking whether to cache...`. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
+`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询的历史执行次数达到 `cache-trigger-threshold`（默认 `1`，即第二次执行触发）或显式传入 `--cache` 时, `get` 才会调用 LLM 判断最优缓存策略. 在该判定阶段（当未隐藏过程输出时），会显示进度文本 `checking whether to cache...`. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
 
 全局条目在任意工作目录下生效; 上下文条目仅在原始查询的目录下生效.
 

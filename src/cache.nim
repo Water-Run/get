@@ -80,6 +80,7 @@ type
   SeenEntry* = object
     queryHash*: string ## MD5 of the query text.
     timestamp*: int64  ## Unix epoch seconds.
+    count*: int        ## Number of observed executions.
 
 ## Records that a query has been evaluated by the cache
 ## decision LLM and explicitly classified as NOCACHE, so that
@@ -330,7 +331,8 @@ proc loadCache*(): CacheStore =
             item{"queryHash"}.getStr(""),
           timestamp:
             item{"timestamp"}.getBiggestInt(
-              0).int64)
+              0).int64,
+          count: item{"count"}.getInt(1))
         if se.queryHash.len > 0:
           seen.add(se)
     var nocache: seq[NoCacheEntry] = @[]
@@ -377,7 +379,8 @@ proc saveCache*(store: CacheStore) =
   for s in store.seen:
     sArr.add(%*{
       "queryHash": s.queryHash,
-      "timestamp": s.timestamp})
+      "timestamp": s.timestamp,
+      "count": s.count})
   var nArr = newJArray()
   for n in store.nocache:
     nArr.add(%*{
@@ -396,6 +399,36 @@ proc saveCache*(store: CacheStore) =
 # Public API — seen tracking
 # ---------------------------------------------------------------------------
 
+## Returns how many times a query has been seen within the
+## active expiry window.
+##
+## :param store: The loaded cache store.
+## :param queryHash: The query-text hash to inspect.
+## :param expiryDays: Maximum age in days (0 = never expire).
+## :returns: Execution count for this query (0 if not seen).
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     let store = CacheStore(entries: @[], seen: @[],
+##                            nocache: @[])
+##     assert getSeenCount(store, "abc", 30) == 0
+proc getSeenCount*(
+  store: CacheStore,
+  queryHash: string,
+  expiryDays: int
+): int =
+  let now = epochTime().int64
+  for s in store.seen:
+    if s.queryHash == queryHash:
+      let safeCount = max(s.count, 1)
+      if expiryDays <= 0:
+        return safeCount
+      let maxAge = expiryDays.int64 * 86400'i64
+      if (now - s.timestamp) <= maxAge:
+        return safeCount
+      return 0
+  result = 0
+
 ## Checks whether a query has been seen before (i.e. executed
 ## at least once within the expiry window).
 ##
@@ -406,24 +439,16 @@ proc saveCache*(store: CacheStore) =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     let store = CacheStore(entries: @[], seen: @[])
+##     let store = CacheStore(entries: @[], seen: @[],
+##                            nocache: @[])
 ##     assert not isSeen(store, "abc", 30)
 proc isSeen*(
   store: CacheStore,
   queryHash: string,
   expiryDays: int
 ): bool =
-  let now = epochTime().int64
-  for s in store.seen:
-    if s.queryHash == queryHash:
-      if expiryDays <= 0:
-        return true
-      let maxAge = expiryDays.int64 * 86400'i64
-      if (now - s.timestamp) <= maxAge:
-        return true
-      else:
-        return false
-  result = false
+  result = getSeenCount(
+    store, queryHash, expiryDays) > 0
 
 ## Records a query as seen.  Replaces an existing entry for
 ## the same hash and enforces the maximum entry cap on the
@@ -444,21 +469,34 @@ proc markSeen*(
   expiryDays: int
 ) =
   let now = epochTime().int64
+  let maxAge =
+    if expiryDays > 0:
+      expiryDays.int64 * 86400'i64
+    else:
+      0'i64
+
   var kept: seq[SeenEntry] = @[]
+  var nextCount = 1
+
   for s in store.seen:
-    if s.queryHash != queryHash:
-      kept.add(s)
+    let isExpired =
+      expiryDays > 0 and
+      ((now - s.timestamp) > maxAge)
+    if isExpired:
+      continue
+    if s.queryHash == queryHash:
+      nextCount = max(s.count, 1) + 1
+      continue
+    kept.add(s)
+
   kept.add(SeenEntry(
-    queryHash: queryHash, timestamp: now))
-  if expiryDays > 0:
-    let maxAge = expiryDays.int64 * 86400'i64
-    var fresh: seq[SeenEntry] = @[]
-    for s in kept:
-      if (now - s.timestamp) <= maxAge:
-        fresh.add(s)
-    kept = fresh
+    queryHash: queryHash,
+    timestamp: now,
+    count: nextCount))
+
   if maxEntries > 0 and kept.len > maxEntries:
     kept = kept[kept.len - maxEntries .. ^1]
+
   store.seen = kept
 
 ## Checks whether a query has been explicitly decided as
