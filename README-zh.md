@@ -90,6 +90,10 @@ get set cache-expiry false
 get set log-max-entries false
 ```
 
+`command-pattern` 在 shell 展开前对命令字符串本身做匹配。仅屏蔽某个
+文件名可被通配符绕过（例如 `cat *.txt`），因此更可靠的策略是匹配命令
+动词（如 `cat`、`head`、`cp` 等）。
+
 ### 执行时覆写  
 
 以下标志可在查询时覆盖持久化配置, 置于查询字符串之后:

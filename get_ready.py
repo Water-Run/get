@@ -1,988 +1,980 @@
 #!/usr/bin/env python3
-"""get_test.py -- Comprehensive test suite for the `get` CLI tool.
+"""
+get_ready.py -- installer / uninstaller for `get`.
 
-Usage:
-    python get_test.py --key <API_KEY> [--url URL] [--model NAME]
-                       [--skip-llm] [--verbose]
+Run this script to install `get` on your system.  If `get` is already
+installed, running the script again provides the option to uninstall.
 
-Assumes `get` is already installed and on PATH.
+Expected layout next to this script:
+
+    get_ready.py
+    get              (Linux binary)
+    get.exe          (Windows binary)
+    get.1            (Linux man page, optional)
+    bin/             (optional extra tools directory)
 """
 from __future__ import annotations
 
-import argparse
+import ctypes
+import getpass
 import os
-import re
+import platform
+import shutil
 import subprocess
 import sys
-import time
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
+from pathlib import Path
+from typing import Iterable
 
 # ---------------------------------------------------------------------------
-# ANSI / output
+# Platform constants
 # ---------------------------------------------------------------------------
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+IS_WINDOWS: bool = os.name == "nt"
+IS_LINUX:   bool = sys.platform.startswith("linux")
+SCRIPT_DIR: Path = Path(__file__).resolve().parent
+
+RC_MARK_BEGIN: str = "# >>> get installer >>>"
+RC_MARK_END:   str = "# <<< get installer <<<"
+
+PROJECT_TAGLINE: str = "get -- get anything from your computer"
+PROJECT_GITHUB:  str = "https://github.com/Water-Run/get"
+
+DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else "bash"
+DEFAULT_URL:   str = "https://api.poe.com/v1"
+DEFAULT_MODEL: str = "gpt-5.3-codex"
+
+# ---------------------------------------------------------------------------
+# ANSI colors
+# ---------------------------------------------------------------------------
 
 
-def strip_ansi(s: str) -> str:
-    return ANSI_RE.sub("", s)
-
-
-class C:
-    R = "\033[0m"
-    G = "\033[32m"
+class Color:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
     RED = "\033[31m"
-    Y = "\033[33m"
-    CY = "\033[36m"
-    B = "\033[1m"
-    D = "\033[2m"
-    MAG = "\033[35m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
 
 
-if not sys.stdout.isatty():
-    for k in list(vars(C)):
-        if not k.startswith("_"):
-            setattr(C, k, "")
+def _disable_colors() -> None:
+    for name in list(vars(Color)):
+        if not name.startswith("_"):
+            setattr(Color, name, "")
 
 
-VERBOSE = False
-
-
-def ok(name: str) -> None:
-    print(f"  {C.G}PASS{C.R}  {name}")
-
-
-def err(name: str, reason: str) -> None:
-    print(f"  {C.RED}FAIL{C.R}  {name}"
-          + (f"  {C.D}-- {reason}{C.R}" if reason else ""))
-
-
-def sk(name: str, reason: str) -> None:
-    print(f"  {C.Y}SKIP{C.R}  {name}"
-          + (f"  {C.D}-- {reason}{C.R}" if reason else ""))
-
-
-def hdr(title: str) -> None:
-    print(f"\n{C.B}{C.CY}>> {title}{C.R}")
-
-
-def dbg(msg: str) -> None:
-    if VERBOSE:
-        print(f"    {C.D}{msg}{C.R}")
-
-
-# ---------------------------------------------------------------------------
-# Process runner
-# ---------------------------------------------------------------------------
-
-def run_get(*args: str, timeout: int = 60,
-            stdin: Optional[str] = None
-            ) -> Tuple[int, str, str]:
-    dbg(f"$ get {' '.join(args)}")
-    try:
-        r = subprocess.run(
-            ["get", *args],
-            capture_output=True, text=True, timeout=timeout,
-            input=stdin, encoding="utf-8", errors="replace",
-        )
-        return r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", "<timeout>"
-    except FileNotFoundError:
-        print(f"{C.RED}fatal: 'get' not found on PATH.{C.R}",
-              file=sys.stderr)
-        sys.exit(2)
-
-
-def parse_kv(text: str) -> Dict[str, str]:
-    d: Dict[str, str] = {}
-    for line in strip_ansi(text).splitlines():
-        if " = " in line:
-            k, v = line.split(" = ", 1)
-            d[k.strip()] = v.rstrip()
-    return d
-
-
-def get_cfg(opt: str) -> str:
-    rc, o, _ = run_get("config", f"--{opt}")
-    if rc != 0:
-        return "<ERROR>"
-    return parse_kv(o).get(opt, "")
-
-
-def set_opt(opt: str, *values: str) -> bool:
-    rc, _, _ = run_get("set", opt, *values)
-    return rc == 0
-
-
-def clear_opt(opt: str) -> bool:
-    rc, _, _ = run_get("set", opt)
-    return rc == 0
-
-
-def cache_entries() -> int:
-    rc, o, _ = run_get("cache")
-    if rc != 0:
-        return -1
-    try:
-        return int(parse_kv(o).get("entries", "-1"))
-    except ValueError:
-        return -1
-
-
-def log_entries() -> int:
-    rc, o, _ = run_get("log")
-    if rc != 0:
-        return -1
-    try:
-        return int(parse_kv(o).get("entries", "-1"))
-    except ValueError:
-        return -1
-
-
-# ---------------------------------------------------------------------------
-# Stats
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Stats:
-    passed: int = 0
-    failed: int = 0
-    skipped: int = 0
-    failures: List[Tuple[str, str]] = field(default_factory=list)
-
-    def pass_(self, name: str) -> None:
-        self.passed += 1
-        ok(name)
-
-    def fail(self, name: str, reason: str = "") -> None:
-        self.failed += 1
-        self.failures.append((name, reason))
-        err(name, reason)
-
-    def skip(self, name: str, reason: str = "") -> None:
-        self.skipped += 1
-        sk(name, reason)
-
-
-# ---------------------------------------------------------------------------
-# Assert helpers
-# ---------------------------------------------------------------------------
-
-def assert_eq(s: Stats, name: str, got, expected) -> None:
-    if got == expected:
-        s.pass_(name)
-    else:
-        s.fail(name, f"got={got!r} expected={expected!r}")
-
-
-def assert_cfg(s: Stats, name: str, opt: str, expected: str) -> None:
-    got = get_cfg(opt)
-    if got == expected:
-        s.pass_(f"{name} [{opt}={expected!r}]")
-    else:
-        s.fail(f"{name} [{opt}]",
-               f"got={got!r} expected={expected!r}")
-
-
-def assert_cfg_has(s: Stats, name: str, opt: str,
-                   needle: str) -> None:
-    got = get_cfg(opt)
-    if needle in got:
-        s.pass_(f"{name} [{opt}~{needle!r}]")
-    else:
-        s.fail(f"{name} [{opt}]",
-               f"got={got!r} expected contains {needle!r}")
-
-
-def assert_exit0(s: Stats, name: str, *argv: str,
-                 timeout: int = 30) -> Tuple[int, str, str]:
-    rc, o, e = run_get(*argv, timeout=timeout)
-    if rc == 0:
-        s.pass_(name)
-    else:
-        s.fail(name,
-               f"exit={rc} err={strip_ansi(e).strip()[:100]!r}")
-    return rc, o, e
-
-
-def assert_exit_nonzero(s: Stats, name: str, *argv: str,
-                        timeout: int = 30) -> None:
-    rc, _, e = run_get(*argv, timeout=timeout)
-    if rc != 0:
-        s.pass_(f"{name} [exit={rc}]")
-    else:
-        s.fail(name, "unexpected exit 0")
-
-
-# ===========================================================================
-# Test blocks
-# ===========================================================================
-
-def t_info(s: Stats) -> None:
-    hdr("[1] Info & help")
-
-    # 1-4
-    rc, o, _ = run_get("version")
-    if rc == 0 and len(strip_ansi(o).strip()) > 0:
-        s.pass_("get version")
-    else:
-        s.fail("get version", f"exit={rc}")
-
-    for cmd in ["help", "--help", "-h"]:
-        rc, o, _ = run_get(cmd)
-        low = strip_ansi(o).lower()
-        if rc == 0 and "usage" in low and "options" in low:
-            s.pass_(f"get {cmd}")
-        else:
-            s.fail(f"get {cmd}", f"exit={rc}")
-
-    # 5
-    rc, o, _ = run_get("get")
-    low = strip_ansi(o).lower()
-    if rc == 0 and all(k in low for k in
-                       ["name", "version", "author",
-                        "license", "github"]):
-        s.pass_("get get (all fields)")
-    else:
-        s.fail("get get (all fields)", f"exit={rc}")
-
-    # 6
-    checks = [
-        ("--intro", lambda v: len(v.strip()) > 0),
-        ("--version", lambda v: len(v.strip()) > 0
-         and any(c.isdigit() for c in v)),
-        ("--license", lambda v: "agpl" in v.lower()),
-        ("--github", lambda v: "github.com" in v.lower()),
-    ]
-    for flag, ck in checks:
-        rc, o, _ = run_get("get", flag)
-        if rc == 0 and ck(strip_ansi(o)):
-            s.pass_(f"get get {flag}")
-        else:
-            s.fail(f"get get {flag}", f"exit={rc}")
-
-    # 7
-    assert_exit_nonzero(s, "get get --unknown", "get", "--unknown")
-
-
-def t_boolean_options(s: Stats) -> None:
-    hdr("[2] Boolean options (set / readback)")
-    opts = ["manual-confirm", "double-check", "instance",
-            "log", "hide-process", "cache", "vivid",
-            "external-display"]
-    for opt in opts:
-        for v in ["true", "false"]:
-            if not set_opt(opt, v):
-                s.fail(f"set {opt} {v}", "set returned non-zero")
-                continue
-            assert_cfg(s, f"bool {opt}={v}", opt, v)
-
-
-def t_integer_options(s: Stats) -> None:
-    hdr("[3] Integer options (int / false / default)")
-    table = {
-        "timeout": "300",
-        "max-token": "20480",
-        "max-rounds": "3",
-        "cache-expiry": "30",
-        "cache-max-entries": "1000",
-        "cache-trigger-threshold": "1",
-        "log-max-entries": "1000",
-    }
-    for opt, default in table.items():
-        set_opt(opt, "42")
-        assert_cfg(s, f"int set {opt}=42", opt, "42")
-        set_opt(opt, "false")
-        assert_cfg(s, f"int disable {opt}", opt, "false")
-        clear_opt(opt)
-        assert_cfg(s, f"int reset {opt}", opt, default)
-
-
-def t_strings(s: Stats) -> None:
-    hdr("[4] String options & command-pattern semantics")
-
-    # 45
-    test_url = "https://example.test/v1"
-    set_opt("url", test_url)
-    assert_cfg(s, "string set url", "url", test_url)
-
-    # 46
-    set_opt("model", "test-model-name")
-    assert_cfg(s, "string set model", "model",
-               "test-model-name")
-
-    # 47
-    set_opt("system-prompt", "hello world prompt")
-    assert_cfg(s, "string set system-prompt",
-               "system-prompt", "hello world prompt")
-
-    # 48
-    clear_opt("system-prompt")
-    assert_cfg(s, "string clear system-prompt",
-               "system-prompt", "")
-
-    # 49
-    clear_opt("command-pattern")
-    v = get_cfg("command-pattern")
-    if "built-in" in v and r"\b" in v:
-        s.pass_("command-pattern: omit -> built-in default")
-    else:
-        s.fail("command-pattern default", v[:80])
-
-    # 50
-    set_opt("command-pattern", "")
-    v = get_cfg("command-pattern")
-    if "disabled" in v.lower():
-        s.pass_('command-pattern: "" -> (disabled)')
-    else:
-        s.fail("command-pattern disable", v[:80])
-
-    # 51
-    set_opt("command-pattern", r"\bdangerous\b")
-    v = get_cfg("command-pattern")
-    if r"\bdangerous\b" in v:
-        s.pass_("command-pattern: custom value")
-    else:
-        s.fail("command-pattern custom", v[:80])
-
-    # 52 -- weak pattern still accepted (warning is side-effect only)
-    rc, _, e = run_get("set", "command-pattern", "^ls$")
-    if rc == 0:
-        s.pass_("command-pattern: weak pattern accepted")
-    else:
-        s.fail("command-pattern weak accept", f"exit={rc}")
-
-    # cleanup
-    clear_opt("command-pattern")
-
-
-def t_key_and_config(s: Stats, args) -> None:
-    hdr("[5] Key handling & config view")
-
-    # 53
-    set_opt("key", args.key)
-    v = get_cfg("key")
-    if "set" in v.lower() and args.key not in v:
-        s.pass_("config --key shows 'set', no leak")
-    else:
-        s.fail("config --key isolation", v[:60])
-
-    # 54
-    clear_opt("key")
-    v = get_cfg("key")
-    if "not set" in v.lower():
-        s.pass_("clear key -> config --key shows 'not set'")
-    else:
-        s.fail("clear key", v[:60])
-
-    # restore
-    set_opt("key", args.key)
-
-    # 55
-    rc, o, _ = run_get("config")
-    cfg = parse_kv(o)
-    if rc == 0 and len(cfg) >= 18:
-        s.pass_(f"get config full ({len(cfg)} fields)")
-    else:
-        s.fail("get config full", f"exit={rc} fields={len(cfg)}")
-
-    # 56
-    set_opt("timeout", "777")
-    rc, _, _ = run_get("config", "--reset")
-    if rc == 0:
-        s.pass_("get config --reset exit 0")
-    else:
-        s.fail("get config --reset", f"exit={rc}")
-    assert_cfg(s, "post-reset timeout default",
-               "timeout", "300")
-
-    # 57
-    assert_exit_nonzero(s, "config --nonexistent",
-                        "config", "--nonexistent")
-
-    # re-apply test credentials after reset
-    set_opt("key", args.key)
-    if args.url:
-        set_opt("url", args.url)
-    if args.model:
-        set_opt("model", args.model)
-
-
-def t_invalid(s: Stats) -> None:
-    hdr("[6] Invalid inputs")
-    cases = [
-        ("invalid bool",       ["set", "double-check", "maybe"]),
-        ("invalid int",        ["set", "timeout", "abc"]),
-        ("negative int",       ["set", "timeout", "-5"]),
-        ("unknown set opt",    ["set", "nonexistent-opt", "x"]),
-        ("missing opt name",   ["set"]),
-        ("unknown top cmd",    ["nosuchcommand"]),
-        ("--model no value",
-         ["query-text", "--model"]),
-        ("--timeout no value",
-         ["query-text", "--timeout"]),
-        ("--timeout invalid",
-         ["query-text", "--timeout", "notanumber"]),
-        ("cache --unset missing arg",
-         ["cache", "--unset"]),
-    ]
-    for name, argv in cases:
-        assert_exit_nonzero(s, name, *argv, timeout=15)
-
-
-def t_cache_log_mgmt(s: Stats) -> None:
-    hdr("[7] Cache & log management")
-
-    # 68
-    rc, _, _ = run_get("cache", "--clean")
-    if rc == 0:
-        s.pass_("cache --clean exit 0")
-    else:
-        s.fail("cache --clean", f"exit={rc}")
-    n = cache_entries()
-    if n == 0:
-        s.pass_(f"cache entries after clean = {n}")
-    else:
-        s.fail("cache entries after clean",
-               f"got {n}")
-
-    # 69
-    rc, o, _ = run_get("cache")
-    keys = parse_kv(o)
-    required = ["cache", "entries", "max entries", "file"]
-    missing = [k for k in required if k not in keys]
-    if rc == 0 and not missing:
-        s.pass_("cache display has required fields")
-    else:
-        s.fail("cache display fields", f"missing={missing}")
-
-    # 70
-    rc, o, _ = run_get("cache", "--unset", "definitely-no-such-query-xyz")
-    low = strip_ansi(o).lower()
-    if rc == 0:
-        s.pass_("cache --unset no-match exit 0")
-    else:
-        s.fail("cache --unset no-match", f"exit={rc}")
-
-    # 71
-    rc, _, _ = run_get("log", "--clean")
-    if rc == 0:
-        s.pass_("log --clean exit 0")
-    else:
-        s.fail("log --clean", f"exit={rc}")
-    n = log_entries()
-    if n == 0:
-        s.pass_(f"log entries after clean = {n}")
-    else:
-        s.fail("log entries after clean", f"got {n}")
-
-    # 72
-    rc, o, _ = run_get("log")
-    keys = parse_kv(o)
-    required = ["log", "entries", "file", "file size"]
-    missing = [k for k in required if k not in keys]
-    if rc == 0 and not missing:
-        s.pass_("log display has required fields")
-    else:
-        s.fail("log display fields", f"missing={missing}")
-
-
-def t_cache_disabled_warning(s: Stats, args) -> None:
-    hdr("[7b] Cache-disabled warning & log-disabled behaviour")
-
-    if args.skip_llm:
-        s.skip("cache-disabled warning", "requires LLM")
-        s.skip("log-disabled no append", "requires LLM")
-        s.skip("log-max-entries enforcement", "requires LLM")
+def _enable_ansi() -> None:
+    if not sys.stdout.isatty():
+        _disable_colors()
         return
+    if IS_WINDOWS:
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_ulong()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        except Exception:
+            _disable_colors()
 
-    # 74 -- cache=false produces warning on query
-    set_opt("cache", "false")
-    set_opt("hide-process", "false")
-    set_opt("vivid", "false")
-    set_opt("double-check", "false")
-    set_opt("instance", "true")
-    rc, _, e = run_get(
-        "reply with 'x' only", timeout=120
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+
+def info(msg: str) -> None:
+    print(f"  {Color.CYAN}{Color.BOLD}info:{Color.RESET}  {msg}")
+
+
+def warn(msg: str) -> None:
+    print(f"  {Color.YELLOW}{Color.BOLD}warn:{Color.RESET}  {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  {Color.RED}{Color.BOLD}error:{Color.RESET} {msg}", file=sys.stderr)
+
+
+def step(msg: str) -> None:
+    print(f"    {Color.BLUE}{Color.BOLD}-->{Color.RESET} {msg}")
+
+
+def good(msg: str) -> None:
+    print(f"    {Color.GREEN}{Color.BOLD}[ok]{Color.RESET} {msg}")
+
+
+def bad(msg: str) -> None:
+    print(f"  {Color.RED}{Color.BOLD}[fail]{Color.RESET} {msg}")
+
+
+def banner(title: str) -> None:
+    inner = 58
+    bar = "-" * inner
+    pad = inner - len(title) - 2
+    lp = max(pad // 2, 0)
+    rp = max(pad - lp, 0)
+    print()
+    print(f"{Color.CYAN}{Color.BOLD}+{bar}+{Color.RESET}")
+    print(
+        f"{Color.CYAN}{Color.BOLD}|{Color.RESET}"
+        f"{' ' * (lp + 1)}{Color.BOLD}{title}{Color.RESET}{' ' * (rp + 1)}"
+        f"{Color.CYAN}{Color.BOLD}|{Color.RESET}"
     )
-    low = strip_ansi(e).lower()
-    if "cache is disabled" in low:
-        s.pass_("cache-disabled warning emitted")
+    print(f"{Color.CYAN}{Color.BOLD}+{bar}+{Color.RESET}")
+    print()
+
+
+def _print_github() -> None:
+    print()
+    print(f"  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}")
+    print()
+
+# ---------------------------------------------------------------------------
+# Input helpers
+# ---------------------------------------------------------------------------
+
+
+def ask_yes_no(prompt: str, default: str = "y") -> bool:
+    suffix = "[Y/n]" if default.lower() == "y" else "[y/N]"
+    while True:
+        try:
+            reply = input(
+                f"  {Color.BOLD}?{Color.RESET} {prompt} "
+                f"{Color.DIM}{suffix}{Color.RESET} "
+            ).strip().lower()
+        except EOFError:
+            reply = ""
+        if not reply:
+            reply = default.lower()
+        if reply in ("y", "yes"):
+            return True
+        if reply in ("n", "no"):
+            return False
+
+
+def ask_input(prompt: str, hint: str = "") -> str:
+    hint_str = f" {Color.DIM}[{hint}]{Color.RESET}" if hint else ""
+    try:
+        reply = input(
+            f"  {Color.BOLD}>{Color.RESET} {prompt}{hint_str}: "
+        ).strip()
+    except EOFError:
+        reply = ""
+    return reply
+
+
+def ask_secret(prompt: str, hint: str = "") -> str:
+    """Prompt for sensitive text without echoing the input."""
+    hint_str = f" [{hint}]" if hint else ""
+    try:
+        reply = getpass.getpass(f"  > {prompt}{hint_str}: ").strip()
+    except Exception:
+        reply = ask_input(prompt, hint=hint)
+    return reply
+
+
+def ask_choice(prompt: str, options: list[tuple[str, str, str]]) -> str:
+    """Present a numbered menu and return the key of the selected option."""
+    print()
+    print(f"  {Color.BOLD}{prompt}{Color.RESET}")
+    for idx, (_, label, desc) in enumerate(options, 1):
+        print(f"    {Color.BOLD}{idx}){Color.RESET} {label}")
+        if desc:
+            print(f"       {Color.DIM}{desc}{Color.RESET}")
+    while True:
+        try:
+            reply = input(
+                f"\n  {Color.BOLD}>{Color.RESET} "
+                f"Select [1-{len(options)}]: "
+            ).strip()
+        except EOFError:
+            reply = "1"
+        if reply.isdigit() and 1 <= int(reply) <= len(options):
+            return options[int(reply) - 1][0]
+
+# ---------------------------------------------------------------------------
+# System check
+# ---------------------------------------------------------------------------
+
+
+def check_system() -> None:
+    step("Checking system compatibility")
+    if IS_WINDOWS:
+        v = sys.getwindowsversion()
+        if v.major < 10:
+            bad(f"Windows {v.major}.{v.minor} -- Windows 10 or later is required")
+            sys.exit(1)
+        good(f"Windows {v.major}.{v.minor} (build {v.build})")
+    elif IS_LINUX:
+        release = platform.release()
+        try:
+            major = int(release.split(".", 1)[0])
+        except ValueError:
+            major = 0
+        if major < 6:
+            bad(f"Linux kernel {release} -- kernel 6 or later is required")
+            sys.exit(1)
+        good(f"Linux kernel {release}")
     else:
-        s.fail("cache-disabled warning",
-               f"stderr={low.strip()[:120]!r}")
-    set_opt("cache", "true")
+        bad(f"Unsupported platform: {sys.platform}")
+        sys.exit(1)
 
-    # 73 -- log=false -> no new entries
-    run_get("log", "--clean")
-    before = log_entries()
-    set_opt("log", "false")
-    run_get("reply with 'y' only", "--instance",
-            "--no-cache", "--hide-process", timeout=120)
-    after = log_entries()
-    if after == before:
-        s.pass_(f"log=false: no append (entries={after})")
-    else:
-        s.fail("log=false no append",
-               f"before={before} after={after}")
-    set_opt("log", "true")
-
-    # 75 -- log-max-entries=3 enforcement
-    run_get("log", "--clean")
-    set_opt("log-max-entries", "3")
-    for i in range(5):
-        run_get(f"reply with '{i}' only", "--instance",
-                "--no-cache", "--hide-process", timeout=120)
-    n = log_entries()
-    if n <= 3:
-        s.pass_(f"log-max-entries=3 enforced (entries={n})")
-    else:
-        s.fail("log-max-entries enforced", f"entries={n}")
-    clear_opt("log-max-entries")
+# ---------------------------------------------------------------------------
+# Install paths
+# ---------------------------------------------------------------------------
 
 
-def t_isok(s: Stats, args) -> None:
-    hdr("[8] isok connectivity")
+def install_paths() -> dict:
+    if IS_WINDOWS:
+        localappdata = os.environ.get("LOCALAPPDATA") or str(
+            Path.home() / "AppData" / "Local"
+        )
+        base = Path(localappdata) / "Programs" / "get"
+        return {
+            "root":      base,
+            "binary":    base / "get.exe",
+            "extra_bin": base / "bin",
+            "man":       None,
+            "path_dirs": [base, base / "bin"],
+        }
+    home = Path.home()
+    local = home / ".local"
+    return {
+        "root":      local / "share" / "get",
+        "binary":    local / "bin" / "get",
+        "extra_bin": local / "share" / "get" / "bin",
+        "man":       local / "share" / "man" / "man1" / "get.1",
+        "path_dirs": [local / "bin", local / "share" / "get" / "bin"],
+    }
 
-    # 77
-    if args.skip_llm:
-        s.skip("get isok", "--skip-llm")
-    else:
-        rc, o, e = run_get("isok", timeout=90)
-        combined = strip_ansi(o + e).lower()
-        if rc == 0 and "ok" in combined:
-            s.pass_("get isok exit 0 with 'ok'")
+
+def find_installed() -> "Path | None":
+    paths = install_paths()
+    if paths["binary"].exists():
+        return paths["binary"]
+    found = shutil.which("get")
+    if found:
+        resolved = Path(found).resolve()
+        if resolved.parent != SCRIPT_DIR:
+            return resolved
+    return None
+
+# ---------------------------------------------------------------------------
+# File helpers
+# ---------------------------------------------------------------------------
+
+
+def copy_file(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if not IS_WINDOWS:
+        os.chmod(dst, 0o755)
+
+
+def remove_file(p: Path) -> None:
+    if not p.exists():
+        return
+    step(f"Removing {p}")
+    try:
+        p.unlink()
+        good("Removed")
+    except OSError as e:
+        bad(f"Failed: {e}")
+
+
+def prune_empty_parents(start: Path, stop_at: Path) -> None:
+    try:
+        stop_at = stop_at.resolve()
+    except OSError:
+        return
+    cur = start
+    while cur.exists() and cur.resolve() != stop_at:
+        try:
+            cur.rmdir()
+        except OSError:
+            break
+        cur = cur.parent
+
+# ---------------------------------------------------------------------------
+# PATH management
+# ---------------------------------------------------------------------------
+
+
+def _notify_env_change_windows() -> None:
+    try:
+        result = ctypes.c_long()
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000,
+            ctypes.byref(result),
+        )
+    except Exception:
+        pass
+
+
+def path_add_windows(dirs: Iterable[Path]) -> bool:
+    import winreg
+    changed = False
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment",
+        0, winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as k:
+        try:
+            current, _ = winreg.QueryValueEx(k, "Path")
+        except FileNotFoundError:
+            current = ""
+        parts = [p for p in current.split(";") if p]
+        existing = {p.lower() for p in parts}
+        for d in dirs:
+            value = str(d)
+            if value.lower() not in existing:
+                parts.append(value)
+                existing.add(value.lower())
+                changed = True
+        if changed:
+            winreg.SetValueEx(
+                k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+            _notify_env_change_windows()
+    return changed
+
+
+def path_remove_windows(dirs: Iterable[Path]) -> bool:
+    import winreg
+    targets = {str(d).lower() for d in dirs}
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment",
+        0, winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as k:
+        try:
+            current, _ = winreg.QueryValueEx(k, "Path")
+        except FileNotFoundError:
+            return False
+        parts = [p for p in current.split(";") if p]
+        kept = [p for p in parts if p.lower() not in targets]
+        if len(kept) == len(parts):
+            return False
+        winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(kept))
+        _notify_env_change_windows()
+    return True
+
+
+def path_add_linux(dirs: Iterable[Path]) -> bool:
+    lines = [RC_MARK_BEGIN]
+    for d in dirs:
+        lines.append(
+            f'case ":$PATH:" in *":{d}:"*) ;; '
+            f'*) export PATH="{d}:$PATH" ;; esac'
+        )
+    lines.append(RC_MARK_END)
+    block = "\n" + "\n".join(lines) + "\n"
+    changed = False
+    home = Path.home()
+    for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
+        if not rc.exists() and rc.name != ".profile":
+            continue
+        content = rc.read_text() if rc.exists() else ""
+        if RC_MARK_BEGIN in content:
+            continue
+        with rc.open("a") as f:
+            f.write(block)
+        changed = True
+    return changed
+
+
+def path_remove_linux() -> bool:
+    changed = False
+    home = Path.home()
+    for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
+        if not rc.exists():
+            continue
+        content = rc.read_text()
+        if RC_MARK_BEGIN not in content:
+            continue
+        kept: list[str] = []
+        skip = False
+        for line in content.splitlines(keepends=True):
+            if RC_MARK_BEGIN in line:
+                skip = True
+                continue
+            if RC_MARK_END in line:
+                skip = False
+                continue
+            if not skip:
+                kept.append(line)
+        rc.write_text("".join(kept).rstrip() + "\n")
+        changed = True
+    return changed
+
+
+def add_to_path(dirs: list[Path]) -> bool:
+    return path_add_windows(dirs) if IS_WINDOWS else path_add_linux(dirs)
+
+
+def remove_from_path(dirs: list[Path]) -> bool:
+    return path_remove_windows(dirs) if IS_WINDOWS else path_remove_linux()
+
+# ---------------------------------------------------------------------------
+# get binary invocation
+# ---------------------------------------------------------------------------
+
+
+def run_get(binary: Path, *args: str) -> bool:
+    """
+    Invoke the installed get binary and return True on success.
+    The value following a 'key' argument is masked in diagnostic output.
+    """
+    display_args: list[str] = []
+    for i, a in enumerate(args):
+        if i > 0 and args[i - 1] == "key":
+            display_args.append("<hidden>")
         else:
-            s.fail("get isok",
-                   f"exit={rc} combined="
-                   f"{combined.strip()[:120]!r}")
+            display_args.append(a)
+    cmd_display = "get " + " ".join(display_args)
 
-    # 78 -- missing key
-    clear_opt("key")
-    rc, _, _ = run_get("isok", timeout=30)
-    if rc != 0:
-        s.pass_(f"get isok without key -> exit {rc}")
-    else:
-        s.fail("get isok without key", "unexpected exit 0")
-    set_opt("key", args.key)
-
+    try:
+        result = subprocess.run(
+            [str(binary), *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return True
+        raw = result.stderr.strip() or result.stdout.strip() or "(no output)"
+        bad(f"'{cmd_display}' returned non-zero: {raw}")
+        return False
+    except FileNotFoundError:
+        bad(f"Binary not found: {binary}")
+        return False
+    except subprocess.TimeoutExpired:
+        bad(f"'{cmd_display}' timed out")
+        return False
+    except Exception as exc:
+        bad(f"Unexpected error: {exc}")
+        return False
 
 # ---------------------------------------------------------------------------
-# LLM queries
+# Shell detection
 # ---------------------------------------------------------------------------
 
-Q_SHORT = "reply with the single word 'pong' and nothing else"
-Q_SHORT2 = "reply with the single word 'ping' and nothing else"
-Q_NUM = "reply with the single digit '7' and nothing else"
+
+# Only these shells are auto-detected. Anything else -> return None ->
+# configure_shell() keeps the built-in default and makes no changes.
+_LINUX_SHELLS = ("bash", "zsh", "fish")
+_WINDOWS_SHELLS = ("powershell", "pwsh", "cmd")
 
 
-def t_instance_mode(s: Stats, args) -> None:
-    hdr("[9] LLM query -- instance mode")
-    if args.skip_llm:
-        for i in range(6):
-            s.skip(f"instance test {i + 1}", "--skip-llm")
+def _normalize_name(raw: str, allowed: tuple) -> "str | None":
+    """Map a raw process/executable name to an allowed shell identifier."""
+    if not raw:
+        return None
+    name = Path(raw.strip()).name.lower()
+    # Strip leading dash from login shells, e.g. "-bash"
+    name = name.lstrip("-")
+    # Strip Windows .exe suffix
+    if name.endswith(".exe"):
+        name = name[:-4]
+    # Handle version-suffixed names, e.g. "bash-5.2"
+    base = name.split("-", 1)[0].split(".", 1)[0]
+    for known in allowed:
+        if name == known or base == known:
+            return known
+    return None
+
+
+def _linux_shell_from_parent() -> "str | None":
+    """Read /proc/<ppid>/comm to identify the running interactive shell."""
+    try:
+        ppid = os.getppid()
+        comm = Path(f"/proc/{ppid}/comm")
+        if comm.exists():
+            name = _normalize_name(comm.read_text(), _LINUX_SHELLS)
+            if name:
+                return name
+        exe = Path(f"/proc/{ppid}/exe")
+        if exe.exists():
+            name = _normalize_name(os.readlink(exe), _LINUX_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def _linux_shell_from_env() -> "str | None":
+    return _normalize_name(os.environ.get("SHELL", ""), _LINUX_SHELLS)
+
+
+def _linux_shell_from_passwd() -> "str | None":
+    try:
+        import pwd
+        entry = pwd.getpwuid(os.getuid())
+        return _normalize_name(entry.pw_shell, _LINUX_SHELLS)
+    except Exception:
+        return None
+
+
+def _windows_shell_from_parent() -> "str | None":
+    """Identify the parent shell on Windows via WMI / tasklist."""
+    try:
+        ppid = os.getppid()
+    except Exception:
+        return None
+
+    # Try PowerShell's CIM query first -- accurate and usually available.
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={ppid}')"
+                ".Name",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            name = _normalize_name(result.stdout, _WINDOWS_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+
+    # Fallback: tasklist
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {ppid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # CSV: "image","pid",...
+            first = result.stdout.strip().splitlines()[0]
+            image = first.split(",", 1)[0].strip().strip('"')
+            name = _normalize_name(image, _WINDOWS_SHELLS)
+            if name:
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def _windows_shell_from_env() -> "str | None":
+    # PowerShell sets PSModulePath; pwsh 7+ also sets POSH_* vars in some setups.
+    if os.environ.get("PSModulePath"):
+        # Can't reliably distinguish powershell vs pwsh from env alone,
+        # assume Windows PowerShell (more common as default shell).
+        return "powershell"
+    # ComSpec typically points to cmd.exe when running inside cmd.
+    comspec = os.environ.get("ComSpec", "")
+    if comspec and _normalize_name(comspec, _WINDOWS_SHELLS) == "cmd":
+        return "cmd"
+    return None
+
+
+def detect_current_shell() -> "str | None":
+    """
+    Return one of the auto-detectable shells, or None if unknown.
+
+    Linux   : bash, zsh, fish
+    Windows : powershell, pwsh, cmd
+
+    Any other shell (sh, dash, ksh, tcsh, nushell, xonsh, ...) returns None
+    so that the caller keeps the built-in default and makes no changes.
+    """
+    if IS_LINUX:
+        # Parent process is the most reliable source -- correctly handles
+        # `exec fish` or stale $SHELL after `chsh` without re-login.
+        return (
+            _linux_shell_from_parent()
+            or _linux_shell_from_env()
+            or _linux_shell_from_passwd()
+        )
+    if IS_WINDOWS:
+        return (
+            _windows_shell_from_parent()
+            or _windows_shell_from_env()
+        )
+    return None
+
+# ---------------------------------------------------------------------------
+# Post-install configuration
+# ---------------------------------------------------------------------------
+
+
+def configure_shell(binary: Path) -> None:
+    detected = detect_current_shell()
+    if detected is None or detected == DEFAULT_SHELL:
         return
-
-    set_opt("instance", "true")
-    set_opt("double-check", "false")
-    set_opt("cache", "true")
-    set_opt("log", "true")
-    run_get("cache", "--clean")
-
-    # 79
-    rc, o, e = run_get(Q_SHORT, "--no-cache",
-                       "--hide-process", timeout=120)
-    if rc == 0 and len(strip_ansi(o).strip()) > 0:
-        s.pass_("instance simple query exit 0")
-    else:
-        s.fail("instance simple query",
-               f"exit={rc} err={strip_ansi(e)[:120]!r}")
-
-    # 80 -- --no-cache explicitly
-    rc, _, _ = run_get(Q_SHORT, "--no-cache",
-                       "--hide-process", timeout=120)
-    if rc == 0:
-        s.pass_("instance --no-cache")
-    else:
-        s.fail("instance --no-cache", f"exit={rc}")
-
-    # 81 -- --hide-process suppresses intermediate
-    rc, o, e = run_get(Q_SHORT, "--no-cache",
-                       "--hide-process", timeout=120)
-    merged = strip_ansi(e)
-    if rc == 0 and "executing" not in merged.lower():
-        s.pass_("--hide-process suppresses intermediate")
-    else:
-        s.fail("--hide-process",
-               f"stderr={merged.strip()[:120]!r}")
-
-    # 82 -- --no-vivid: no ANSI
-    rc, o, _ = run_get(Q_SHORT, "--no-cache", "--no-vivid",
-                       "--hide-process", timeout=120)
-    if rc == 0 and ANSI_RE.search(o) is None:
-        s.pass_("--no-vivid: no ANSI escapes in stdout")
-    else:
-        any_ansi = bool(ANSI_RE.search(o))
-        s.fail("--no-vivid",
-               f"exit={rc} has_ansi={any_ansi}")
-
-    # 83 -- --model override
-    mdl = args.model or "gpt-5.3-codex"
-    rc, _, _ = run_get(Q_SHORT, "--no-cache", "--hide-process",
-                       "--model", mdl, timeout=120)
-    if rc == 0:
-        s.pass_(f"--model {mdl} override")
-    else:
-        s.fail("--model override", f"exit={rc}")
-
-    # 84 -- --timeout override
-    rc, _, _ = run_get(Q_SHORT, "--no-cache", "--hide-process",
-                       "--timeout", "120", timeout=140)
-    if rc == 0:
-        s.pass_("--timeout override")
-    else:
-        s.fail("--timeout override", f"exit={rc}")
-
-
-def t_agent_mode(s: Stats, args) -> None:
-    hdr("[10] LLM query -- agent mode")
-    if args.skip_llm:
-        for i in range(4):
-            s.skip(f"agent test {i + 1}", "--skip-llm")
+    print()
+    info(
+        f"Detected shell: {Color.BOLD}{detected}{Color.RESET}  "
+        f"(configured default: {DEFAULT_SHELL})"
+    )
+    if not ask_yes_no(
+        f"Set '{detected}' as get's default shell?",
+        default="y",
+    ):
         return
-
-    set_opt("instance", "false")
-    set_opt("double-check", "false")
-    run_get("log", "--clean")
-    run_get("cache", "--clean")
-
-    before = log_entries()
-
-    # 85
-    rc, o, e = run_get(Q_SHORT, "--no-cache",
-                       "--hide-process", timeout=180)
-    if rc == 0:
-        s.pass_("agent default query exit 0")
+    step(f"Running: get set shell {detected}")
+    if run_get(binary, "set", "shell", detected):
+        good(f"Shell set to '{detected}'")
     else:
-        s.fail("agent default query",
-               f"exit={rc} err={strip_ansi(e)[:120]!r}")
+        warn(
+            f"Shell configuration failed. Run manually: get set shell {detected}")
 
-    # 86
-    rc, _, e = run_get(Q_SHORT2, "--no-cache",
-                       "--hide-process", timeout=180)
-    lo = strip_ansi(e).lower()
-    if rc == 0 and "round" not in lo:
-        s.pass_("agent --hide-process suppresses rounds")
+
+def configure_model(binary: Path) -> None:
+    banner("LLM configuration")
+    info("Configure the LLM connection parameters.")
+    info("Leave a field empty to retain its built-in default or to skip.")
+    print()
+
+    url = ask_input(
+        "API endpoint URL",
+        hint=f"leave empty for default: {DEFAULT_URL}",
+    )
+    if url:
+        step(f"Running: get set url {url}")
+        if run_get(binary, "set", "url", url):
+            good(f"URL set to '{url}'")
+    print()
+
+    model = ask_input(
+        "Model name",
+        hint=f"leave empty for default: {DEFAULT_MODEL}",
+    )
+    if model:
+        step(f"Running: get set model {model}")
+        if run_get(binary, "set", "model", model):
+            good(f"Model set to '{model}'")
+    print()
+
+    key = ask_secret("API key", hint="leave empty to skip")
+    if key:
+        step("Running: get set key <hidden>")
+        if run_get(binary, "set", "key", key):
+            good("API key configured")
     else:
-        s.fail("agent --hide-process",
-               f"err={lo[:120]!r}")
-
-    # 87 -- max-rounds=1
-    set_opt("max-rounds", "1")
-    rc, _, _ = run_get(Q_NUM, "--no-cache",
-                       "--hide-process", timeout=180)
-    if rc == 0:
-        s.pass_("agent max-rounds=1 terminates cleanly")
-    else:
-        s.fail("agent max-rounds=1", f"exit={rc}")
-    clear_opt("max-rounds")
-
-    # 88 -- log grew
-    after = log_entries()
-    if after > before:
-        s.pass_(f"agent queries appended log ({before}->{after})")
-    else:
-        s.fail("agent log append",
-               f"before={before} after={after}")
+        info("API key not set. Configure later with: get set key <your-key>")
 
 
-def t_cache_behaviour(s: Stats, args) -> None:
-    hdr("[11] Cache behavioural tests")
-    if args.skip_llm:
-        for i in range(7):
-            s.skip(f"cache behaviour {i + 1}", "--skip-llm")
-        return
+def configure_advanced(binary: Path) -> None:
+    banner("Advanced configuration")
+    info("Defaults are shown in brackets. Press Enter to accept the default.")
+    print()
 
-    set_opt("instance", "true")
-    set_opt("double-check", "false")
-    set_opt("hide-process", "true")
-    set_opt("vivid", "false")
-    set_opt("cache", "true")
-    set_opt("cache-trigger-threshold", "1")
-    run_get("cache", "--clean")
+    # double-check (default: true)
+    info(
+        "double-check: Secondary LLM safety review of generated commands."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    double_check = ask_yes_no("Enable double-check?", default="y")
+    step(f"Running: get set double-check {str(double_check).lower()}")
+    if run_get(binary, "set", "double-check", str(double_check).lower()):
+        good(f"double-check = {str(double_check).lower()}")
+    print()
 
-    Q = "reply with the exact text 'cache-test-1' only"
+    # manual-confirm (default: false)
+    info(
+        "manual-confirm: Require manual confirmation before executing each command."
+        f" {Color.DIM}[default: false]{Color.RESET}"
+    )
+    manual_confirm = ask_yes_no("Enable manual-confirm?", default="n")
+    step(f"Running: get set manual-confirm {str(manual_confirm).lower()}")
+    if run_get(binary, "set", "manual-confirm", str(manual_confirm).lower()):
+        good(f"manual-confirm = {str(manual_confirm).lower()}")
+    print()
 
-    # 89 -- first run: no cache entry, seen recorded
-    before = cache_entries()
-    rc, _, _ = run_get(Q, timeout=120)
-    after = cache_entries()
-    if rc == 0 and after == before:
-        s.pass_("first run: no cache entry added")
-    else:
-        s.fail("first run cache entries",
-               f"before={before} after={after}")
+    # instance: only offered when both safety checks are disabled
+    if not double_check and not manual_confirm:
+        info(
+            "instance: Fast single-call mode; disables multi-round agent behavior."
+            f" {Color.DIM}[default: false]{Color.RESET}"
+        )
+        warn(
+            "In instance mode, performance and security will degrade."
+        )
+        instance = ask_yes_no("Enable instance?", default="n")
+        step(f"Running: get set instance {str(instance).lower()}")
+        if run_get(binary, "set", "instance", str(instance).lower()):
+            good(f"instance = {str(instance).lower()}")
+        print()
 
-    # 90 -- second run: triggers classification, may add entry
-    rc, _, _ = run_get(Q, timeout=120)
-    after2 = cache_entries()
-    if rc == 0:
-        s.pass_(f"second run ok (entries {after}->{after2})")
-    else:
-        s.fail("second run", f"exit={rc}")
+    # system-prompt (default: empty)
+    info(
+        "system-prompt: Custom instruction prepended to every LLM request."
+        f" {Color.DIM}[default: empty]{Color.RESET}"
+    )
+    system_prompt = ask_input("System prompt", hint="leave empty to skip")
+    if system_prompt:
+        step("Running: get set system-prompt <value>")
+        if run_get(binary, "set", "system-prompt", system_prompt):
+            good("system-prompt configured")
+    print()
 
-    # 91 -- --cache forces immediate classification
-    run_get("cache", "--clean")
-    Q2 = "reply with the exact text 'cache-test-2' only"
-    before = cache_entries()
-    rc, _, _ = run_get(Q2, "--cache", timeout=120)
-    after = cache_entries()
-    if rc == 0:
-        s.pass_(f"--cache force: ran (entries {before}->{after})")
-    else:
-        s.fail("--cache force", f"exit={rc}")
+    # cache (default: true)
+    info(
+        "cache: Enable the cache system for repeated queries."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    warn(
+        "After the first execution is recorded, repeating the same query may trigger "
+        "one extra LLM request to decide whether and how to cache it. "
+        "Cache may causes occasional issues."
+    )
+    info("Clear cache with: get cache --clean")
+    cache_enabled = ask_yes_no("Enable cache?", default="y")
+    step(f"Running: get set cache {str(cache_enabled).lower()}")
+    if run_get(binary, "set", "cache", str(cache_enabled).lower()):
+        good(f"cache = {str(cache_enabled).lower()}")
+    print()
 
-    # 92 -- cache-trigger-threshold=0 means classify immediately
-    run_get("cache", "--clean")
-    set_opt("cache-trigger-threshold", "0")
-    Q3 = "reply with the exact text 'cache-test-3' only"
-    rc, _, _ = run_get(Q3, timeout=120)
-    after = cache_entries()
-    if rc == 0:
-        s.pass_(f"threshold=0 immediate classify "
-                f"(entries={after})")
-    else:
-        s.fail("threshold=0", f"exit={rc}")
-    clear_opt("cache-trigger-threshold")
+    # vivid (default: true)
+    info(
+        "vivid: Colored output and animations in terminal display."
+        f" {Color.DIM}[default: true]{Color.RESET}"
+    )
+    vivid = ask_yes_no("Enable vivid?", default="y")
+    step(f"Running: get set vivid {str(vivid).lower()}")
+    if run_get(binary, "set", "vivid", str(vivid).lower()):
+        good(f"vivid = {str(vivid).lower()}")
+    print()
 
-    # 93 -- cache hit same query returns fast
-    Q4 = "reply with the exact text 'cache-hit' only"
-    run_get(Q4, "--cache", timeout=120)  # 1st
-    t0 = time.time()
-    rc, _, _ = run_get(Q4, timeout=120)  # 2nd (likely hit or re-exec)
-    dt = time.time() - t0
-    if rc == 0:
-        s.pass_(f"repeat query ok (elapsed {dt:.1f}s)")
-    else:
-        s.fail("repeat query", f"exit={rc}")
+    if not vivid:
+        # hide-process (default: false)
+        info(
+            "hide-process: Suppress intermediate step output during execution."
+            f" {Color.DIM}[default: false]{Color.RESET}"
+        )
+        hide_process = ask_yes_no("Enable hide-process?", default="n")
+        step(f"Running: get set hide-process {str(hide_process).lower()}")
+        if run_get(binary, "set", "hide-process", str(hide_process).lower()):
+            good(f"hide-process = {str(hide_process).lower()}")
+        print()
 
-    # 94 -- clean resets everything
-    rc, _, _ = run_get("cache", "--clean")
-    n = cache_entries()
-    if rc == 0 and n == 0:
-        s.pass_("cache --clean full reset")
-    else:
-        s.fail("cache clean reset", f"rc={rc} n={n}")
-
-    # 95 -- cache --unset precision
-    Q5 = "reply with the exact text 'unset-target' only"
-    # seed cache with --cache on both runs to maximise chance
-    run_get(Q5, "--cache", timeout=120)
-    run_get(Q5, "--cache", timeout=120)
-    rc, o, _ = run_get("cache", "--unset", Q5)
-    if rc == 0:
-        s.pass_("cache --unset exit 0")
-    else:
-        s.fail("cache --unset", f"exit={rc}")
-
-
-def t_missing_config(s: Stats, args) -> None:
-    hdr("[12] Missing configuration errors")
-    if args.skip_llm:
-        for i in range(3):
-            s.skip(f"missing-config {i + 1}", "--skip-llm")
-        return
-
-    # Backup current to restore after each clear
-    orig_url = get_cfg("url")
-    orig_model = get_cfg("model")
-
-    # 96 -- no key
-    clear_opt("key")
-    rc, _, e = run_get("testquery", "--no-cache",
-                       "--hide-process", timeout=30)
-    low = strip_ansi(e).lower()
-    if rc != 0 and ("key" in low or "api" in low):
-        s.pass_(f"missing key -> exit {rc}")
-    else:
-        s.fail("missing key",
-               f"exit={rc} err={low.strip()[:120]!r}")
-    set_opt("key", args.key)
-
-    # 97 -- no url
-    set_opt("url", "")
-    rc, _, e = run_get("testquery", "--no-cache",
-                       "--hide-process", timeout=30)
-    low = strip_ansi(e).lower()
-    if rc != 0 and "url" in low:
-        s.pass_(f"missing url -> exit {rc}")
-    else:
-        s.fail("missing url",
-               f"exit={rc} err={low.strip()[:120]!r}")
-    set_opt("url", orig_url)
-
-    # 98 -- no model
-    set_opt("model", "")
-    rc, _, e = run_get("testquery", "--no-cache",
-                       "--hide-process", timeout=30)
-    low = strip_ansi(e).lower()
-    if rc != 0 and "model" in low:
-        s.pass_(f"missing model -> exit {rc}")
-    else:
-        s.fail("missing model",
-               f"exit={rc} err={low.strip()[:120]!r}")
-    set_opt("model", orig_model)
-
+        # external-display (default: true)
+        info(
+            "external-display: Use external tools (bat, mdcat) for rendering output."
+            f" {Color.DIM}[default: true]{Color.RESET}"
+        )
+        external_display = ask_yes_no("Enable external-display?", default="y")
+        step(
+            f"Running: get set external-display {str(external_display).lower()}")
+        if run_get(binary, "set", "external-display", str(external_display).lower()):
+            good(f"external-display = {str(external_display).lower()}")
+        print()
 
 # ---------------------------------------------------------------------------
-# Backup / restore
+# Uninstall
 # ---------------------------------------------------------------------------
 
-def backup_config() -> Dict[str, str]:
-    rc, o, _ = run_get("config")
-    if rc != 0:
-        print(f"{C.RED}fatal: cannot read config{C.R}",
-              file=sys.stderr)
-        sys.exit(2)
-    return parse_kv(o)
 
+def do_uninstall(existing: Path) -> None:
+    paths = install_paths()
+    print()
 
-def restore_config(s: Stats, backup: Dict[str, str]) -> None:
-    hdr("[13] Teardown: restore original configuration")
+    remove_file(existing)
+    if paths["binary"].resolve() != existing.resolve():
+        remove_file(paths["binary"])
 
-    # command-pattern
-    cp = backup.get("command-pattern", "")
-    if "built-in" in cp:
-        clear_opt("command-pattern")
-    elif "disabled" in cp.lower() or cp == "":
-        set_opt("command-pattern", "")
+    if paths["extra_bin"].exists():
+        step(f"Removing extra tools: {paths['extra_bin']}")
+        try:
+            shutil.rmtree(paths["extra_bin"])
+            good("Extra tools removed")
+        except OSError as e:
+            bad(f"Failed: {e}")
+
+    if paths["man"]:
+        remove_file(paths["man"])
+        prune_empty_parents(paths["man"].parent, stop_at=Path.home())
+
+    if paths["root"].exists():
+        try:
+            paths["root"].rmdir()
+        except OSError:
+            pass
+
+    step("Cleaning PATH entries")
+    if remove_from_path(paths["path_dirs"]):
+        good("PATH entries removed")
     else:
-        set_opt("command-pattern", cp)
+        good("PATH entries already absent")
 
-    # system-prompt
-    sp = backup.get("system-prompt", "")
-    if sp == "":
-        clear_opt("system-prompt")
+    print()
+    banner("uninstallation complete")
+    if IS_LINUX:
+        info("Restart your shell to refresh the environment.")
     else:
-        set_opt("system-prompt", sp)
-
-    skip_keys = {"key", "command-pattern", "system-prompt"}
-    for k, v in backup.items():
-        if k in skip_keys:
-            continue
-        run_get("set", k, v)
-
-    # Compare
-    rc, o, _ = run_get("config")
-    current = parse_kv(o)
-    diffs = []
-    for k in backup:
-        if k == "key":
-            continue
-        if backup[k] != current.get(k):
-            diffs.append(
-                f"{k}: was={backup[k]!r} now={current.get(k)!r}")
-    if not diffs:
-        s.pass_(f"original config fully restored")
-    else:
-        s.fail("config restore diff",
-               "; ".join(diffs[:3]))
-
-    # clear test key
-    clear_opt("key")
-
+        info("Open a new terminal for PATH changes to take effect.")
 
 # ---------------------------------------------------------------------------
-# Main
+# Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
-    global VERBOSE
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--key", required=True,
-                    help="LLM API key (required)")
-    ap.add_argument("--url", default=None,
-                    help="LLM API endpoint URL")
-    ap.add_argument("--model", default=None,
-                    help="LLM model name")
-    ap.add_argument("--skip-llm", action="store_true",
-                    help="Skip tests that invoke the LLM")
-    ap.add_argument("-v", "--verbose", action="store_true",
-                    help="Echo each `get` invocation")
-    args = ap.parse_args()
+    _enable_ansi()
 
-    VERBOSE = args.verbose
-
-    print(f"{C.B}get test suite{C.R}")
-    print(f"{C.D}  model    : {args.model or '(default)'}")
-    print(f"  url      : {args.url or '(default)'}")
-    print(f"  key      : ***")
-    print(f"  skip-llm : {args.skip_llm}{C.R}")
-
-    s = Stats()
-
-    hdr("[0] Backup current configuration")
-    backup = backup_config()
-    s.pass_(f"backed up {len(backup)} options")
-
-    # Apply test credentials
-    set_opt("key", args.key)
-    if args.url:
-        set_opt("url", args.url)
-    if args.model:
-        set_opt("model", args.model)
-    set_opt("vivid", "false")
-    set_opt("double-check", "false")
-    set_opt("log", "true")
-    set_opt("cache", "true")
-    s.pass_("test credentials applied")
-
-    try:
-        t_info(s)
-        t_boolean_options(s)
-        t_integer_options(s)
-        t_strings(s)
-        t_key_and_config(s, args)
-        t_invalid(s)
-        t_cache_log_mgmt(s)
-        t_cache_disabled_warning(s, args)
-        t_isok(s, args)
-        t_instance_mode(s, args)
-        t_agent_mode(s, args)
-        t_cache_behaviour(s, args)
-        t_missing_config(s, args)
-    finally:
-        try:
-            restore_config(s, backup)
-        except Exception as e:
-            s.fail("restore config", str(e))
-
-    # Summary
-    total = s.passed + s.failed + s.skipped
     print()
-    print(f"{C.B}{'=' * 60}{C.R}")
-    print(f"{C.B}Test Summary{C.R}   (total {total})")
-    print(f"  {C.G}passed  : {s.passed}{C.R}")
-    print(f"  {C.RED}failed  : {s.failed}{C.R}")
-    print(f"  {C.Y}skipped : {s.skipped}{C.R}")
-    if s.failures:
-        print(f"\n{C.RED}Failures:{C.R}")
-        for name, reason in s.failures:
-            print(f"  - {C.B}{name}{C.R}: {reason}")
+    print(f"{Color.BOLD}{Color.MAGENTA}{PROJECT_TAGLINE}{Color.RESET}")
     print()
-    print(f"{C.Y}NOTE:{C.R} your original API key could not be "
-          f"restored\n      (encrypted storage is write-only). "
-          f"Please run:\n      "
-          f"{C.B}get set key <your-original-key>{C.R}\n")
 
-    sys.exit(0 if s.failed == 0 else 1)
+    existing = find_installed()
+
+    # ------------------------------------------------------------------
+    # Uninstall branch
+    # ------------------------------------------------------------------
+    if existing:
+        banner("uninstaller")
+        info(
+            f"Existing installation found: {Color.BOLD}{existing}{Color.RESET}")
+        print()
+        if not ask_yes_no("Uninstall get?", default="n"):
+            _print_github()
+            sys.exit(0)
+        do_uninstall(existing)
+        print()
+        if not ask_yes_no("Reinstall get?", default="n"):
+            _print_github()
+            sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Install branch
+    # ------------------------------------------------------------------
+    banner("installer")
+    check_system()
+    print()
+
+    src_bin = SCRIPT_DIR / ("get.exe" if IS_WINDOWS else "get")
+    if not src_bin.exists():
+        fail(f"Source binary not found: {src_bin}")
+        _print_github()
+        sys.exit(1)
+
+    info(f"Source binary: {src_bin}")
+    print()
+    if not ask_yes_no("Install get?", default="y"):
+        info("Installation cancelled.")
+        _print_github()
+        sys.exit(0)
+
+    # Installation type selection
+    extra_src = SCRIPT_DIR / "bin"
+    has_extra = extra_src.is_dir() and any(extra_src.iterdir())
+
+    if has_extra:
+        mode = ask_choice(
+            "Select installation type:",
+            [
+                (
+                    "full",
+                    "Full installation",
+                    "Install get, extra tools from bin/, and (Linux) man page.",
+                ),
+                (
+                    "minimal",
+                    "Minimal installation",
+                    "Install get and (Linux) man page only.",
+                ),
+            ],
+        )
+    else:
+        mode = "minimal"
+        info("No bin/ directory found -- performing minimal installation.")
+
+    paths = install_paths()
+    binary = paths["binary"]
+    path_dirs = paths["path_dirs"][:1] if mode == "minimal" else paths["path_dirs"]
+
+    # Confirm targets
+    print()
+    info("Installation targets:")
+    print(f"    binary    : {binary}")
+    if mode == "full":
+        print(f"    extra bin : {paths['extra_bin']}")
+    if paths["man"]:
+        print(f"    man page  : {paths['man']}")
+    for d in path_dirs:
+        print(f"    PATH +=   : {d}")
+    print()
+
+    if not ask_yes_no("Proceed with installation?", default="y"):
+        info("Installation cancelled.")
+        _print_github()
+        sys.exit(0)
+
+    print()
+
+    # Binary
+    step(f"Installing binary  -->  {binary}")
+    copy_file(src_bin, binary)
+    good("Binary installed")
+
+    # Man page
+    if paths["man"]:
+        man_src = SCRIPT_DIR / "get.1"
+        if man_src.exists():
+            step(f"Installing man page  -->  {paths['man']}")
+            copy_file(man_src, paths["man"])
+            good("Man page installed")
+        else:
+            warn("get.1 not found -- man page skipped")
+
+    # Extra tools
+    if mode == "full":
+        step(f"Installing extra tools  -->  {paths['extra_bin']}")
+        paths["extra_bin"].mkdir(parents=True, exist_ok=True)
+        count = 0
+        for item in extra_src.iterdir():
+            if item.is_file():
+                copy_file(item, paths["extra_bin"] / item.name)
+                count += 1
+        good(f"{count} extra tool(s) installed")
+
+    # PATH
+    step("Updating PATH")
+    if add_to_path(path_dirs):
+        good("PATH updated")
+    else:
+        good("PATH already configured")
+
+    # Shell
+    configure_shell(binary)
+
+    # LLM settings
+    print()
+    if ask_yes_no("Configure LLM connection settings now?", default="y"):
+        configure_model(binary)
+
+    # Advanced settings
+    print()
+    if ask_yes_no("Configure advanced settings now?", default="n"):
+        configure_advanced(binary)
+
+    # Completion
+    print()
+    banner("installation complete")
+    info("Open a new terminal and run the following to verify:")
+    print(f"    {Color.BOLD}get version{Color.RESET}"
+          f"  {Color.DIM}-- verify installation{Color.RESET}")
+    print(f"    {Color.BOLD}get isok{Color.RESET}"
+          f"     {Color.DIM}-- verify configuration{Color.RESET}")
+    print()
+    if IS_LINUX:
+        info(
+            "To reload PATH in the current session: "
+            f"{Color.BOLD}source ~/.profile{Color.RESET}"
+        )
+    else:
+        info("Open a new terminal for PATH changes to take effect.")
+
+    _print_github()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\ninterrupted.")
+        print()
+        fail("Interrupted.")
         sys.exit(130)

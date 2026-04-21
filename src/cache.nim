@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-04-21
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
@@ -810,7 +810,7 @@ proc displayCacheInfo*(
     $store.seen.len)
   styleKeyValue(sk, "nocache decisions",
     $store.nocache.len)
-  styleKeyValue(sk, "max entries",
+  styleKeyValue(sk, "max-entries",
     formatIntOrDisable(maxEntries))
   let expiryStr =
     if expiryDays <= 0: "never"
@@ -826,6 +826,6 @@ proc displayCacheInfo*(
         fmt"{size div 1024} KB"
       else:
         fmt"{size div (1024 * 1024)} MB"
-    styleKeyValue(sk, "file size", sizeStr)
+    styleKeyValue(sk, "file-size", sizeStr)
   else:
-    styleKeyValue(sk, "file size", "0 B")
+    styleKeyValue(sk, "file-size", "0 B")

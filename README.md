@@ -90,6 +90,11 @@ get set cache-expiry false
 get set log-max-entries false
 ```
 
+`command-pattern` is matched against the command string before shell
+expansion. Blocking a literal filename can be bypassed by globbing
+(for example, `cat *.txt`), so reliable policies should target command
+verbs (`cat`, `head`, `cp`, etc.) instead.
+
 ### Per-Query Overrides
 
 The following flags can override persistent configuration for a single query, placed after the query string:

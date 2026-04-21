@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-04-21
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
@@ -1099,10 +1099,16 @@ proc implHandleConfig(args: seq[string]) =
     displayConfig(sk)
     return
   if args[0] == "--reset":
+    if args.len > 1:
+      implUsageError(
+        "'config --reset' takes no arguments")
     resetConfig()
     styleSuccess(sk, "configuration reset.")
     return
   if args[0].startsWith("--"):
+    if args.len > 1:
+      implUsageError(
+        fmt"'config {args[0]}' takes no arguments")
     let optName = args[0][2 .. ^1]
     case optName
     of "key":

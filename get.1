@@ -548,6 +548,15 @@ are intentionally absent: the pattern
 .B \ebmd\eb
 would produce false positives on extensions such as
 .IR README.md .
+.IP
+The regex is matched against the command string before shell
+expansion. Blocking a specific filename is therefore bypassable via
+globbing (for example, ``cat *.txt``). For reliable enforcement,
+target command verbs (such as
+.BR cat ,
+.BR head ,
+.BR cp ,
+etc.) instead of literal filenames.
 .TP
 .B "2. Double-check (default: enabled)"
 A second LLM call reviews the command.

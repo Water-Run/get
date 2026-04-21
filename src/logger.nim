@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-04-21
 ## :File: logger.nim
 ## :License: AGPL-3.0
 ##
@@ -62,7 +62,8 @@ func implTrimEntries(
     return content
   let kept =
     entries[entries.len - maxEntries .. ^1]
-  result = kept.join(LOG_ENTRY_SEPARATOR) & "\n"
+  result = kept.join(LOG_ENTRY_SEPARATOR) &
+    LOG_ENTRY_SEPARATOR
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -150,7 +151,7 @@ proc displayLogInfo*(
   let status =
     if logEnabled: "enabled" else: "disabled"
   styleKeyValue(sk, "log", status)
-  styleKeyValue(sk, "max entries",
+  styleKeyValue(sk, "max-entries",
     formatIntOrDisable(maxEntries))
   styleKeyValue(sk, "file", path)
   if fileExists(path):
@@ -165,7 +166,7 @@ proc displayLogInfo*(
         fmt"{size div 1024} KB"
       else:
         fmt"{size div (1024 * 1024)} MB"
-    styleKeyValue(sk, "file size", sizeStr)
+    styleKeyValue(sk, "file-size", sizeStr)
   else:
     styleKeyValue(sk, "entries", "0")
-    styleKeyValue(sk, "file size", "0 B")
+    styleKeyValue(sk, "file-size", "0 B")

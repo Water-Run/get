@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-04-21
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -477,10 +477,28 @@ func implBuildBaseContext(
       "do NOT generate commands that match it:")
     lines.add(fmt"    {pattern.get}")
     lines.add(
+      "- Respect the SPIRIT of this " &
+      "restriction, not merely its letter. Do " &
+      "NOT attempt to bypass the pattern by " &
+      "substituting alternative tools that " &
+      "achieve the same effect. For example: " &
+      "if `cat` is blocked, do NOT switch to " &
+      "`bat`, `rg ''`, `grep ''`, " &
+      "`Get-Content`, `type`, `head -n 10000`, " &
+      "`awk '{print}'`, `python -c \"print(" &
+      "open(...).read())\"`, `while read` " &
+      "loops, shell here-strings " &
+      "(`$(< file)`), or any other " &
+      "file-reading mechanism. The same " &
+      "principle applies to every blocked " &
+      "verb: the user's intent in blocking a " &
+      "command class is to deny the capability, " &
+      "not just the specific verb.")
+    lines.add(
       "- If the only way to answer the query " &
-      "would require a blocked command, " &
+      "would require a blocked command class, " &
       "explain this to the user in plain text " &
-      "instead.")
+      "instead of reaching for a substitute.")
 
   # ----------------------------------------------------------
   # 8. Custom system prompt

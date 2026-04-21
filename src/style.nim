@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-18
+## :Date: 2026-04-21
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
@@ -321,16 +321,18 @@ func implColorizeHelp(text: string): string =
       let trimmed = rawLine.strip(
         leading = true, trailing = false)
       let spIdx = trimmed.find(' ')
+      let indent = rawLine.len - trimmed.len
+      let pad = repeat(' ', indent)
       if spIdx > 0:
         let name = trimmed[0 ..< spIdx]
         let rest = trimmed[spIdx .. ^1]
-        let indent = rawLine.len - trimmed.len
-        let pad = repeat(' ', indent)
         lines.add(
           pad & ANSI_CYAN & ANSI_BOLD &
           name & ANSI_RESET & rest)
       else:
-        lines.add(rawLine)
+        lines.add(
+          pad & ANSI_CYAN & ANSI_BOLD &
+          trimmed & ANSI_RESET)
     else:
       lines.add(rawLine)
   result = lines.join("\n")
