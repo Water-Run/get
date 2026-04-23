@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-04-23
 ## :File: llm.nim
 ## :License: AGPL-3.0
 ##
@@ -21,7 +21,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[asyncdispatch, httpclient, json, os,
+import std/[asyncdispatch, httpclient, json, os, osproc,
             strformat, strutils]
 
 import style
@@ -93,57 +93,74 @@ proc implDetectSystemProxy(): string =
       return v
 
   when defined(windows):
-    try:
-      let subKey = newWideCString(
-        "Software\\Microsoft\\Windows\\" &
-        "CurrentVersion\\Internet Settings")
-      var hKey: ImplRegHandle
-      let openRet = implRegOpenKeyExW(
-        IMPL_HKCU, subKey, 0'u32,
-        IMPL_KEY_READ, addr hKey)
-      if openRet != IMPL_REG_OK:
-        return ""
-      defer:
-        discard implRegCloseKey(hKey)
+      try:
+        let keyPath =
+          "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
 
-      let proxyEnable = implRegReadDword(
-        hKey, "ProxyEnable")
-      if proxyEnable != 1:
-        return ""
-
-      var srv = implRegReadString(
-        hKey, "ProxyServer")
-      if srv.len == 0:
-        return ""
-
-      # Handle per-protocol format:
-      # "http=host:port;https=host:port"
-      if srv.contains("="):
-        var httpsProxy = ""
-        var httpProxy  = ""
-        for part in srv.split(';'):
-          let kv = part.split('=', 1)
-          if kv.len == 2:
-            let key = toLowerAscii(kv[0].strip())
-            let val = kv[1].strip()
-            case key
-            of "https": httpsProxy = val
-            of "http":  httpProxy  = val
-            else: discard
-        if httpsProxy.len > 0:
-          srv = httpsProxy
-        elif httpProxy.len > 0:
-          srv = httpProxy
-        else:
+        let (enableOut, enableCode) = execCmdEx(
+          fmt"""reg query "{keyPath}" /v ProxyEnable""")
+        if enableCode != 0:
           return ""
 
-      if not srv.contains("://"):
-        srv = "http://" & srv
-      return srv
-    except CatchableError:
-      discard
+        var enabled = false
+        for line in enableOut.splitLines():
+          if line.contains("ProxyEnable") and line.contains("0x"):
+            let idx = line.rfind("0x")
+            if idx >= 0:
+              let hexPart = line[idx + 2 .. ^1].strip()
+              try:
+                enabled = parseHexInt(hexPart) != 0
+              except ValueError:
+                enabled = false
+            break
+        if not enabled:
+          return ""
 
-  result = ""
+        let (srvOut, srvCode) = execCmdEx(
+          fmt"""reg query "{keyPath}" /v ProxyServer""")
+        if srvCode != 0:
+          return ""
+
+        var srv = ""
+        for line in srvOut.splitLines():
+          if line.contains("ProxyServer"):
+            let parts = line.splitWhitespace()
+            if parts.len > 0:
+              srv = parts[^1].strip()
+            break
+
+        if srv.len == 0:
+          return ""
+
+        # Handle per-protocol format:
+        # "http=host:port;https=host:port"
+        if srv.contains("="):
+          var httpsProxy = ""
+          var httpProxy = ""
+          for part in srv.split(';'):
+            let kv = part.split('=', 1)
+            if kv.len == 2:
+              let key = toLowerAscii(kv[0].strip())
+              let val = kv[1].strip()
+              case key
+              of "https":
+                httpsProxy = val
+              of "http":
+                httpProxy = val
+              else:
+                discard
+          if httpsProxy.len > 0:
+            srv = httpsProxy
+          elif httpProxy.len > 0:
+            srv = httpProxy
+          else:
+            return ""
+
+        if not srv.contains("://"):
+          srv = "http://" & srv
+        return srv
+      except CatchableError:
+        discard
   
 # ---------------------------------------------------------------------------
 # Private helpers — error classification
