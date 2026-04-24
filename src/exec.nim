@@ -52,7 +52,11 @@ import utils
 ## buffering and produces an empty pipe.
 const POWERSHELL_UTF8_PRELUDE =
   "$OutputEncoding = " &
-  "[System.Text.UTF8Encoding]::new(); "
+  "[System.Text.UTF8Encoding]::new(); " &
+  "$env:COMPUTERNAME = " &
+  "[System.Net.Dns]::GetHostName(); " &
+  "Set-Alias -Name python3 -Value python " &
+  "-Scope Local -ErrorAction SilentlyContinue; "
 
 # ---------------------------------------------------------------------------
 # Types
@@ -95,6 +99,82 @@ func implBuildShellArgs(
     result = @["/C", command]
   else:
     result = @["-c", command]
+
+## Applies small Windows-specific command compatibility rewrites
+## before execution.
+##
+## Current rewrites:
+## - In PowerShell, bare `hostname` is rewritten to
+##   `[System.Net.Dns]::GetHostName()` so hostname casing matches
+##   the canonical DNS host name on Windows (instead of the
+##   often uppercased `hostname.exe` output).
+## - If `python3` is not available but `python` is, a leading
+##   `python3` token is rewritten to `python`.
+##
+## :param command: Raw command from the caller.
+## :param shell: Shell executable name or path.
+## :returns: Rewritten command, or the original command.
+proc implApplyWindowsCompatCommand(
+  command: string,
+  shell: string
+): string =
+  when defined(windows):
+    let trimmed = command.strip()
+    if trimmed.len == 0:
+      return command
+
+    let lowerShell = toLowerAscii(shell)
+    let lowerCmd = toLowerAscii(trimmed)
+
+    if (lowerShell.contains("powershell") or
+        lowerShell.contains("pwsh")) and
+        lowerCmd == "hostname":
+      return "[System.Net.Dns]::GetHostName()"
+
+    var i = 0
+    while i < trimmed.len and
+        (trimmed[i] == ' ' or trimmed[i] == '\t'):
+      i += 1
+    let t1Start = i
+    while i < trimmed.len and
+        trimmed[i] notin {' ', '\t'}:
+      i += 1
+    let t1End = i
+    while i < trimmed.len and
+        (trimmed[i] == ' ' or trimmed[i] == '\t'):
+      i += 1
+    let afterTok1Start = i
+    let t2Start = i
+    while i < trimmed.len and
+        trimmed[i] notin {' ', '\t'}:
+      i += 1
+    let t2End = i
+    while i < trimmed.len and
+        (trimmed[i] == ' ' or trimmed[i] == '\t'):
+      i += 1
+    let restStart = i
+
+    let tok1 = if t1End > t1Start:
+      toLowerAscii(trimmed[t1Start ..< t1End])
+      else: ""
+    let tok2 = if t2End > t2Start:
+      toLowerAscii(trimmed[t2Start ..< t2End])
+      else: ""
+
+    if findExe("python").len > 0:
+      if tok1 == "python3":
+        if afterTok1Start >= trimmed.len:
+          return "python"
+        return "python " &
+          trimmed[afterTok1Start .. ^1]
+      if tok1 == "py" and tok2.startsWith("-3"):
+        if restStart >= trimmed.len:
+          return "python"
+        return "python " & trimmed[restStart .. ^1]
+
+    return command
+  else:
+    return command
 
 ## Creates a StringTableRef with binDir prepended to PATH.
 ## Returns nil when binDir is empty or does not exist.
@@ -544,7 +624,10 @@ proc executeCommand*(
   shell: string,
   binDir: string = ""
 ): ExecResult =
-  let args = implBuildShellArgs(shell, command)
+  let effectiveCommand = implApplyWindowsCompatCommand(
+    command, shell)
+  let args = implBuildShellArgs(
+    shell, effectiveCommand)
   let env = implBuildEnv(binDir)
   var p: Process
   try:
