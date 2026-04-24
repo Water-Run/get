@@ -556,8 +556,23 @@ proc executeCommand*(
   except OSError as e:
     raise newException(GetError,
       fmt"cannot start shell '{shell}': {e.msg}")
-  let rawOutput = p.outputStream.readAll()
-  let exitCode = p.waitForExit()
+  # NOTE:
+  # On Windows, PowerShell child processes can produce truncated
+  # output when the pipe is drained via a single readAll call
+  # before process completion. Read line-by-line until the child
+  # actually exits (same pattern used by std/osproc.execCmdEx).
+  var rawOutput = ""
+  var exitCode = -1
+  let outp = p.outputStream
+  var line = newStringOfCap(256)
+  while true:
+    if outp.readLine(line):
+      rawOutput.add(line)
+      rawOutput.add("\n")
+    else:
+      exitCode = p.peekExitCode()
+      if exitCode != -1:
+        break
   p.close()
   when defined(windows):
     let output = implNormalizeWindowsOutput(
