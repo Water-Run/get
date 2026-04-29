@@ -1,6 +1,6 @@
 # Package
 
-version       = "1.0"
+version       = "1.1"
 author        = "Water-Run"
 description   = "get -- get anything from your computer"
 license       = "AGPL-3.0-or-later"

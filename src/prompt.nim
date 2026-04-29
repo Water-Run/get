@@ -434,28 +434,48 @@ func implBuildBaseContext(
   # ----------------------------------------------------------
   lines.add("")
   lines.add("TOOL SELECTION GUIDANCE:")
-  lines.add(
-    "- Prefer standard system utilities that " &
-    "are universally available on the target " &
-    "OS. Do not assume niche third-party " &
-    "tools are installed unless they appear " &
-    "in the detected-tools list below or in " &
-    "the bundled-tools section above.")
   if info.bundledTools.len > 0:
     lines.add(
-      "- Bundled tools (listed in the BUNDLED " &
-      "TOOLS section above) are guaranteed to " &
-      "be in PATH. Prefer them when their " &
-      "output format is better suited to the " &
-      "query than a standard utility.")
+      "- BUNDLED tools listed above are " &
+      "guaranteed available and STRONGLY " &
+      "PREFERRED for their dedicated purposes " &
+      "(rg over grep for in-file search, fd " &
+      "over find for filename search, tokei " &
+      "for code stats, bat for highlighted " &
+      "viewing, tree/treepp for directory " &
+      "trees). Use them whenever the task " &
+      "matches their description.")
+  else:
+    lines.add(
+      "- This is a compact install: no bundled " &
+      "tools are available. Use standard " &
+      "system utilities or detected " &
+      "third-party tools below.")
   if info.availableTools.len > 0:
     lines.add(
       "- Detected third-party tools on this " &
-      "system: " &
-      info.availableTools.join(", ") &
-      ". You may use these when they provide " &
-      "a materially better answer than a " &
-      "standard utility.")
+      "system (use when they materially " &
+      "improve the answer):")
+    for tool in info.availableTools:
+      let hint = getProbeHint(tool)
+      if hint.len > 0:
+        lines.add(fmt"    {tool}: {hint}")
+      else:
+        lines.add(fmt"    {tool}")
+  lines.add(
+    "- Standard POSIX utilities (ls, cat, " &
+    "grep, find, head, tail, wc, awk, sed, " &
+    "stat, uname, df, du) are the universal " &
+    "fallback. Use them when no specialised " &
+    "tool is clearly better.")
+  lines.add(
+    "- DO NOT artificially restrict yourself " &
+    "to bundled tools when a system tool or " &
+    "detected tool is genuinely the best fit. " &
+    "Pick what is most appropriate.")
+  if info.availableTools.len > 0:
+    lines.add(
+      "")
   lines.add(
     "- When a query involves web content or " &
     "URLs, use `curl -sS` (bash/zsh/fish) or " &
@@ -786,10 +806,12 @@ func buildDoubleCheckMessages*(
 ): seq[LlmMessage] =
   var sysLines: seq[string] = @[]
   sysLines.add(
-    "You are a strict safety reviewer for shell " &
-    "commands. Your ONLY job is to determine " &
-    "whether the command below is PURELY " &
-    "READ-ONLY and safe to execute.")
+    "You are a reviewer for shell commands. " &
+    "You verify TWO things: (1) the command is " &
+    "purely READ-ONLY and safe; (2) the command " &
+    "reasonably addresses the user's actual " &
+    "intent. Be PRACTICAL, not pedantic — only " &
+    "revise on obvious mismatches.")
   sysLines.add("")
   sysLines.add(fmt"User query: {query}")
   sysLines.add(fmt"Generated command: {command}")
@@ -817,11 +839,21 @@ func buildDoubleCheckMessages*(
     "(pmc -o/-c, tree -o, treepp /O, " &
     "fd -x with write commands).")
   sysLines.add(
+    "- INTENT CHECK: if the command obviously " &
+    "fails to address what the user asked " &
+    "(e.g. user asked for IP, command lists " &
+    "files; user asked for file content, " &
+    "command shows directory listing), revise " &
+    "the command in a ```sh code block. Minor " &
+    "stylistic differences, alternative tools " &
+    "with equivalent output, or slightly " &
+    "broader/narrower scope are NOT mismatches.")
+  sysLines.add(
     "- If the command is safe and purely read-" &
     "only, reply with the approved command in a " &
     "```sh code block. You may revise the " &
-    "command to improve it while keeping it " &
-    "strictly read-only.")
+    "command to fix safety or intent issues, " &
+    "keeping it strictly read-only.")
   let sysContent = sysLines.join("\n")
   result = @[
     LlmMessage(role: "system", content: sysContent),

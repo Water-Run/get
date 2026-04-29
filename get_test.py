@@ -177,6 +177,8 @@ class EnvFacts:
         cwd = os.getcwd()
         home = os.path.expanduser("~")
         plt = platform.system().lower()
+        # Normalise: platform.system() returns 'Darwin' on macOS;
+        # tests use 'darwin' for cross-platform comparisons.
         vi = sys.version_info
         ips: List[str] = []
         try:
@@ -1082,6 +1084,8 @@ def _instance_query_table() -> List[Tuple[str, str,
          "(one of: Linux, Darwin, Windows)",
          lambda o: plt in o.lower()
          or ("mac" in o.lower() and plt == "darwin")
+         or ("darwin" in o.lower() and plt == "darwin")
+         or ("macos" in o.lower() and plt == "darwin")
          or ("windows" in o.lower() and plt == "windows"),
          "matches platform.system()"),
         ("year",
@@ -1105,6 +1109,7 @@ def _instance_query_table() -> List[Tuple[str, str,
          lambda o: any(
              tok in o for tok in
              ("/bin", "/etc", "/usr", "/var",
+              "/Users", "/System", "/Library",
               "bin", "etc", "usr", "var",
               "Windows", "Users", "Program")),
          "contains canonical dir names"),

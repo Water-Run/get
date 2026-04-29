@@ -31,6 +31,7 @@ from typing import Iterable
 
 IS_WINDOWS: bool = os.name == "nt"
 IS_LINUX:   bool = sys.platform.startswith("linux")
+IS_MACOS:   bool = sys.platform == "darwin"
 SCRIPT_DIR: Path = Path(__file__).resolve().parent
 
 RC_MARK_BEGIN: str = "# >>> get installer >>>"
@@ -39,7 +40,7 @@ RC_MARK_END:   str = "# <<< get installer <<<"
 PROJECT_TAGLINE: str = "get -- get anything from your computer"
 PROJECT_GITHUB:  str = "https://github.com/Water-Run/get"
 
-DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else "bash"
+DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else ("zsh" if IS_MACOS else "bash")
 DEFAULT_URL:   str = "https://api.poe.com/v1"
 DEFAULT_MODEL: str = "gpt-5.3-codex"
 
@@ -217,6 +218,18 @@ def check_system() -> None:
             bad(f"Linux kernel {release} -- kernel 6 or later is required")
             sys.exit(1)
         good(f"Linux kernel {release}")
+    elif IS_MACOS:
+        try:
+            ver = platform.mac_ver()[0]  # e.g. "14.4.1"
+            major = int(ver.split(".", 1)[0]) if ver else 0
+        except (ValueError, IndexError):
+            major = 0
+        if major < 12:
+            bad(f"macOS {ver or 'unknown'} -- macOS 12 or later is required")
+            sys.exit(1)
+        good(f"macOS {ver}  (arm64)")
+        if platform.machine() != "arm64":
+            warn(f"non-arm64 architecture detected: {platform.machine()}")
     else:
         bad(f"Unsupported platform: {sys.platform}")
         sys.exit(1)
@@ -238,6 +251,16 @@ def install_paths() -> dict:
             "extra_bin": base / "bin",
             "man":       None,
             "path_dirs": [base, base / "bin"],
+        }
+    if IS_MACOS:
+        home = Path.home()
+        appsupport = home / "Library" / "Application Support" / "get"
+        return {
+            "root":      appsupport,
+            "binary":    home / ".local" / "bin" / "get",
+            "extra_bin": appsupport / "bin",
+            "man":       home / ".local" / "share" / "man" / "man1" / "get.1",
+            "path_dirs": [home / ".local" / "bin", appsupport / "bin"],
         }
     home = Path.home()
     local = home / ".local"
@@ -408,7 +431,7 @@ def path_remove_linux() -> bool:
 
 
 def add_to_path(dirs: list[Path]) -> bool:
-    return path_add_windows(dirs) if IS_WINDOWS else path_add_linux(dirs)
+    return path_add_windows(dirs) if IS_WINDOWS else path_add_linux(dirs)  # macOS reuses linux logic
 
 
 def remove_from_path(dirs: list[Path]) -> bool:
@@ -802,7 +825,7 @@ def do_uninstall(existing: Path) -> None:
 
     print()
     banner("uninstallation complete")
-    if IS_LINUX:
+    if IS_LINUX or IS_MACOS:
         info("Restart your shell to refresh the environment.")
     else:
         info("Open a new terminal for PATH changes to take effect.")
@@ -910,6 +933,20 @@ def main() -> None:
     copy_file(src_bin, binary)
     good("Binary installed")
 
+    # macOS: strip Gatekeeper quarantine xattr from binary + bundled tools
+    if IS_MACOS:
+        targets = [binary]
+        if mode == "full" and paths["extra_bin"].exists():
+            targets.extend(p for p in paths["extra_bin"].iterdir() if p.is_file())
+        for t in targets:
+            try:
+                subprocess.run(
+                    ["xattr", "-d", "com.apple.quarantine", str(t)],
+                    capture_output=True, check=False)
+            except Exception:
+                pass
+        good("Quarantine attribute removed (macOS Gatekeeper)")
+
     # Man page
     if paths["man"]:
         man_src = SCRIPT_DIR / "get.1"
@@ -960,7 +997,7 @@ def main() -> None:
     print(f"    {Color.BOLD}get isok{Color.RESET}"
           f"     {Color.DIM}-- verify configuration{Color.RESET}")
     print()
-    if IS_LINUX:
+    if IS_LINUX or IS_MACOS:
         info(
             "To reload PATH in the current session: "
             f"{Color.BOLD}source ~/.profile{Color.RESET}"

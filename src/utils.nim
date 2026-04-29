@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "1.0"
+const APP_VERSION* = "1.1"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -270,6 +270,8 @@ func maskString*(s: string): string =
 func defaultShell*(): string =
   when defined(windows):
     result = "powershell"
+  elif defined(macosx):
+    result = "zsh"
   else:
     result = "bash"
 
@@ -615,9 +617,25 @@ func isKnownStrongModel*(model: string): bool =
     return implExtractVersion(m, "glm") >= 4.7
 
   # DeepSeek family — full variants are strong.
+  # Explicit support for v3+, v4+, and r-series.
   if m.contains("deepseek"):
     if implHasWeakKeyword(m): return false
+    if m.contains("distill") or m.contains("distilled"):
+      return false
+    # Explicit version gate when a v-prefix is present.
+    let vNum = implExtractVersion(m, "deepseek")
+    if vNum > 0.0 and vNum < 3.0:
+      return false
     return true
+
+  # Kimi / Moonshot family — K2 and beyond are strong.
+  if m.contains("kimi") or m.contains("moonshot"):
+    if implHasWeakKeyword(m): return false
+    let v = max(
+      implExtractVersion(m, "kimi"),
+      implExtractVersion(m, "k"))
+    if v == 0.0: return true   # unversioned moonshot flagship
+    return v >= 2.0
 
   # Unknown family.
   result = false

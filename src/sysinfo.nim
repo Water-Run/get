@@ -73,6 +73,36 @@ const PROBE_TOOLS* = [
   "nim", "nimble"
 ]
 
+## Skill-style usage hints for tools detected on PATH.  Surfaced in
+## the LLM system prompt so the model can pick the right tool
+## without guessing.  Entries are deliberately concise.
+const PROBE_TOOL_HINTS* = [
+  ("git",     "version-control inspection (log, status, diff, show)"),
+  ("curl",    "HTTP GET / file fetch — use -sS, never -o/-O"),
+  ("wget",    "HTTP downloader — read-only by default"),
+  ("python3", "Python 3 interpreter for ad-hoc scripts"),
+  ("python",  "Python 2/3 interpreter for ad-hoc scripts"),
+  ("node",    "JavaScript runtime for ad-hoc scripts"),
+  ("deno",    "secure JavaScript/TypeScript runtime"),
+  ("docker",  "container/image inspection (ps, images, inspect)"),
+  ("jq",      "JSON pretty-printing & query language"),
+  ("sed",     "stream editor — for read-only transforms only"),
+  ("awk",     "field-oriented text processor"),
+  ("grep",    "line-based regex search"),
+  ("find",    "filesystem walker (read-only when no -delete)"),
+  ("ssh",     "remote shell — read-only commands only"),
+  ("rsync",   "file sync — read-only when used with --dry-run"),
+  ("nim",     "Nim compiler / language tools"),
+  ("nimble",  "Nim package manager — read-only via list/show")
+]
+
+## Returns the Skill-style hint for a probe tool, or empty string
+## when the tool has no curated hint.
+func getProbeHint*(name: string): string =
+  for (n, hint) in PROBE_TOOL_HINTS:
+    if n == name: return hint
+  result = ""
+
 # ---------------------------------------------------------------------------
 # Constants — bundled tool definitions
 # ---------------------------------------------------------------------------
@@ -416,6 +446,23 @@ proc checkEnvironment*(): string =
                   fmt"version {major})"
             except ValueError:
               discard
+    except OSError, IOError:
+      discard
+  elif defined(macosx):
+    try:
+      let (output, code) =
+        execCmdEx("sw_vers -productVersion")
+      if code == 0 and output.len > 0:
+        let ver = output.strip()
+        let parts = ver.split(".")
+        if parts.len >= 1:
+          try:
+            let major = parseInt(parts[0].strip())
+            if major < 12:
+              return "warning: macOS 12+ " &
+                fmt"required (detected {ver})"
+          except ValueError:
+            discard
     except OSError, IOError:
       discard
   elif defined(linux):

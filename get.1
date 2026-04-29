@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-04-19" "get 1.0" "User Commands"
+.TH GET 1 "2026-04-29" "get 1.1" "User Commands"
 .\"
 .\" ====================================================================
 .SH NAME
@@ -873,6 +873,18 @@ Append-only execution log (Windows).
 .TP
 .I %APPDATA%/get/cache.json
 Response cache (Windows).
+.TP
+.I ~/Library/Application Support/get/config.json
+Configuration file (macOS).
+.TP
+.I ~/Library/Application Support/get/key
+API key storage (macOS, mode 0600).
+.TP
+.I ~/Library/Application Support/get/get.log
+Append-only execution log (macOS).
+.TP
+.I ~/Library/Application Support/get/cache.json
+Response cache (macOS).
 .TP
 .IR <exe>/bin/ " or " <exe>/src/bin/
 Bundled binary tools directory.
