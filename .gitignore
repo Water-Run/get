@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -27,22 +28,22 @@ coverage/
 .pytype/
 .ruff_cache/
 .ipynb_checkpoints/
-*.dll
-*.so
-*.dylib
-*.obj
-*.o
-*.out
-*.app
+
+# Nim
 nimcache/
 .htcache/
-build/
-dist/
 nimbledeps/
 pkgs/
-docs/*.html
-docs/*.json
+nimble.develop
+nimble.paths
 *.prof
+
+# Build / release outputs
+build/
+dist/
+.release/
+
+# Logs / temp
 *.log
 *.tmp
 *.temp
@@ -50,18 +51,38 @@ docs/*.json
 *.swp
 *.swo
 *~
+
+# Editors / OS
 .vscode/
 .idea/
 *.iml
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Env files
 .env
 .env.*
 !.env.example
-nimble.develop
-nimble.paths
-*.exe
-!src/bin/*.exe
+
+# Native build artifacts
+*.dll
+*.so
+*.dylib
+*.obj
+*.o
+*.out
+*.app
+
+# Root-level generated binaries
 /get
 /test
+/*.exe
+
+# Documentation generated files
+docs/*.html
+docs/*.json
+
+# Vendored helper binaries must be kept
+!src/bins/
+!src/bins/**
