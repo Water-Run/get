@@ -36,10 +36,11 @@ const ISOK_SYSTEM_PROMPT* =
   "Reply with exactly the word 'ok' and nothing else."
 
 ## User prompt for the isok connectivity check.
-const ISOK_USER_PROMPT* = "ok"
+const ISOK_USER_PROMPT* =
+  "Please reply with exactly the word 'ok' and nothing else."
 
 ## Maximum tokens allocated for the isok response.
-const ISOK_MAX_TOKENS* = 32
+const ISOK_MAX_TOKENS* = 256
 
 # ---------------------------------------------------------------------------
 # Private helpers — shell-specific rules

@@ -22,7 +22,7 @@
 {.experimental: "strictFuncs".}
 
 import std/[asyncdispatch, httpclient, json, os, osproc,
-            strformat, strutils]
+            strformat, strutils, streams]
 
 import style
 import utils
@@ -275,6 +275,94 @@ proc implPostRequest(
   result = respBody
 
 # ---------------------------------------------------------------------------
+# Private helpers — curl-based HTTP POST
+# ---------------------------------------------------------------------------
+
+## Posts a JSON body via a curl subprocess and returns the raw
+## response body.  This is used as a fallback when a system
+## proxy is detected, because Nim 2.x's AsyncHttpClient has a
+## known bug with HTTPS CONNECT tunnelling through HTTP
+## proxies.  Curl handles proxy tunnelling correctly.
+##
+## The subprocess inherits the caller's environment, so proxy
+## variables (HTTPS_PROXY, HTTP_PROXY, etc.) are picked up
+## automatically by curl.
+##
+## :param endpoint: The full URL to POST to.
+## :param body: The serialised JSON request body.
+## :param apiKey: The Bearer token.
+## :param timeoutSec: Maximum seconds (0 = no limit).
+## :returns: The raw response body on HTTP 200.
+## :raises: LlmApiError: On non-200 status, timeout, or if
+##          curl is not available.
+proc implPostViaCurlAsync(
+  endpoint: string,
+  body: string,
+  apiKey: string,
+  timeoutSec: int
+): Future[string] {.async.} =
+  var args = @[
+    "-sS",
+    "-X", "POST",
+    endpoint,
+    "-H", fmt"Authorization: Bearer {apiKey}",
+    "-H", "Content-Type: application/json",
+    "--data-binary", "@-",
+    "-w", "\n%{http_code}"]
+  if timeoutSec > 0:
+    args.add("--max-time")
+    args.add($timeoutSec)
+  let process = startProcess(
+    "curl", args = args,
+    options = {poUsePath, poStdErrToStdOut})
+  try:
+    process.inputStream.write(body)
+    process.inputStream.flush()
+  finally:
+    process.inputStream.close()
+  while true:
+    let exitCode = process.peekExitCode()
+    if exitCode != -1:
+      break
+    await sleepAsync(50)
+  let output = process.outputStream.readAll()
+  let exitCode = waitForExit(process)
+  process.close()
+  if exitCode != 0:
+    let preview =
+      if output.len > 512:
+        output[0 ..< 512] & "..."
+      else:
+        output
+    if "timed out" in output.toLowerAscii() or
+        "timeout" in output.toLowerAscii() or
+        exitCode == 28:
+      raise newException(LlmApiError,
+        fmt"request timed out after " &
+        fmt"{timeoutSec}s. " &
+        NETWORK_ERROR_MESSAGE)
+    raise newException(LlmApiError,
+      fmt"curl failed (exit {exitCode}): {preview}")
+  # Split response body from HTTP status code.
+  let lines = output.strip().rsplit('\n', 1)
+  if lines.len < 2:
+    raise newException(LlmApiError,
+      "curl returned unexpected output")
+  let httpCode = lines[^1].strip()
+  let respBody = lines[0 ..< ^1].join("\n")
+  if httpCode != "200":
+    let preview =
+      if respBody.len > 512:
+        respBody[0 ..< 512] & "..."
+      else:
+        respBody
+    raise newException(LlmApiError,
+      fmt"API returned HTTP {httpCode}: {preview}")
+  result = respBody
+
+
+# ---------------------------------------------------------------------------
+
 # Private helpers — progress display
 # ---------------------------------------------------------------------------
 
@@ -442,26 +530,32 @@ proc sendLlmRequest*(
     styleProgress(sk,
       fmt"using system proxy: {proxyUrl}")
 
+  let bodyStr = $implBuildRequestBody(req)
+
+  # When a proxy is detected, use curl subprocess asynchronously via cooperative
+  # event-loop yielding, allowing the spinner animation loop to execute.
   proc impl(): Future[LlmResponse] {.async.} =
-    let client =
-      if proxyUrl.len > 0:
-        newAsyncHttpClient(
-          proxy = newProxy(proxyUrl))
-      else:
-        newAsyncHttpClient()
-    client.headers = newHttpHeaders({
-      "Authorization": fmt"Bearer {apiKey}",
-      "Content-Type": "application/json"})
-    try:
-      let bodyStr = $implBuildRequestBody(req)
-      let fut = implPostRequest(
-        client, endpoint, bodyStr)
-      let respBody = await implAwaitWithProgress(
+    var respBody: string
+    if proxyUrl.len > 0:
+      let fut = implPostViaCurlAsync(
+        endpoint, bodyStr, apiKey, timeoutSec)
+      respBody = await implAwaitWithProgress(
         fut, timeoutSec, hideProcess, sk,
         spinnerLabel)
-      result = implParseResponse(respBody)
-    finally:
-      client.close()
+    else:
+      let client = newAsyncHttpClient()
+      client.headers = newHttpHeaders({
+        "Authorization": fmt"Bearer {apiKey}",
+        "Content-Type": "application/json"})
+      try:
+        let fut = implPostRequest(
+          client, endpoint, bodyStr)
+        respBody = await implAwaitWithProgress(
+          fut, timeoutSec, hideProcess, sk,
+          spinnerLabel)
+      finally:
+        client.close()
+    result = implParseResponse(respBody)
 
   try:
     result = waitFor impl()
@@ -479,3 +573,4 @@ proc sendLlmRequest*(
         NETWORK_ERROR_MESSAGE)
     raise newException(LlmApiError,
       fmt"request failed: {clean}")
+

@@ -85,7 +85,7 @@ const MODEL_STRENGTH_WARNING* =
   "foundation of safety.\n" &
   "Consider using a known strong model (e.g. " &
   "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+," &
-  " DeepSeek, Grok 4+, GLM 4.7+)."
+  " DeepSeek, Grok 4+, GLM 4.7+, MiMo 2+)."
 
 # ---------------------------------------------------------------------------
 # Constants — safety
@@ -635,6 +635,13 @@ func isKnownStrongModel*(model: string): bool =
       implExtractVersion(m, "kimi"),
       implExtractVersion(m, "k"))
     if v == 0.0: return true   # unversioned moonshot flagship
+    return v >= 2.0
+
+  # MiMo (Xiaomi) family — v2+ are strong.
+  if m.contains("mimo"):
+    if implHasWeakKeyword(m): return false
+    let v = implExtractVersion(m, "mimo")
+    if v == 0.0: return true   # unversioned mimo flagship
     return v >= 2.0
 
   # Unknown family.
