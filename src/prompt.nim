@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-21
+## :Date: 2026-06-06
 ## :File: prompt.nim
 ## :License: AGPL-3.0
 ##
@@ -316,25 +316,23 @@ func implBuildShellRules(shell: string): string =
 
 ## Builds the shared context block that appears in both
 ## instance-mode and agent-loop system prompts.  The block
-## comprises seven sections assembled in order:
+## comprises the following sections assembled in order:
 ##
 ##   1. **Core safety mandate** — the read-only contract that
 ##      overrides everything else.
 ##   2. **System information** — OS, architecture, hostname,
 ##      username, working directory, shell version, and
 ##      detected tools from the ``SysInfo`` snapshot.
-##   3. **Bundled tools** — descriptions of tools shipped in
-##      ``<executable>/bin/`` when present.
-##   4. **Command format** — structural rules for code-block
+##   3. **Command format** — structural rules for code-block
 ##      output and general command hygiene.
-##   5. **Shell-specific rules** — syntax contracts for the
+##   4. **Shell-specific rules** — syntax contracts for the
 ##      target shell, delegated to ``implBuildShellRules``.
-##   6. **Tool selection guidance** — heuristics for choosing
-##      between system utilities, bundled tools, and detected
-##      third-party tools.
-##   7. **Command pattern restriction** — the active regex
+##   5. **Tool selection guidance** — heuristics for choosing
+##      between system utilities and detected third-party
+##      tools found on PATH.
+##   6. **Command pattern restriction** — the active regex
 ##      block-list, if any.
-##   8. **Custom system prompt** — verbatim user-supplied text
+##   7. **Custom system prompt** — verbatim user-supplied text
 ##      appended last so it can override defaults.
 ##
 ## All sections are joined with ``\n`` and returned as a
@@ -386,16 +384,7 @@ func implBuildBaseContext(
   lines.add(formatSysInfo(info))
 
   # ----------------------------------------------------------
-  # 3. Bundled tools
-  # ----------------------------------------------------------
-  let bundledBlock = formatBundledTools(
-    info.bundledTools)
-  if bundledBlock.len > 0:
-    lines.add("")
-    lines.add(bundledBlock)
-
-  # ----------------------------------------------------------
-  # 4. Command format
+  # 3. Command format
   # ----------------------------------------------------------
   lines.add("")
   lines.add("COMMAND FORMAT:")
@@ -426,32 +415,15 @@ func implBuildBaseContext(
     "human-readable output by default.")
 
   # ----------------------------------------------------------
-  # 5. Shell-specific rules
+  # 4. Shell-specific rules
   # ----------------------------------------------------------
   lines.add(implBuildShellRules(shell))
 
   # ----------------------------------------------------------
-  # 6. Tool selection guidance
+  # 5. Tool selection guidance
   # ----------------------------------------------------------
   lines.add("")
   lines.add("TOOL SELECTION GUIDANCE:")
-  if info.bundledTools.len > 0:
-    lines.add(
-      "- BUNDLED tools listed above are " &
-      "guaranteed available and STRONGLY " &
-      "PREFERRED for their dedicated purposes " &
-      "(rg over grep for in-file search, fd " &
-      "over find for filename search, tokei " &
-      "for code stats, bat for highlighted " &
-      "viewing, tree/treepp for directory " &
-      "trees). Use them whenever the task " &
-      "matches their description.")
-  else:
-    lines.add(
-      "- This is a compact install: no bundled " &
-      "tools are available. Use standard " &
-      "system utilities or detected " &
-      "third-party tools below.")
   if info.availableTools.len > 0:
     lines.add(
       "- Detected third-party tools on this " &
@@ -463,6 +435,7 @@ func implBuildBaseContext(
         lines.add(fmt"    {tool}: {hint}")
       else:
         lines.add(fmt"    {tool}")
+    lines.add("")
   lines.add(
     "- Standard POSIX utilities (ls, cat, " &
     "grep, find, head, tail, wc, awk, sed, " &
@@ -470,13 +443,9 @@ func implBuildBaseContext(
     "fallback. Use them when no specialised " &
     "tool is clearly better.")
   lines.add(
-    "- DO NOT artificially restrict yourself " &
-    "to bundled tools when a system tool or " &
-    "detected tool is genuinely the best fit. " &
-    "Pick what is most appropriate.")
-  if info.availableTools.len > 0:
-    lines.add(
-      "")
+    "- Use the tool that is genuinely the best " &
+    "fit for the task; pick what is most " &
+    "appropriate for the query.")
   lines.add(
     "- When a query involves web content or " &
     "URLs, use `curl -sS` (bash/zsh/fish) or " &
@@ -486,7 +455,7 @@ func implBuildBaseContext(
     "`-O`, `-OutFile`).")
 
   # ----------------------------------------------------------
-  # 7. Command pattern restriction
+  # 6. Command pattern restriction
   # ----------------------------------------------------------
   if pattern.isSome and pattern.get.len > 0:
     lines.add("")
@@ -522,7 +491,7 @@ func implBuildBaseContext(
       "instead of reaching for a substitute.")
 
   # ----------------------------------------------------------
-  # 8. Custom system prompt
+  # 7. Custom system prompt
   # ----------------------------------------------------------
   if customPrompt.isSome and
       customPrompt.get.len > 0:
@@ -554,8 +523,7 @@ func implBuildBaseContext(
 ##     let info = SysInfo(os: "linux", arch: "amd64",
 ##       hostname: "", username: "", cwd: "/tmp",
 ##       shell: "bash", shellVersion: "",
-##       availableTools: @[],
-##       bundledTools: @[], binDir: "")
+##       availableTools: @[])
 ##     let msgs = buildInstanceMessages(info,
 ##       "test", "bash", none(string), none(string))
 ##     assert msgs.len == 2
@@ -606,8 +574,7 @@ func buildInstanceMessages*(
 ##     let info = SysInfo(os: "linux", arch: "amd64",
 ##       hostname: "", username: "", cwd: "/tmp",
 ##       shell: "bash", shellVersion: "",
-##       availableTools: @[],
-##       bundledTools: @[], binDir: "")
+##       availableTools: @[])
 ##     let msgs = buildAgentInitMessages(info,
 ##       "test", "bash", none(string), none(string), 3)
 ##     assert msgs.len == 2
@@ -795,8 +762,7 @@ func buildAgentContinueMessages*(
 ##     let info = SysInfo(os: "linux", arch: "amd64",
 ##       hostname: "", username: "", cwd: "/tmp",
 ##       shell: "bash", shellVersion: "",
-##       availableTools: @[],
-##       bundledTools: @[], binDir: "")
+##       availableTools: @[])
 ##     let msgs = buildDoubleCheckMessages(
 ##       "ls -la", "list files", info)
 ##     assert msgs.len == 2
@@ -819,11 +785,6 @@ func buildDoubleCheckMessages*(
   sysLines.add("")
   sysLines.add("SYSTEM INFORMATION:")
   sysLines.add(formatSysInfo(info))
-  let bundledBlock = formatBundledTools(
-    info.bundledTools)
-  if bundledBlock.len > 0:
-    sysLines.add("")
-    sysLines.add(bundledBlock)
   sysLines.add("")
   sysLines.add("RULES:")
   sysLines.add(
@@ -836,9 +797,8 @@ func buildDoubleCheckMessages*(
     "- Forbidden operations include but are not " &
     "limited to: rm, del, mv, cp, mkdir, touch, " &
     "chmod, chown, tee, redirect (>), append " &
-    "(>>), write flags on bundled tools " &
-    "(pmc -o/-c, tree -o, treepp /O, " &
-    "fd -x with write commands).")
+    "(>>), and any write-mode flags on " &
+    "third-party tools.")
   sysLines.add(
     "- INTENT CHECK: if the command obviously " &
     "fails to address what the user asked " &

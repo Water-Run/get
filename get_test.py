@@ -54,7 +54,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 BOOL_OPTIONS = [
     "manual-confirm", "double-check", "instance", "log",
-    "hide-process", "cache", "vivid", "external-display",
+    "hide-process", "cache", "vivid",
 ]
 
 INT_OPTIONS_DEFAULTS = {
@@ -852,8 +852,8 @@ def section_key_and_config(stats: Stats) -> None:
     # F.4 config shows many fields
     log_sub("F.2 config view")
     cfg = get_config()
-    a_eq(stats, "F04 config has >= 16 fields",
-         len(cfg) >= 16, True, detail=f"count={len(cfg)}")
+    a_eq(stats, "F04 config has >= 15 fields",
+         len(cfg) >= 15, True, detail=f"count={len(cfg)}")
 
     # F.5-F.10 each known key present
     for idx, opt in enumerate(
@@ -1894,13 +1894,6 @@ def section_param_interactions(stats: Stats) -> None:
         stats.fail("L16 max-token=32", f"exit={r.returncode}")
     cm.set("max-token", prev_mt)
 
-    # L.11 external-display toggle (state only, no interactive assert)
-    log_sub("L.10 external-display state")
-    prev_ed = get_config_field("external-display")
-    cm.set("external-display", "true")
-    a_cfg_eq(stats, "L17 external-display=true",
-             "external-display", "true")
-    cm.set("external-display", prev_ed)
 
 
 # =============================================================================

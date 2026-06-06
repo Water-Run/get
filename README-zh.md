@@ -16,15 +16,15 @@ get "https://github.com/Water-Run/get 上最新的 get 版本"
 
 ## 安装
 
-从[GitHub Release](https://github.com/Water-Run/get/releases)下载. 解压后, 运行附带 Python 安装脚本 `get_ready.py`, 自动完成安装和 PATH 配置:
+从[GitHub Release](https://github.com/Water-Run/get/releases)下载. v2.0 压缩包为扁平结构: 包含各平台二进制、`get_ready.py`、`get.1`、README 和许可证. 解压后运行附带 Python 安装脚本, 自动选择当前平台二进制并配置 PATH:
 
 ```bash
 python get_ready.py
 ```
 
-按照要求的指引进行. 完成后, 运行 `get version` 校验安装.  
+按照要求的指引进行. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装.  
 
-> 安装后, 再次运行`get_ready.py`执行卸载  
+> v2.0 不再附带搜索/渲染工具, 生成命令会使用系统 PATH 中已有的工具.
 
 ## 先决条件
 
@@ -61,8 +61,8 @@ get "你的问题"
 | 选项                | 说明                                 | 值类型                | 默认值                               |
 |---------------------|--------------------------------------|-----------------------|--------------------------------------|
 | `key`               | LLM API 密钥                         | 字符串                | 空                                   |
-| `url`               | LLM API 端点 URL                     | 字符串 (URL)          | `https://api.poe.com/v1`             |
-| `model`             | LLM 模型名称                         | 字符串                | `gpt-5.3-codex`                      |
+| `url`               | LLM API 端点 URL                     | 字符串 (URL)          | `https://api.xiaomimimo.com/v1`      |
+| `model`             | LLM 模型名称                         | 字符串                | `mimo-v2.5-pro`                      |
 | `manual-confirm`    | 执行前是否要求手动确认               | `true` / `false`      | `false`                              |
 | `double-check`      | 是否进行二次安全审查                 | `true` / `false`      | `true`                               |
 | `instance`          | 是否使用单次调用快速模式             | `true` / `false`      | `false`                              |
@@ -79,8 +79,7 @@ get "你的问题"
 | `cache-max-entries` | 缓存保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
 | `cache-trigger-threshold` | 触发缓存判定所需的历史执行次数   | 正整数 / `false`      | `1`                                  |
 | `log-max-entries`   | 日志保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
-| `vivid`             | 是否启用 vivid 输出模式 (颜色与动画) | `true` / `false`      | `true`                               |
-| `external-display`  | 是否使用 bat/mdcat 进行渲染          | `true` / `false`      | `true`                               |
+| `vivid`             | 是否启用 vivid 输出模式 (语义颜色与进度动画) | `true` / `false` | `true`                               |
 
 禁用整数选项的示例:
 
@@ -119,7 +118,7 @@ get set log-max-entries false
 
 ```bash
 get "磁盘使用情况" --no-cache
-get "列出文件" --model gpt-5.3-codex --vivid
+get "列出文件" --model mimo-v2.5-pro --vivid
 ```
 
 ### `config` 命令  
@@ -148,7 +147,7 @@ get set command-pattern ""     # 清空，禁用模式过滤
 
 全局条目在任意工作目录下生效; 上下文条目仅在原始查询的目录下生效.
 
-当启用 `hide-process` 时, `get` 会抑制自身中间进度与 warning 文案（包括缓存判定提示与 external-display 检查），仅输出最终结果或必要错误。
+当启用 `hide-process` 时, `get` 会抑制自身中间进度与 warning 文案（包括缓存判定提示与模型建议 warning），仅输出最终结果或必要错误。
 
 当配置 `cache=false` 且未启用 `hide-process` 时, 会输出 warning: `warning: cache is disabled in config; all cache logic is bypassed`.
 
@@ -189,7 +188,6 @@ get help            # 显示使用帮助
 - `API 密钥`: Linux `~/.config/get/key`（权限 0600）/ Windows `%APPDATA%/get/key`（DPAPI 加密）
 - `执行日志`: Linux `~/.config/get/get.log` / Windows `%APPDATA%/get/get.log`
 - `响应缓存`: Linux `~/.config/get/cache.json` / Windows `%APPDATA%/get/cache.json`
-- `内置工具`: `<可执行文件>/bin/` 或 `<可执行文件>/src/bin/`
 
 ### 退出码
 

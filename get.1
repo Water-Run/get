@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-04-29" "get 1.1" "User Commands"
+.TH GET 1 "2026-06-06" "get 2.0" "User Commands"
 .\"
 .\" ====================================================================
 .SH NAME
@@ -51,23 +51,10 @@ All generated commands are restricted to
 operations and pass through multiple safety layers before execution.
 .PP
 .B get
-ships with a bundled
-.I bin/
-directory containing high-performance CLI tools
-.RB ( rg ,
-.BR fd ,
-.BR sg ,
-.BR pmc ,
-.BR tokei ,
-.BR bat ,
-.BR mdcat ,
-.BR lua " (Linux only),"
-and
-.BR tree / treepp )
-which are prepended to PATH when executing generated commands.
-A lightweight edition without
-.I bin/
-is also available; in that case only system-installed tools are used.
+v2.0 ships as a compact binary without helper tool payloads.
+Generated commands use standard system utilities and any third-party
+tools already available on the user's
+.BR PATH .
 .PP
 Two execution modes are supported:
 .TP
@@ -286,12 +273,12 @@ Default: empty.
 .BI "url " URL
 LLM API endpoint URL (OpenAI-compatible).
 Default:
-.IR https://api.poe.com/v1 .
+.IR https://api.xiaomimimo.com/v1 .
 .TP
 .BI "model " string
 LLM model identifier.
 Default:
-.IR gpt\-5.3\-codex .
+.IR mimo\-v2.5\-pro .
 .TP
 .BI "manual\-confirm " bool
 Require interactive y/N confirmation before executing each command,
@@ -378,8 +365,7 @@ Suppress intermediate output; display only the final result.
 When enabled,
 .B get
 also suppresses its own warning/progress text for the query path
-(for example external-display checks, model advisory warnings, and
-cache-decision progress text).
+(for example model advisory warnings and cache-decision progress text).
 Default:
 .IR false .
 .TP
@@ -416,22 +402,8 @@ Default:
 .IR 1000 .
 .TP
 .BI "vivid " bool
-Vivid output mode: ANSI colours, animated Braille-dot spinners, and
-optional external rendering.
-Default:
-.IR true .
-.TP
-.BI "external\-display " bool
-Use bundled
-.BR bat (1)
-and
-.BR mdcat (1)
-for rendering in vivid mode.
-Has no effect in plain mode; enabling it while
-.B vivid
-is
-.I false
-emits a warning.
+Vivid output mode: semantic ANSI colours and animated Braille-dot
+spinners.
 Default:
 .IR true .
 .\"
@@ -584,39 +556,48 @@ Recognised strong families and minimum versions:
 .TP
 .B GPT / CodeX
 version \(>= 5 (e.g.\&
-.IR gpt\-5.3\-codex ).
+.IR gpt\-5 ).
 .TP
-.B Claude
-.I Opus
-or
-.I Sonnet
-version \(>= 3.5, or any Claude with version \(>= 3.7.
+.B OpenAI o-series
+version \(>= 3.
+.TP
+.B Claude Opus
+version \(>= 4.5, or unversioned Opus.
+.TP
+.B Claude Sonnet
+version \(>= 4.6, or unversioned Sonnet.
 .TP
 .B Gemini
 version \(>= 3.
 .TP
-.B Grok
-version \(>= 4.
+.B Qwen
+version \(>= 3.6.
 .TP
 .B MiniMax
 version \(>= 2.7.
 .TP
+.B Mimo
+version \(>= 2, or unversioned flagship.
+.TP
+.B Kimi / Moonshot
+version \(>= 2.5.
+.TP
 .B GLM / ChatGLM
-version \(>= 4.7.
+version \(>= 5.
 .TP
 .B DeepSeek
-Full variants only (non-distilled).
+version \(>= 4, full variants only (non-distilled).
 .TP
-.B OpenAI o-series
-version \(>= 3.
+.B Grok
+version \(>= 4.2.
+.TP
+.B Nemotron
+version \(>= 3, or unversioned flagship.
 .PP
 Models whose name contains
-.BR mini ,
 .BR nano ,
 .BR lite ,
 .BR small ,
-.BR fast ,
-.BR flash ,
 .BR haiku ,
 .BR light ,
 .BR tiny ,
@@ -624,41 +605,24 @@ Models whose name contains
 or
 .B instant
 are always treated as weak.
-The families
-.BR Doubao ,
-.BR Qwen ,
-.BR Ernie / Wenxin ,
-.BR Hunyuan ,
-.BR Spark ,
-.BR Baichuan ,
-and
-.B Yi
-are explicitly excluded from the whitelist.
+Names containing
+.B mini
+or
+.B flash
+are gated by family/version thresholds instead of being treated as
+weak automatically.
 .\"
 .\" ====================================================================
 .SH OUTPUT MODES
 .TP
 .B "plain (vivid = false)"
-Unformatted text; no colours, no animations, no external rendering.
+Unformatted text; no colours and no animations.
 Progress spinners are replaced with dotted lines.
 .TP
 .B "vivid (vivid = true, default)"
 ANSI colours, animated Braille-dot spinners during API requests, bold
-section headers, and optional external rendering via bundled
-.BR bat (1)
-(help text) and
-.BR mdcat (1)
-(LLM-produced Markdown replies).
+section headers, and semantic configuration-value colouring.
 On Windows, virtual terminal processing is enabled automatically.
-.PP
-External rendering applies only to Markdown-formatted LLM replies and
-help text.
-Raw command output is always written to stdout directly, bypassing any
-external renderer, to avoid encoding problems on Windows.
-If the required binaries are absent from
-.IR bin/ ,
-a built-in colouriser is used and a warning listing the missing tools
-is emitted.
 .\"
 .\" ====================================================================
 .SH CACHING
@@ -885,14 +849,6 @@ Append-only execution log (macOS).
 .TP
 .I ~/Library/Application Support/get/cache.json
 Response cache (macOS).
-.TP
-.IR <exe>/bin/ " or " <exe>/src/bin/
-Bundled binary tools directory.
-The production layout
-.RI ( <exe>/bin/ )
-is checked first; the development layout
-.RI ( <exe>/src/bin/ )
-is used as a fallback.
 .\"
 .\" ====================================================================
 .SH EXIT STATUS

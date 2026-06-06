@@ -3,17 +3,17 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-06-06
 ## :File: utils.nim
 ## :License: AGPL-3.0
 ##
 ## This module provides application-wide constants such as version,
 ## license, and GitHub URL; path resolution for configuration
 ## directories and files; shared domain types (GetError,
-## LlmMessage, AgentAction); bundled-tool binary directory
-## resolution; forbidden-command-pattern validation and safety
-## checking; model strength verification; and general-purpose
-## string utilities consumed by every other module.
+## LlmMessage, AgentAction); forbidden-command-pattern
+## validation and safety checking; model strength verification;
+## and general-purpose string utilities consumed by every other
+## module.
 
 {.experimental: "strictFuncs".}
 
@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "1.1"
+const APP_VERSION* = "2.0"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -59,14 +59,6 @@ const LOG_FILE_NAME* = "get.log"
 ## Name of the cache JSON file.
 const CACHE_FILE_NAME* = "cache.json"
 
-## Name of the bundled binary directory relative to the
-## executable.
-const BIN_DIR_NAME* = "bin"
-
-## Development-time path to the bundled binary directory,
-## relative to the executable (project root during nimble run).
-const DEV_BIN_DIR* = "src" / "bin"
-
 # ---------------------------------------------------------------------------
 # Constants — user-facing messages
 # ---------------------------------------------------------------------------
@@ -84,8 +76,10 @@ const MODEL_STRENGTH_WARNING* =
   "device, a sufficiently capable model is the " &
   "foundation of safety.\n" &
   "Consider using a known strong model (e.g. " &
-  "GPT-5+, Claude Opus/Sonnet 3.5+, Gemini 3+," &
-  " DeepSeek, Grok 4+, GLM 4.7+, MiMo 2+)."
+  "GPT-5+, Claude Opus 4.5+/Sonnet 4.6+, " &
+  "Gemini 3+, Qwen 3.6+, MiniMax M2.7+, " &
+  "MiMo v2+, Kimi K2.5+, GLM-5+, DeepSeek V4+, " &
+  "Grok 4.2+)."
 
 # ---------------------------------------------------------------------------
 # Constants — safety
@@ -220,26 +214,6 @@ proc getLogFilePath*(): string =
 ##     assert p.endsWith("cache.json")
 proc getCacheFilePath*(): string =
   result = getAppConfigDir() / CACHE_FILE_NAME
-
-## Returns the absolute path to the bundled binary directory.
-## Checks the production layout first (``<exe>/bin``), then the
-## development layout (``<exe>/src/bin``).  Returns an empty
-## string when neither exists.
-##
-## :returns: Absolute directory path, or empty string.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard getBundledBinDir()
-proc getBundledBinDir*(): string =
-  let appDir = getAppDir()
-  let prodPath = appDir / BIN_DIR_NAME
-  if dirExists(prodPath):
-    return prodPath
-  let devPath = appDir / DEV_BIN_DIR
-  if dirExists(devPath):
-    return devPath
-  result = ""
 
 # ---------------------------------------------------------------------------
 # Public API — string utilities
@@ -504,23 +478,20 @@ func implExtractVersion(
   result = 0.0
 
 ## Checks whether any weak-variant keyword is present in the
-## normalised model name, with special handling for the MiniMax
-## family where "mini" is part of the brand.
+## normalised model name.  The keyword set is deliberately
+## narrow: it covers only tiers that are weak regardless of
+## their version number.  ``mini`` and ``flash`` are NOT
+## included, because high-version variants such as
+## ``gemini-3.5-flash`` are genuinely strong; those families
+## are gated by version threshold instead.
 ##
 ## :param m: Normalised model name.
-## :param skipMini: When true "mini" is not treated as weak.
 ## :returns: true when a weak keyword is found.
-func implHasWeakKeyword(
-  m: string,
-  skipMini: bool = false
-): bool =
+func implHasWeakKeyword(m: string): bool =
   const weakKeywords = [
-    "mini", "nano", "lite", "small", "fast",
-    "flash", "haiku", "light", "tiny", "micro",
-    "instant"]
+    "nano", "lite", "small", "haiku",
+    "light", "tiny", "micro", "instant"]
   for w in weakKeywords:
-    if skipMini and w == "mini":
-      continue
     if m.contains(w):
       return true
   result = false
@@ -530,17 +501,38 @@ func implHasWeakKeyword(
 # ---------------------------------------------------------------------------
 
 ## Checks whether the configured model name corresponds to a
-## known high-performance model suitable for command generation.
+## known high-performance model suitable for command
+## generation.
 ##
-## Recognised strong families and their minimum versions:
-## GPT >= 5 (including CodeX), Claude Opus/Sonnet >= 3.5 or
-## Claude >= 3.7 by version, Gemini >= 3, Grok >= 4,
-## MiniMax >= 2.7, GLM >= 4.7, DeepSeek (full), OpenAI
-## o-series >= 3.  Models containing weak-variant keywords
-## (mini, nano, lite, haiku, flash, etc.) or belonging to
-## unsupported families are always treated as weak.
+## Recognition is purely family + version-threshold based; no
+## hard brand block-list is used.  Thresholds are calibrated
+## against current frontier-model rankings (mid-2026):
 ##
-## Model names are normalised (lowercased, underscores →
+## ===============  =================================
+## Family           Minimum strong version
+## ===============  =================================
+## GPT / Codex      gpt >= 5, codex >= 5
+## OpenAI o-series  o >= 3
+## Claude Opus      >= 4.5  (unversioned -> strong)
+## Claude Sonnet    >= 4.6  (unversioned -> strong)
+## Gemini           >= 3
+## Qwen             >= 3.6
+## MiniMax          >= 2.7
+## MiMo             >= 2
+## Kimi / Moonshot  >= 2.5  (unversioned -> strong)
+## GLM              >= 5
+## DeepSeek         V >= 4 (distilled excluded)
+## Grok             >= 4.2
+## Nemotron         >= 3
+## ===============  =================================
+##
+## Models containing genuinely weak-tier keywords (nano,
+## lite, tiny, micro, haiku, instant, ...) are always treated
+## as weak.  ``mini`` and ``flash`` are intentionally NOT weak
+## keywords because high-version variants of those tiers can
+## be strong; they are gated by version threshold instead.
+##
+## Model names are normalised (lowercased, underscores ->
 ## hyphens) before comparison.
 ##
 ## :param model: The model identifier string.
@@ -548,34 +540,36 @@ func implHasWeakKeyword(
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert isKnownStrongModel("gpt-5.3-codex")
-##     assert isKnownStrongModel("claude-opus-4.6")
-##     assert isKnownStrongModel("deepseek-r1")
-##     assert not isKnownStrongModel("gpt-5.4-mini")
-##     assert not isKnownStrongModel("qwen-3.6plus")
+##     assert isKnownStrongModel("mimo-v2.5-pro")
+##     assert isKnownStrongModel("gpt-5.5")
+##     assert isKnownStrongModel("claude-opus-4.8")
+##     assert isKnownStrongModel("qwen3.7-max")
+##     assert not isKnownStrongModel("claude-3-haiku")
 func isKnownStrongModel*(model: string): bool =
   let m = implNormaliseModel(model)
   if m.len == 0:
     return false
 
-  # Blocked families — never considered strong.
-  for blocked in ["doubao", "qwen", "ernie",
-      "wenxin", "hunyuan", "spark", "baichuan",
-      "yi-"]:
-    if m.contains(blocked):
-      return false
+  # Always-weak tiers, independent of version.
+  if implHasWeakKeyword(m):
+    return false
+
+  # MiMo (Xiaomi) family — checked before the generic
+  # "-o" o-series rule because "mimo" contains an 'o'.
+  if m.contains("mimo"):
+    let v = implExtractVersion(m, "mimo")
+    if v == 0.0: return true   # unversioned mimo flagship
+    return v >= 2.0
 
   # GPT / Codex family.
   if m.contains("gpt") or m.contains("codex"):
-    if implHasWeakKeyword(m): return false
     let v = max(
       implExtractVersion(m, "gpt"),
       implExtractVersion(m, "codex"))
     return v >= 5.0
 
-  # OpenAI o-series reasoning models.
-  if m.contains("-o") or m.startsWith("o"):
-    if implHasWeakKeyword(m): return false
+  # OpenAI o-series reasoning models (o1/o3/o4 ...).
+  if m.startsWith("o") or m.contains("-o"):
     let oIdx =
       if m.startsWith("o"): 0
       else: m.find("-o") + 1
@@ -586,63 +580,57 @@ func isKnownStrongModel*(model: string): bool =
 
   # Claude family.
   if m.contains("claude"):
-    if implHasWeakKeyword(m): return false
     if m.contains("opus"):
       let v = implExtractVersion(m, "opus")
-      return v == 0.0 or v >= 3.5
+      return v == 0.0 or v >= 4.5
     if m.contains("sonnet"):
       let v = implExtractVersion(m, "sonnet")
-      return v == 0.0 or v >= 3.5
-    return implExtractVersion(m, "claude") >= 3.7
+      return v == 0.0 or v >= 4.6
+    if m.contains("haiku"):
+      return false
+    return implExtractVersion(m, "claude") >= 4.5
 
   # Gemini family.
   if m.contains("gemini"):
-    if implHasWeakKeyword(m): return false
     return implExtractVersion(m, "gemini") >= 3.0
 
   # Grok family.
   if m.contains("grok"):
-    if implHasWeakKeyword(m): return false
-    return implExtractVersion(m, "grok") >= 4.0
+    return implExtractVersion(m, "grok") >= 4.2
 
   # MiniMax family ("minimax" contains "mini").
   if m.contains("minimax"):
-    if implHasWeakKeyword(m, skipMini = true):
-      return false
     return implExtractVersion(m, "minimax") >= 2.7
+
+  # Qwen family — modern versions are strong.
+  if m.contains("qwen"):
+    return implExtractVersion(m, "qwen") >= 3.6
 
   # GLM / ChatGLM family.
   if m.contains("glm"):
-    if implHasWeakKeyword(m): return false
-    return implExtractVersion(m, "glm") >= 4.7
+    return implExtractVersion(m, "glm") >= 5.0
 
-  # DeepSeek family — full variants are strong.
-  # Explicit support for v3+, v4+, and r-series.
+  # DeepSeek family — V4+ full variants are strong.
   if m.contains("deepseek"):
-    if implHasWeakKeyword(m): return false
-    if m.contains("distill") or m.contains("distilled"):
+    if m.contains("distill") or
+        m.contains("distilled"):
       return false
-    # Explicit version gate when a v-prefix is present.
     let vNum = implExtractVersion(m, "deepseek")
-    if vNum > 0.0 and vNum < 3.0:
+    if vNum > 0.0 and vNum < 4.0:
       return false
-    return true
+    return vNum >= 4.0
 
-  # Kimi / Moonshot family — K2 and beyond are strong.
+  # Kimi / Moonshot family — K2.5 and beyond are strong.
   if m.contains("kimi") or m.contains("moonshot"):
-    if implHasWeakKeyword(m): return false
     let v = max(
       implExtractVersion(m, "kimi"),
       implExtractVersion(m, "k"))
-    if v == 0.0: return true   # unversioned moonshot flagship
-    return v >= 2.0
+    if v == 0.0: return true   # unversioned flagship
+    return v >= 2.5
 
-  # MiMo (Xiaomi) family — v2+ are strong.
-  if m.contains("mimo"):
-    if implHasWeakKeyword(m): return false
-    let v = implExtractVersion(m, "mimo")
-    if v == 0.0: return true   # unversioned mimo flagship
-    return v >= 2.0
+  # NVIDIA Nemotron family.
+  if m.contains("nemotron"):
+    return implExtractVersion(m, "nemotron") >= 3.0
 
   # Unknown family.
   result = false

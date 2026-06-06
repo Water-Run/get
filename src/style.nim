@@ -2,27 +2,25 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-21
+## :Date: 2026-06-06
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
 ## This module provides two output modes — simp (plain) and vivid
 ## — that control how progress indicators, separators, warnings,
-## commands, and results are rendered on stderr and stdout.  Simp
-## mode produces unformatted text; vivid mode provides animated
-## spinners, ANSI colours, and optional external rendering via
-## bat and mdcat.
+## commands, results, and configuration values are rendered on
+## stderr and stdout.  Simp mode produces unformatted text; vivid
+## mode provides animated spinners, ANSI colours, and semantic
+## colourisation of configuration values.
 ##
-## External rendering is deliberately narrow: bat is invoked
-## only when the content being rendered is code-like or
-## Markdown-formatted LLM reply text.  Specifically, bat is
-## used for the built-in help text and as a fallback for
-## Markdown replies when mdcat is unavailable; mdcat is the
-## preferred renderer for Markdown replies when present.  Raw
-## command output is never piped through bat, because feeding
-## arbitrary byte streams into an external process over a
-## stdin pipe is a known source of truncation and encoding
-## issues on Windows.
+## Semantic colourisation (vivid mode only) highlights
+## configuration values according to their meaning: booleans use
+## a consistent green/grey pair, the API-key placeholder is
+## dimmed, the default command-pattern regex is dimmed while its
+## ``(default: built-in)`` marker is highlighted, a custom or
+## changed pattern is shown in emphatic red, and recognised
+## values (known shells, strong models, in-range integers) are
+## green while questionable ones are amber.
 ##
 ## On Windows, ANSI virtual terminal processing must be
 ## explicitly enabled via initAnsi before any styled output is
@@ -33,7 +31,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[os, osproc, strformat, strutils]
+import std/[strformat, strutils]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -43,7 +41,18 @@ import std/[os, osproc, strformat, strutils]
 type
   StyleKind* = enum
     skSimp  ## Plain text, no formatting.
-    skVivid ## Animated spinners, colours, external rendering.
+    skVivid ## Animated spinners and semantic colours.
+
+## Classifies the semantic state of a configuration value so
+## that vivid mode can colourise it appropriately.
+type
+  ValueState* = enum
+    vsNeutral  ## No special meaning; default foreground.
+    vsGood     ## Recognised / in-range (green).
+    vsBad      ## Off / disabled / negative sense (grey).
+    vsWarn     ## Out-of-range or unrecognised (amber).
+    vsMuted    ## De-emphasised text (dim).
+    vsDanger   ## Custom / overriding a safe default (red).
 
 # ---------------------------------------------------------------------------
 # Constants — ANSI escape codes
@@ -178,112 +187,43 @@ func toStyleKind*(vivid: bool): StyleKind =
   if vivid: skVivid else: skSimp
 
 # ---------------------------------------------------------------------------
-# Public API — external tool availability
+# Public API — semantic value colourisation
 # ---------------------------------------------------------------------------
 
-## Checks whether the bundled mdcat binary is available.
+## Returns the ANSI prefix for a value state, or an empty
+## string for neutral / non-vivid output.
 ##
-## :param binDir: Absolute path to the bundled bin directory.
-## :returns: true when mdcat exists.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard isMdcatAvailable("")
-proc isMdcatAvailable*(binDir: string): bool =
-  if binDir.len == 0:
-    return false
-  when defined(windows):
-    let path = binDir / "mdcat.exe"
-  else:
-    let path = binDir / "mdcat"
-  result = fileExists(path)
-
-## Checks whether the bundled bat binary is available.
-##
-## :param binDir: Absolute path to the bundled bin directory.
-## :returns: true when bat exists.
+## :param kind: The active output style.
+## :param state: The semantic state of the value.
+## :returns: An ANSI escape prefix, or empty string.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     discard isBatAvailable("")
-proc isBatAvailable*(binDir: string): bool =
-  if binDir.len == 0:
-    return false
-  when defined(windows):
-    let path = binDir / "bat.exe"
-  else:
-    let path = binDir / "bat"
-  result = fileExists(path)
-
-## Renders a text string through mdcat for Markdown display.
-## Falls back to plain output when mdcat is unavailable.
-##
-## :param text: The Markdown text to render.
-## :param binDir: Absolute path to the bundled bin directory.
-## :returns: The rendered text, or the original on failure.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard renderMarkdown("# hi", "")
-proc renderMarkdown*(
-  text: string,
-  binDir: string
+##     assert ansiForState(skSimp, vsGood) == ""
+func ansiForState(
+  kind: StyleKind,
+  state: ValueState
 ): string =
-  if not isMdcatAvailable(binDir):
-    return text
-  when defined(windows):
-    let mdcatPath = binDir / "mdcat.exe"
-  else:
-    let mdcatPath = binDir / "mdcat"
-  try:
-    let (output, exitCode) = execCmdEx(
-      fmt"{mdcatPath} --no-pager",
-      input = text)
-    if exitCode == 0 and output.len > 0:
-      result = output
-    else:
-      result = text
-  except OSError, IOError:
-    result = text
-
-## Renders a text string through bat for syntax-highlighted
-## display.  Falls back to plain output when bat is unavailable.
-##
-## :param text: The text to render.
-## :param binDir: Absolute path to the bundled bin directory.
-## :returns: The rendered text, or the original on failure.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard renderWithBat("hello", "")
-proc renderWithBat*(
-  text: string,
-  binDir: string
-): string =
-  if not isBatAvailable(binDir):
-    return text
-  when defined(windows):
-    let batPath = binDir / "bat.exe"
-  else:
-    let batPath = binDir / "bat"
-  try:
-    let (output, exitCode) = execCmdEx(
-      fmt"{batPath} --style=plain --paging=never" &
-      " --color=always",
-      input = text)
-    if exitCode == 0 and output.len > 0:
-      result = output
-    else:
-      result = text
-  except OSError, IOError:
-    result = text
+  if kind != skVivid:
+    return ""
+  case state
+  of vsNeutral: result = ""
+  of vsGood:    result = ANSI_GREEN
+  of vsBad:     result = ANSI_DIM
+  of vsWarn:    result = ANSI_YELLOW
+  of vsMuted:   result = ANSI_DIM
+  of vsDanger:  result = ANSI_RED & ANSI_BOLD
 
 # ---------------------------------------------------------------------------
 # Private helpers — built-in help colourisation
 # ---------------------------------------------------------------------------
 
 ## Applies lightweight ANSI colouring to a help text string for
-## vivid mode when the external bat binary is not available.
+## vivid mode.  The colour scheme is intentionally restrained:
+## the banner and section headers are bold cyan, example/usage
+## ``get`` invocations are bold green, flags beginning with
+## ``--`` are amber, and option-name leaders are highlighted
+## cyan while their descriptions stay neutral.
 ##
 ## :param text: The full help text to colourise.
 ## :returns: The colourised string.
@@ -336,42 +276,6 @@ func implColorizeHelp(text: string): string =
     else:
       lines.add(rawLine)
   result = lines.join("\n")
-
-# ---------------------------------------------------------------------------
-# Public API — external display warnings
-# ---------------------------------------------------------------------------
-
-## Emits warnings when external-display settings conflict with
-## the active style or when required binaries are missing.
-##
-## :param sk: The active output style.
-## :param extDisplay: Whether external-display is enabled.
-## :param binDir: Path to the bundled bin directory.
-proc styleExternalDisplayCheck*(
-  sk: StyleKind,
-  extDisplay: bool,
-  binDir: string
-) =
-  if not extDisplay:
-    return
-  if sk == skSimp:
-    stderr.writeLine(
-      "warning: external-display has no " &
-      "effect in plain mode")
-    return
-  var missing: seq[string] = @[]
-  if not isBatAvailable(binDir):
-    missing.add("bat")
-  if not isMdcatAvailable(binDir):
-    missing.add("mdcat")
-  if missing.len > 0:
-    stderr.writeLine(
-      ANSI_YELLOW &
-      "warning: external display tool(s) " &
-      "not found in bin/: " &
-      missing.join(", ") & ". " &
-      "Falling back to built-in styling." &
-      ANSI_RESET)
 
 # ---------------------------------------------------------------------------
 # Public API — styled stderr output
@@ -523,56 +427,21 @@ proc clearSpinner*() =
 # Public API — result output
 # ---------------------------------------------------------------------------
 
-## Writes the final result to stdout.  External rendering is
-## restricted to Markdown-formatted LLM replies: when the
-## content is Markdown and external display is enabled, mdcat
-## is used if available and bat is used only as a fallback
-## when mdcat is missing.  Raw command output
-## (``isMarkdown == false``) is always echoed as plain text,
-## which avoids the truncation and encoding issues caused by
-## piping arbitrary byte streams through an external renderer
-## on Windows.
+## Writes the final result to stdout as plain text.  The result
+## text is always echoed verbatim; no external rendering is
+## performed because v2.0 ships no terminal renderer binaries.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.
-## :param binDir: Bundled bin directory for tool lookup.
-## :param extDisplay: Whether external display is enabled.
-## :param isMarkdown: Whether the content is Markdown text
-##                    produced by the LLM.  Only Markdown
-##                    content is eligible for external
-##                    rendering; raw command output must be
-##                    passed with ``isMarkdown = false``.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
 proc styleResult*(
   kind: StyleKind,
-  text: string,
-  binDir: string = "",
-  extDisplay: bool = false,
-  isMarkdown: bool = false
+  text: string
 ) =
-  case kind
-  of skSimp:
-    echo text
-  of skVivid:
-    if extDisplay and isMarkdown and
-        binDir.len > 0:
-      if isMdcatAvailable(binDir):
-        let rendered = renderMarkdown(text, binDir)
-        stdout.write(rendered)
-        if not rendered.endsWith("\n"):
-          stdout.write("\n")
-      elif isBatAvailable(binDir):
-        let rendered = renderWithBat(text, binDir)
-        stdout.write(rendered)
-        if not rendered.endsWith("\n"):
-          stdout.write("\n")
-      else:
-        echo text
-    else:
-      echo text
+  echo text
 
 # ---------------------------------------------------------------------------
 # Public API — unified styled output helpers
@@ -594,6 +463,49 @@ proc styleKeyValue*(
   of skVivid:
     echo ANSI_CYAN & ANSI_BOLD & key &
       ANSI_RESET & " = " & value
+
+## Writes a key-value pair to stdout with semantic colouring of
+## the value in vivid mode.  The value may be split into a main
+## segment and an optional trailing segment that is highlighted
+## separately (used for the ``(default: built-in)`` marker on
+## the command-pattern value).
+##
+## :param kind: The active output style.
+## :param key: The option or field name.
+## :param value: The main value text.
+## :param state: Semantic state controlling the value colour.
+## :param trailer: Optional trailing text appended after the
+##                 value and shown highlighted (bold cyan) in
+##                 vivid mode.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     styleConfigValue(skSimp, "shell", "bash", vsGood)
+proc styleConfigValue*(
+  kind: StyleKind,
+  key: string,
+  value: string,
+  state: ValueState = vsNeutral,
+  trailer: string = ""
+) =
+  case kind
+  of skSimp:
+    if trailer.len > 0:
+      echo fmt"{key} = {value} {trailer}"
+    else:
+      echo fmt"{key} = {value}"
+  of skVivid:
+    let valPrefix = ansiForState(kind, state)
+    var line = ANSI_CYAN & ANSI_BOLD & key &
+      ANSI_RESET & " = "
+    if valPrefix.len > 0:
+      line.add(valPrefix & value & ANSI_RESET)
+    else:
+      line.add(value)
+    if trailer.len > 0:
+      line.add(" " & ANSI_CYAN & ANSI_BOLD &
+        trailer & ANSI_RESET)
+    echo line
 
 ## Writes a single value to stdout.
 ##
@@ -634,28 +546,18 @@ proc styleInfo*(kind: StyleKind, text: string) =
   of skVivid:
     echo text
 
-## Displays help text to stdout.  In vivid mode, bat is used
-## when available; otherwise the built-in colouriser is used.
+## Displays help text to stdout.  In vivid mode the built-in
+## colouriser is applied; in plain mode the text is echoed
+## verbatim.
 ##
 ## :param kind: The active output style.
 ## :param text: The help text content.
-## :param binDir: Bundled bin directory for bat lookup.
-## :param extDisplay: Whether external display is enabled.
 proc styleHelp*(
   kind: StyleKind,
-  text: string,
-  binDir: string = "",
-  extDisplay: bool = false
+  text: string
 ) =
   case kind
   of skSimp:
     echo text
   of skVivid:
-    if extDisplay and binDir.len > 0 and
-        isBatAvailable(binDir):
-      let rendered = renderWithBat(text, binDir)
-      stdout.write(rendered)
-      if not rendered.endsWith("\n"):
-        stdout.write("\n")
-    else:
-      echo implColorizeHelp(text)
+    echo implColorizeHelp(text)

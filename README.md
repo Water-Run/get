@@ -16,15 +16,15 @@ get "latest get version at https://github.com/Water-Run/get"
 
 ## Installation
 
-Download from [GitHub Release](https://github.com/Water-Run/get/releases). After extracting, run the bundled Python installation script `get_ready.py` to automatically complete installation and PATH configuration:
+Download from [GitHub Release](https://github.com/Water-Run/get/releases). The v2.0 archive is flat: it contains one binary per supported platform, `get_ready.py`, `get.1`, README files, and the license. After extracting, run the included Python installation script to install the right binary and configure PATH:
 
 ```bash
 python get_ready.py
 ```
 
-Follow the on-screen instructions. Once done, run `get version` to verify the installation.
+Follow the on-screen instructions. If an older installation is found, the installer asks whether to keep the existing configuration while replacing only the binary. Once done, run `get version` to verify the installation.
 
-> After installation, run `get_ready.py` again to uninstall.
+> v2.0 no longer includes search/rendering tool binaries. Generated commands use tools already available on the system PATH.
 
 ## Prerequisites
 
@@ -61,8 +61,8 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | Option              | Description                                    | Value Type                        | Default                              |
 |---------------------|------------------------------------------------|-----------------------------------|--------------------------------------|
 | `key`               | LLM API key                                    | String                            | Empty                                |
-| `url`               | LLM API endpoint URL                           | String (URL)                      | `https://api.poe.com/v1`             |
-| `model`             | LLM model name                                 | String                            | `gpt-5.3-codex`                      |
+| `url`               | LLM API endpoint URL                           | String (URL)                      | `https://api.xiaomimimo.com/v1`      |
+| `model`             | LLM model name                                 | String                            | `mimo-v2.5-pro`                      |
 | `manual-confirm`    | Require manual confirmation before execution   | `true` / `false`                  | `false`                              |
 | `double-check`      | Enable secondary safety review of commands     | `true` / `false`                  | `true`                               |
 | `instance`          | Use single-call fast mode                      | `true` / `false`                  | `false`                              |
@@ -79,8 +79,7 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | `cache-max-entries` | Maximum number of cache entries to retain      | Positive integer / `false`        | `1000`                               |
 | `cache-trigger-threshold` | Number of prior executions required before cache decision | Positive integer / `false` | `1`                                  |
 | `log-max-entries`   | Maximum number of log entries to retain        | Positive integer / `false`        | `1000`                               |
-| `vivid`             | Enable vivid output mode (colors & animations) | `true` / `false`                  | `true`                               |
-| `external-display`  | Use bat/mdcat for rendering                    | `true` / `false`                  | `true`                               |
+| `vivid`             | Enable vivid output mode (semantic colors and progress spinners) | `true` / `false` | `true`                               |
 
 Examples of disabling integer options:
 
@@ -120,7 +119,7 @@ Examples:
 
 ```bash
 get "disk usage" --no-cache
-get "list files" --model gpt-5.3-codex --vivid
+get "list files" --model mimo-v2.5-pro --vivid
 ```
 
 ### `config` Command
@@ -149,7 +148,7 @@ get set command-pattern ""     # Disable pattern filtering
 
 Global entries work across any working directory; context entries are tied to the directory where the query was originally executed.
 
-When `hide-process` is enabled, `get` suppresses its own intermediate progress and warning text (including cache checks and external-display checks), and only prints the final result or required errors.
+When `hide-process` is enabled, `get` suppresses its own intermediate progress and warning text (including cache checks and model advisory warnings), and only prints the final result or required errors.
 
 When config `cache` is `false`, `get` emits a warning in normal process mode: `warning: cache is disabled in config; all cache logic is bypassed`.
 
@@ -190,7 +189,6 @@ get help            # Show usage help
 - **API key**: Linux `~/.config/get/key` (permissions 0600) / Windows `%APPDATA%/get/key` (DPAPI encrypted)
 - **Execution log**: Linux `~/.config/get/get.log` / Windows `%APPDATA%/get/get.log`
 - **Response cache**: Linux `~/.config/get/cache.json` / Windows `%APPDATA%/get/cache.json`
-- **Built-in tools**: `<executable>/bin/` or `<executable>/src/bin/`
 
 ### Exit Codes
 

@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-get_ready.py -- installer / uninstaller for `get`.
+get_ready.py -- installer for `get`.
 
-Run this script to install `get` on your system.  If `get` is already
-installed, running the script again provides the option to uninstall.
-
-Expected layout next to this script:
+The v2.0 release package is intentionally flat:
 
     get_ready.py
-    get              (Linux binary)
-    get.exe          (Windows binary)
-    get.1            (Linux man page, optional)
-    bin/             (optional extra tools directory)
+    get-linux-x64
+    get-windows-x64.exe
+    get-macos-arm64
+    get.1
+    README.md
+    LICENSE
+
+The installer copies the platform binary, installs the optional man page,
+updates the user PATH, and optionally configures LLM settings.
 """
 from __future__ import annotations
 
 import ctypes
 import getpass
+import locale
 import os
 import platform
 import shutil
@@ -25,28 +28,101 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-# ---------------------------------------------------------------------------
-# Platform constants
-# ---------------------------------------------------------------------------
-
 IS_WINDOWS: bool = os.name == "nt"
-IS_LINUX:   bool = sys.platform.startswith("linux")
-IS_MACOS:   bool = sys.platform == "darwin"
+IS_LINUX: bool = sys.platform.startswith("linux")
+IS_MACOS: bool = sys.platform == "darwin"
 SCRIPT_DIR: Path = Path(__file__).resolve().parent
 
 RC_MARK_BEGIN: str = "# >>> get installer >>>"
-RC_MARK_END:   str = "# <<< get installer <<<"
+RC_MARK_END: str = "# <<< get installer <<<"
 
 PROJECT_TAGLINE: str = "get -- get anything from your computer"
-PROJECT_GITHUB:  str = "https://github.com/Water-Run/get"
+PROJECT_GITHUB: str = "https://github.com/Water-Run/get"
 
 DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else ("zsh" if IS_MACOS else "bash")
-DEFAULT_URL:   str = "https://api.poe.com/v1"
-DEFAULT_MODEL: str = "gpt-5.3-codex"
+DEFAULT_URL: str = "https://api.xiaomimimo.com/v1"
+DEFAULT_MODEL: str = "mimo-v2.5-pro"
 
-# ---------------------------------------------------------------------------
-# ANSI colors
-# ---------------------------------------------------------------------------
+MESSAGES: dict[str, dict[str, str]] = {
+    "en": {
+        "api_key": "API key",
+        "api_key_skip": "API key not set. Configure later with: get set key <your-key>",
+        "api_url": "API endpoint URL",
+        "binary_installed": "Binary installed",
+        "cancelled": "Installation cancelled.",
+        "check_system": "Checking system compatibility",
+        "configure_advanced": "Configure advanced settings now?",
+        "configure_llm": "Configure LLM connection settings now?",
+        "detected_shell": "Detected shell: {shell} (configured default: {default})",
+        "existing": "Existing installation found: {path}",
+        "github": PROJECT_GITHUB,
+        "install_get": "Install get?",
+        "installing_binary": "Installing binary  -->  {path}",
+        "installing_man": "Installing man page  -->  {path}",
+        "installer": "installer",
+        "keep_config": "Keep existing get configuration?",
+        "leave_default_model": "leave empty for default: {value}",
+        "leave_default_url": "leave empty for default: {value}",
+        "leave_skip": "leave empty to skip",
+        "llm_banner": "LLM configuration",
+        "llm_intro": "Leave fields empty to keep defaults or skip.",
+        "man_installed": "Man page installed",
+        "man_missing": "get.1 not found -- man page skipped",
+        "model": "Model name",
+        "open_new_terminal": "Open a new terminal for PATH changes to take effect.",
+        "path_already": "PATH already configured",
+        "path_updated": "PATH updated",
+        "proceed": "Proceed with installation?",
+        "reset_config": "Resetting get configuration",
+        "shell_set": "Shell set to '{shell}'",
+        "source_binary": "Source binary: {path}",
+        "source_missing": "Source binary not found: {path}",
+        "targets": "Installation targets:",
+        "title_done": "installation complete",
+        "updating_path": "Updating PATH",
+        "verify": "Open a new terminal and run the following to verify:",
+        "xattr_done": "Quarantine attribute removed (macOS Gatekeeper)",
+    },
+    "zh": {
+        "api_key": "API key",
+        "api_key_skip": "未设置 API key。之后可运行: get set key <your-key>",
+        "api_url": "API 端点 URL",
+        "binary_installed": "主程序已安装",
+        "cancelled": "已取消安装。",
+        "check_system": "检查系统兼容性",
+        "configure_advanced": "现在配置高级选项?",
+        "configure_llm": "现在配置 LLM 连接参数?",
+        "detected_shell": "检测到 shell: {shell} (内置默认: {default})",
+        "existing": "发现已有安装: {path}",
+        "github": PROJECT_GITHUB,
+        "install_get": "安装 get?",
+        "installing_binary": "安装主程序  -->  {path}",
+        "installing_man": "安装 man page  -->  {path}",
+        "installer": "安装器",
+        "keep_config": "保留现有 get 配置?",
+        "leave_default_model": "留空使用默认值: {value}",
+        "leave_default_url": "留空使用默认值: {value}",
+        "leave_skip": "留空跳过",
+        "llm_banner": "LLM 配置",
+        "llm_intro": "字段留空会保留默认值或跳过。",
+        "man_installed": "man page 已安装",
+        "man_missing": "未找到 get.1, 跳过 man page",
+        "model": "模型名称",
+        "open_new_terminal": "打开新终端后 PATH 变更生效。",
+        "path_already": "PATH 已配置",
+        "path_updated": "PATH 已更新",
+        "proceed": "继续安装?",
+        "reset_config": "重置 get 配置",
+        "shell_set": "Shell 已设为 '{shell}'",
+        "source_binary": "源主程序: {path}",
+        "source_missing": "未找到源主程序: {path}",
+        "targets": "安装目标:",
+        "title_done": "安装完成",
+        "updating_path": "更新 PATH",
+        "verify": "打开新终端后运行以下命令验证:",
+        "xattr_done": "已移除隔离属性(macOS Gatekeeper)",
+    },
+}
 
 
 class Color:
@@ -81,9 +157,35 @@ def _enable_ansi() -> None:
         except Exception:
             _disable_colors()
 
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
+
+def detect_language() -> str:
+    if IS_WINDOWS:
+        try:
+            lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            primary = lang_id & 0x3FF
+            if primary == 0x04:
+                return "zh"
+        except Exception:
+            pass
+    for name in ("LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"):
+        raw = os.environ.get(name, "")
+        if raw.lower().startswith("zh"):
+            return "zh"
+    try:
+        loc = locale.getlocale()[0] or ""
+        if loc.lower().startswith("zh"):
+            return "zh"
+    except Exception:
+        pass
+    return "en"
+
+
+LANG: str = detect_language()
+
+
+def tr(key: str, **kwargs: object) -> str:
+    text = MESSAGES.get(LANG, MESSAGES["en"]).get(key, MESSAGES["en"][key])
+    return text.format(**kwargs)
 
 
 def info(msg: str) -> None:
@@ -106,10 +208,6 @@ def good(msg: str) -> None:
     print(f"    {Color.GREEN}{Color.BOLD}[ok]{Color.RESET} {msg}")
 
 
-def bad(msg: str) -> None:
-    print(f"  {Color.RED}{Color.BOLD}[fail]{Color.RESET} {msg}")
-
-
 def banner(title: str) -> None:
     inner = 58
     bar = "-" * inner
@@ -127,16 +225,6 @@ def banner(title: str) -> None:
     print()
 
 
-def _print_github() -> None:
-    print()
-    print(f"  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}")
-    print()
-
-# ---------------------------------------------------------------------------
-# Input helpers
-# ---------------------------------------------------------------------------
-
-
 def ask_yes_no(prompt: str, default: str = "y") -> bool:
     suffix = "[Y/n]" if default.lower() == "y" else "[y/N]"
     while True:
@@ -146,137 +234,98 @@ def ask_yes_no(prompt: str, default: str = "y") -> bool:
                 f"{Color.DIM}{suffix}{Color.RESET} "
             ).strip().lower()
         except EOFError:
-            reply = ""
+            return False
         if not reply:
             reply = default.lower()
-        if reply in ("y", "yes"):
+        if reply in ("y", "yes", "是", "好"):
             return True
-        if reply in ("n", "no"):
+        if reply in ("n", "no", "否", "不"):
             return False
 
 
 def ask_input(prompt: str, hint: str = "") -> str:
     hint_str = f" {Color.DIM}[{hint}]{Color.RESET}" if hint else ""
     try:
-        reply = input(
-            f"  {Color.BOLD}>{Color.RESET} {prompt}{hint_str}: "
-        ).strip()
+        return input(f"  {Color.BOLD}>{Color.RESET} {prompt}{hint_str}: ").strip()
     except EOFError:
-        reply = ""
-    return reply
+        return ""
 
 
 def ask_secret(prompt: str, hint: str = "") -> str:
-    """Prompt for sensitive text without echoing the input."""
     hint_str = f" [{hint}]" if hint else ""
     try:
-        reply = getpass.getpass(f"  > {prompt}{hint_str}: ").strip()
+        return getpass.getpass(f"  > {prompt}{hint_str}: ").strip()
     except Exception:
-        reply = ask_input(prompt, hint=hint)
-    return reply
-
-
-def ask_choice(prompt: str, options: list[tuple[str, str, str]]) -> str:
-    """Present a numbered menu and return the key of the selected option."""
-    print()
-    print(f"  {Color.BOLD}{prompt}{Color.RESET}")
-    for idx, (_, label, desc) in enumerate(options, 1):
-        print(f"    {Color.BOLD}{idx}){Color.RESET} {label}")
-        if desc:
-            print(f"       {Color.DIM}{desc}{Color.RESET}")
-    while True:
-        try:
-            reply = input(
-                f"\n  {Color.BOLD}>{Color.RESET} "
-                f"Select [1-{len(options)}]: "
-            ).strip()
-        except EOFError:
-            reply = "1"
-        if reply.isdigit() and 1 <= int(reply) <= len(options):
-            return options[int(reply) - 1][0]
-
-# ---------------------------------------------------------------------------
-# System check
-# ---------------------------------------------------------------------------
+        return ask_input(prompt, hint=hint)
 
 
 def check_system() -> None:
-    step("Checking system compatibility")
+    step(tr("check_system"))
     if IS_WINDOWS:
-        v = sys.getwindowsversion()
-        if v.major < 10:
-            bad(f"Windows {v.major}.{v.minor} -- Windows 10 or later is required")
+        version = sys.getwindowsversion()
+        if version.major < 10:
+            fail(f"Windows {version.major}.{version.minor} is too old")
             sys.exit(1)
-        good(f"Windows {v.major}.{v.minor} (build {v.build})")
+        good(f"Windows {version.major}.{version.minor} (build {version.build})")
     elif IS_LINUX:
-        release = platform.release()
-        try:
-            major = int(release.split(".", 1)[0])
-        except ValueError:
-            major = 0
-        if major < 6:
-            bad(f"Linux kernel {release} -- kernel 6 or later is required")
-            sys.exit(1)
-        good(f"Linux kernel {release}")
+        good(f"Linux kernel {platform.release()}")
     elif IS_MACOS:
-        try:
-            ver = platform.mac_ver()[0]  # e.g. "14.4.1"
-            major = int(ver.split(".", 1)[0]) if ver else 0
-        except (ValueError, IndexError):
-            major = 0
-        if major < 12:
-            bad(f"macOS {ver or 'unknown'} -- macOS 12 or later is required")
-            sys.exit(1)
-        good(f"macOS {ver}  (arm64)")
+        version = platform.mac_ver()[0] or "unknown"
         if platform.machine() != "arm64":
             warn(f"non-arm64 architecture detected: {platform.machine()}")
+        good(f"macOS {version} ({platform.machine()})")
     else:
-        bad(f"Unsupported platform: {sys.platform}")
+        fail(f"Unsupported platform: {sys.platform}")
         sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Install paths
-# ---------------------------------------------------------------------------
 
-
-def install_paths() -> dict:
+def install_paths() -> dict[str, object]:
     if IS_WINDOWS:
         localappdata = os.environ.get("LOCALAPPDATA") or str(
             Path.home() / "AppData" / "Local"
         )
         base = Path(localappdata) / "Programs" / "get"
         return {
-            "root":      base,
-            "binary":    base / "get.exe",
-            "extra_bin": base / "bin",
-            "man":       None,
-            "path_dirs": [base, base / "bin"],
-        }
-    if IS_MACOS:
-        home = Path.home()
-        appsupport = home / "Library" / "Application Support" / "get"
-        return {
-            "root":      appsupport,
-            "binary":    home / ".local" / "bin" / "get",
-            "extra_bin": appsupport / "bin",
-            "man":       home / ".local" / "share" / "man" / "man1" / "get.1",
-            "path_dirs": [home / ".local" / "bin", appsupport / "bin"],
+            "root": base,
+            "binary": base / "get.exe",
+            "man": None,
+            "path_dirs": [base],
         }
     home = Path.home()
-    local = home / ".local"
+    if IS_MACOS:
+        return {
+            "root": home / "Library" / "Application Support" / "get",
+            "binary": home / ".local" / "bin" / "get",
+            "man": home / ".local" / "share" / "man" / "man1" / "get.1",
+            "path_dirs": [home / ".local" / "bin"],
+        }
     return {
-        "root":      local / "share" / "get",
-        "binary":    local / "bin" / "get",
-        "extra_bin": local / "share" / "get" / "bin",
-        "man":       local / "share" / "man" / "man1" / "get.1",
-        "path_dirs": [local / "bin", local / "share" / "get" / "bin"],
+        "root": home / ".local" / "share" / "get",
+        "binary": home / ".local" / "bin" / "get",
+        "man": home / ".local" / "share" / "man" / "man1" / "get.1",
+        "path_dirs": [home / ".local" / "bin"],
     }
 
 
-def find_installed() -> "Path | None":
+def source_binary() -> Path:
+    if IS_WINDOWS:
+        candidates = ["get-windows-x64.exe", "get.exe"]
+    elif IS_MACOS:
+        candidates = ["get-macos-arm64", "get"]
+    else:
+        candidates = ["get-linux-x64", "get"]
+    for name in candidates:
+        path = SCRIPT_DIR / name
+        if path.exists():
+            return path
+    return SCRIPT_DIR / candidates[0]
+
+
+def find_installed() -> Path | None:
     paths = install_paths()
-    if paths["binary"].exists():
-        return paths["binary"]
+    target = paths["binary"]
+    if isinstance(target, Path) and target.exists():
+        return target
     found = shutil.which("get")
     if found:
         resolved = Path(found).resolve()
@@ -284,53 +333,19 @@ def find_installed() -> "Path | None":
             return resolved
     return None
 
-# ---------------------------------------------------------------------------
-# File helpers
-# ---------------------------------------------------------------------------
 
-
-def copy_file(src: Path, dst: Path) -> None:
+def copy_file(src: Path, dst: Path, executable: bool = False) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
-    if not IS_WINDOWS:
+    if executable and not IS_WINDOWS:
         os.chmod(dst, 0o755)
-
-
-def remove_file(p: Path) -> None:
-    if not p.exists():
-        return
-    step(f"Removing {p}")
-    try:
-        p.unlink()
-        good("Removed")
-    except OSError as e:
-        bad(f"Failed: {e}")
-
-
-def prune_empty_parents(start: Path, stop_at: Path) -> None:
-    try:
-        stop_at = stop_at.resolve()
-    except OSError:
-        return
-    cur = start
-    while cur.exists() and cur.resolve() != stop_at:
-        try:
-            cur.rmdir()
-        except OSError:
-            break
-        cur = cur.parent
-
-# ---------------------------------------------------------------------------
-# PATH management
-# ---------------------------------------------------------------------------
 
 
 def _notify_env_change_windows() -> None:
     try:
         result = ctypes.c_long()
         ctypes.windll.user32.SendMessageTimeoutW(
-            0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000,
-            ctypes.byref(result),
+            0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000, ctypes.byref(result)
         )
     except Exception:
         pass
@@ -340,54 +355,35 @@ def path_add_windows(dirs: Iterable[Path]) -> bool:
     import winreg
     changed = False
     with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER, "Environment",
-        0, winreg.KEY_READ | winreg.KEY_WRITE,
-    ) as k:
+        winreg.HKEY_CURRENT_USER,
+        "Environment",
+        0,
+        winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as key:
         try:
-            current, _ = winreg.QueryValueEx(k, "Path")
+            current, _ = winreg.QueryValueEx(key, "Path")
         except FileNotFoundError:
             current = ""
         parts = [p for p in current.split(";") if p]
         existing = {p.lower() for p in parts}
-        for d in dirs:
-            value = str(d)
+        for directory in dirs:
+            value = str(directory)
             if value.lower() not in existing:
                 parts.append(value)
                 existing.add(value.lower())
                 changed = True
         if changed:
-            winreg.SetValueEx(
-                k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
             _notify_env_change_windows()
     return changed
 
 
-def path_remove_windows(dirs: Iterable[Path]) -> bool:
-    import winreg
-    targets = {str(d).lower() for d in dirs}
-    with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER, "Environment",
-        0, winreg.KEY_READ | winreg.KEY_WRITE,
-    ) as k:
-        try:
-            current, _ = winreg.QueryValueEx(k, "Path")
-        except FileNotFoundError:
-            return False
-        parts = [p for p in current.split(";") if p]
-        kept = [p for p in parts if p.lower() not in targets]
-        if len(kept) == len(parts):
-            return False
-        winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(kept))
-        _notify_env_change_windows()
-    return True
-
-
-def path_add_linux(dirs: Iterable[Path]) -> bool:
+def path_add_posix(dirs: Iterable[Path]) -> bool:
     lines = [RC_MARK_BEGIN]
-    for d in dirs:
+    for directory in dirs:
         lines.append(
-            f'case ":$PATH:" in *":{d}:"*) ;; '
-            f'*) export PATH="{d}:$PATH" ;; esac'
+            f'case ":$PATH:" in *":{directory}:"*) ;; '
+            f'*) export PATH="{directory}:$PATH" ;; esac'
         )
     lines.append(RC_MARK_END)
     block = "\n" + "\n".join(lines) + "\n"
@@ -399,106 +395,46 @@ def path_add_linux(dirs: Iterable[Path]) -> bool:
         content = rc.read_text() if rc.exists() else ""
         if RC_MARK_BEGIN in content:
             continue
-        with rc.open("a") as f:
-            f.write(block)
-        changed = True
-    return changed
-
-
-def path_remove_linux() -> bool:
-    changed = False
-    home = Path.home()
-    for rc in (home / ".profile", home / ".bashrc", home / ".zshrc"):
-        if not rc.exists():
-            continue
-        content = rc.read_text()
-        if RC_MARK_BEGIN not in content:
-            continue
-        kept: list[str] = []
-        skip = False
-        for line in content.splitlines(keepends=True):
-            if RC_MARK_BEGIN in line:
-                skip = True
-                continue
-            if RC_MARK_END in line:
-                skip = False
-                continue
-            if not skip:
-                kept.append(line)
-        rc.write_text("".join(kept).rstrip() + "\n")
+        with rc.open("a", encoding="utf-8") as handle:
+            handle.write(block)
         changed = True
     return changed
 
 
 def add_to_path(dirs: list[Path]) -> bool:
-    return path_add_windows(dirs) if IS_WINDOWS else path_add_linux(dirs)  # macOS reuses linux logic
-
-
-def remove_from_path(dirs: list[Path]) -> bool:
-    return path_remove_windows(dirs) if IS_WINDOWS else path_remove_linux()
-
-# ---------------------------------------------------------------------------
-# get binary invocation
-# ---------------------------------------------------------------------------
+    return path_add_windows(dirs) if IS_WINDOWS else path_add_posix(dirs)
 
 
 def run_get(binary: Path, *args: str) -> bool:
-    """
-    Invoke the installed get binary and return True on success.
-    The value following a 'key' argument is masked in diagnostic output.
-    """
     display_args: list[str] = []
-    for i, a in enumerate(args):
-        if i > 0 and args[i - 1] == "key":
-            display_args.append("<hidden>")
-        else:
-            display_args.append(a)
-    cmd_display = "get " + " ".join(display_args)
-
+    for i, arg in enumerate(args):
+        display_args.append("<hidden>" if i > 0 and args[i - 1] == "key" else arg)
     try:
         result = subprocess.run(
             [str(binary), *args],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
         )
         if result.returncode == 0:
             return True
         raw = result.stderr.strip() or result.stdout.strip() or "(no output)"
-        bad(f"'{cmd_display}' returned non-zero: {raw}")
-        return False
-    except FileNotFoundError:
-        bad(f"Binary not found: {binary}")
-        return False
-    except subprocess.TimeoutExpired:
-        bad(f"'{cmd_display}' timed out")
-        return False
+        warn(f"'get {' '.join(display_args)}' returned non-zero: {raw}")
     except Exception as exc:
-        bad(f"Unexpected error: {exc}")
-        return False
-
-# ---------------------------------------------------------------------------
-# Shell detection
-# ---------------------------------------------------------------------------
+        warn(f"Could not run get {' '.join(display_args)}: {exc}")
+    return False
 
 
-# Only these shells are auto-detected. Anything else -> return None ->
-# configure_shell() keeps the built-in default and makes no changes.
 _LINUX_SHELLS = ("bash", "zsh", "fish")
 _WINDOWS_SHELLS = ("powershell", "pwsh", "cmd")
 
 
-def _normalize_name(raw: str, allowed: tuple) -> "str | None":
-    """Map a raw process/executable name to an allowed shell identifier."""
+def _normalize_name(raw: str, allowed: tuple[str, ...]) -> str | None:
     if not raw:
         return None
-    name = Path(raw.strip()).name.lower()
-    # Strip leading dash from login shells, e.g. "-bash"
-    name = name.lstrip("-")
-    # Strip Windows .exe suffix
+    name = Path(raw.strip()).name.lower().lstrip("-")
     if name.endswith(".exe"):
         name = name[:-4]
-    # Handle version-suffixed names, e.g. "bash-5.2"
     base = name.split("-", 1)[0].split(".", 1)[0]
     for known in allowed:
         if name == known or base == known:
@@ -506,506 +442,170 @@ def _normalize_name(raw: str, allowed: tuple) -> "str | None":
     return None
 
 
-def _linux_shell_from_parent() -> "str | None":
-    """Read /proc/<ppid>/comm to identify the running interactive shell."""
-    try:
-        ppid = os.getppid()
-        comm = Path(f"/proc/{ppid}/comm")
-        if comm.exists():
-            name = _normalize_name(comm.read_text(), _LINUX_SHELLS)
-            if name:
-                return name
-        exe = Path(f"/proc/{ppid}/exe")
-        if exe.exists():
-            name = _normalize_name(os.readlink(exe), _LINUX_SHELLS)
-            if name:
-                return name
-    except Exception:
-        pass
-    return None
-
-
-def _linux_shell_from_env() -> "str | None":
-    return _normalize_name(os.environ.get("SHELL", ""), _LINUX_SHELLS)
-
-
-def _linux_shell_from_passwd() -> "str | None":
-    try:
-        import pwd
-        entry = pwd.getpwuid(os.getuid())
-        return _normalize_name(entry.pw_shell, _LINUX_SHELLS)
-    except Exception:
-        return None
-
-
-def _windows_shell_from_parent() -> "str | None":
-    """Identify the parent shell on Windows via WMI / tasklist."""
-    try:
-        ppid = os.getppid()
-    except Exception:
-        return None
-
-    # Try PowerShell's CIM query first -- accurate and usually available.
-    try:
-        result = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-Command",
-                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={ppid}')"
-                ".Name",
-            ],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            name = _normalize_name(result.stdout, _WINDOWS_SHELLS)
-            if name:
-                return name
-    except Exception:
-        pass
-
-    # Fallback: tasklist
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {ppid}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            # CSV: "image","pid",...
-            first = result.stdout.strip().splitlines()[0]
-            image = first.split(",", 1)[0].strip().strip('"')
-            name = _normalize_name(image, _WINDOWS_SHELLS)
-            if name:
-                return name
-    except Exception:
-        pass
-    return None
-
-
-def _windows_shell_from_env() -> "str | None":
-    # PowerShell sets PSModulePath; pwsh 7+ also sets POSH_* vars in some setups.
-    if os.environ.get("PSModulePath"):
-        # Can't reliably distinguish powershell vs pwsh from env alone,
-        # assume Windows PowerShell (more common as default shell).
-        return "powershell"
-    # ComSpec typically points to cmd.exe when running inside cmd.
-    comspec = os.environ.get("ComSpec", "")
-    if comspec and _normalize_name(comspec, _WINDOWS_SHELLS) == "cmd":
-        return "cmd"
-    return None
-
-
-def detect_current_shell() -> "str | None":
-    """
-    Return one of the auto-detectable shells, or None if unknown.
-
-    Linux   : bash, zsh, fish
-    Windows : powershell, pwsh, cmd
-
-    Any other shell (sh, dash, ksh, tcsh, nushell, xonsh, ...) returns None
-    so that the caller keeps the built-in default and makes no changes.
-    """
-    if IS_LINUX:
-        # Parent process is the most reliable source -- correctly handles
-        # `exec fish` or stale $SHELL after `chsh` without re-login.
-        return (
-            _linux_shell_from_parent()
-            or _linux_shell_from_env()
-            or _linux_shell_from_passwd()
-        )
+def detect_current_shell() -> str | None:
+    if IS_LINUX or IS_MACOS:
+        raw = os.environ.get("SHELL", "")
+        return _normalize_name(raw, _LINUX_SHELLS)
     if IS_WINDOWS:
-        return (
-            _windows_shell_from_parent()
-            or _windows_shell_from_env()
-        )
+        if os.environ.get("PSModulePath"):
+            return "powershell"
+        return _normalize_name(os.environ.get("ComSpec", ""), _WINDOWS_SHELLS)
     return None
 
-# ---------------------------------------------------------------------------
-# Post-install configuration
-# ---------------------------------------------------------------------------
 
-
-def configure_shell(binary: Path) -> None:
+def configure_shell(binary: Path, keep_config: bool) -> None:
+    if keep_config:
+        return
     detected = detect_current_shell()
     if detected is None or detected == DEFAULT_SHELL:
         return
     print()
-    info(
-        f"Detected shell: {Color.BOLD}{detected}{Color.RESET}  "
-        f"(configured default: {DEFAULT_SHELL})"
-    )
-    if not ask_yes_no(
-        f"Set '{detected}' as get's default shell?",
-        default="y",
-    ):
-        return
-    step(f"Running: get set shell {detected}")
-    if run_get(binary, "set", "shell", detected):
-        good(f"Shell set to '{detected}'")
-    else:
-        warn(
-            f"Shell configuration failed. Run manually: get set shell {detected}")
+    info(tr("detected_shell", shell=detected, default=DEFAULT_SHELL))
+    if ask_yes_no(f"Set '{detected}' as get's default shell?", default="y"):
+        if run_get(binary, "set", "shell", detected):
+            good(tr("shell_set", shell=detected))
 
 
 def configure_model(binary: Path) -> None:
-    banner("LLM configuration")
-    info("Configure the LLM connection parameters.")
-    info("Leave a field empty to retain its built-in default or to skip.")
+    banner(tr("llm_banner"))
+    info(tr("llm_intro"))
     print()
 
-    url = ask_input(
-        "API endpoint URL",
-        hint=f"leave empty for default: {DEFAULT_URL}",
-    )
-    if url:
-        step(f"Running: get set url {url}")
-        if run_get(binary, "set", "url", url):
-            good(f"URL set to '{url}'")
+    url = ask_input(tr("api_url"), hint=tr("leave_default_url", value=DEFAULT_URL))
+    if url and run_get(binary, "set", "url", url):
+        good(f"url = {url}")
     print()
 
-    model = ask_input(
-        "Model name",
-        hint=f"leave empty for default: {DEFAULT_MODEL}",
-    )
-    if model:
-        step(f"Running: get set model {model}")
-        if run_get(binary, "set", "model", model):
-            good(f"Model set to '{model}'")
+    model = ask_input(tr("model"), hint=tr("leave_default_model", value=DEFAULT_MODEL))
+    if model and run_get(binary, "set", "model", model):
+        good(f"model = {model}")
     print()
 
-    key = ask_secret("API key", hint="leave empty to skip")
-    if key:
-        step("Running: get set key <hidden>")
-        if run_get(binary, "set", "key", key):
-            good("API key configured")
-    else:
-        info("API key not set. Configure later with: get set key <your-key>")
+    key = ask_secret(tr("api_key"), hint=tr("leave_skip"))
+    if key and run_get(binary, "set", "key", key):
+        good("key = <set>")
+    elif not key:
+        info(tr("api_key_skip"))
 
 
 def configure_advanced(binary: Path) -> None:
     banner("Advanced configuration")
-    info("Defaults are shown in brackets. Press Enter to accept the default.")
-    print()
-
-    # double-check (default: true)
-    info(
-        "double-check: Secondary LLM safety review of generated commands."
-        f" {Color.DIM}[default: true]{Color.RESET}"
-    )
-    double_check = ask_yes_no("Enable double-check?", default="y")
-    step(f"Running: get set double-check {str(double_check).lower()}")
-    if run_get(binary, "set", "double-check", str(double_check).lower()):
-        good(f"double-check = {str(double_check).lower()}")
-    print()
-
-    # manual-confirm (default: false)
-    info(
-        "manual-confirm: Require manual confirmation before executing each command."
-        f" {Color.DIM}[default: false]{Color.RESET}"
-    )
-    manual_confirm = ask_yes_no("Enable manual-confirm?", default="n")
-    step(f"Running: get set manual-confirm {str(manual_confirm).lower()}")
-    if run_get(binary, "set", "manual-confirm", str(manual_confirm).lower()):
-        good(f"manual-confirm = {str(manual_confirm).lower()}")
-    print()
-
-    # instance: only offered when both safety checks are disabled
-    if not double_check and not manual_confirm:
-        info(
-            "instance: Fast single-call mode; disables multi-round agent behavior."
-            f" {Color.DIM}[default: false]{Color.RESET}"
-        )
-        warn(
-            "In instance mode, performance and security will degrade."
-        )
-        instance = ask_yes_no("Enable instance?", default="n")
-        step(f"Running: get set instance {str(instance).lower()}")
-        if run_get(binary, "set", "instance", str(instance).lower()):
-            good(f"instance = {str(instance).lower()}")
-        print()
-
-    # system-prompt (default: empty)
-    info(
-        "system-prompt: Custom instruction prepended to every LLM request."
-        f" {Color.DIM}[default: empty]{Color.RESET}"
-    )
-    system_prompt = ask_input("System prompt", hint="leave empty to skip")
-    if system_prompt:
-        step("Running: get set system-prompt <value>")
-        if run_get(binary, "set", "system-prompt", system_prompt):
-            good("system-prompt configured")
-    print()
-
-    # cache (default: true)
-    info(
-        "cache: Enable the cache system for repeated queries."
-        f" {Color.DIM}[default: true]{Color.RESET}"
-    )
-    warn(
-        "After the first execution is recorded, repeating the same query may trigger "
-        "one extra LLM request to decide whether and how to cache it. "
-        "Cache may causes occasional issues."
-    )
-    info("Clear cache with: get cache --clean")
-    cache_enabled = ask_yes_no("Enable cache?", default="y")
-    step(f"Running: get set cache {str(cache_enabled).lower()}")
-    if run_get(binary, "set", "cache", str(cache_enabled).lower()):
-        good(f"cache = {str(cache_enabled).lower()}")
-    print()
-
-    # vivid (default: true)
-    info(
-        "vivid: Colored output and animations in terminal display."
-        f" {Color.DIM}[default: true]{Color.RESET}"
-    )
-    vivid = ask_yes_no("Enable vivid?", default="y")
-    step(f"Running: get set vivid {str(vivid).lower()}")
-    if run_get(binary, "set", "vivid", str(vivid).lower()):
-        good(f"vivid = {str(vivid).lower()}")
-    print()
-
-    if not vivid:
-        # hide-process (default: false)
-        info(
-            "hide-process: Suppress intermediate step output during execution."
-            f" {Color.DIM}[default: false]{Color.RESET}"
-        )
-        hide_process = ask_yes_no("Enable hide-process?", default="n")
-        step(f"Running: get set hide-process {str(hide_process).lower()}")
-        if run_get(binary, "set", "hide-process", str(hide_process).lower()):
-            good(f"hide-process = {str(hide_process).lower()}")
-        print()
-
-        # external-display (default: true)
-        info(
-            "external-display: Use external tools (bat, mdcat) for rendering output."
-            f" {Color.DIM}[default: true]{Color.RESET}"
-        )
-        external_display = ask_yes_no("Enable external-display?", default="y")
-        step(
-            f"Running: get set external-display {str(external_display).lower()}")
-        if run_get(binary, "set", "external-display", str(external_display).lower()):
-            good(f"external-display = {str(external_display).lower()}")
-        print()
-
-# ---------------------------------------------------------------------------
-# Uninstall
-# ---------------------------------------------------------------------------
+    for option, default in (
+        ("double-check", "y"),
+        ("manual-confirm", "n"),
+        ("cache", "y"),
+        ("vivid", "y"),
+    ):
+        enabled = ask_yes_no(f"Enable {option}?", default=default)
+        run_get(binary, "set", option, str(enabled).lower())
 
 
-def do_uninstall(existing: Path) -> None:
-    paths = install_paths()
-    print()
+def reset_config(binary: Path) -> None:
+    step(tr("reset_config"))
+    run_get(binary, "config", "--reset")
 
-    remove_file(existing)
-    if paths["binary"].resolve() != existing.resolve():
-        remove_file(paths["binary"])
 
-    if paths["extra_bin"].exists():
-        step(f"Removing extra tools: {paths['extra_bin']}")
+def strip_macos_quarantine(paths: Iterable[Path]) -> None:
+    if not IS_MACOS:
+        return
+    for path in paths:
         try:
-            shutil.rmtree(paths["extra_bin"])
-            good("Extra tools removed")
-        except OSError as e:
-            bad(f"Failed: {e}")
-
-    if paths["man"]:
-        remove_file(paths["man"])
-        prune_empty_parents(paths["man"].parent, stop_at=Path.home())
-
-    if paths["root"].exists():
-        try:
-            paths["root"].rmdir()
-        except OSError:
+            subprocess.run(
+                ["xattr", "-d", "com.apple.quarantine", str(path)],
+                capture_output=True,
+                check=False,
+            )
+        except Exception:
             pass
-
-    step("Cleaning PATH entries")
-    if remove_from_path(paths["path_dirs"]):
-        good("PATH entries removed")
-    else:
-        good("PATH entries already absent")
-
-    print()
-    banner("uninstallation complete")
-    if IS_LINUX or IS_MACOS:
-        info("Restart your shell to refresh the environment.")
-    else:
-        info("Open a new terminal for PATH changes to take effect.")
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+    good(tr("xattr_done"))
 
 
 def main() -> None:
     _enable_ansi()
-
     print()
     print(f"{Color.BOLD}{Color.MAGENTA}{PROJECT_TAGLINE}{Color.RESET}")
-    print()
 
-    existing = find_installed()
-
-    # ------------------------------------------------------------------
-    # Uninstall branch
-    # ------------------------------------------------------------------
-    if existing:
-        banner("uninstaller")
-        info(
-            f"Existing installation found: {Color.BOLD}{existing}{Color.RESET}")
-        print()
-        if not ask_yes_no("Uninstall get?", default="n"):
-            _print_github()
-            sys.exit(0)
-        do_uninstall(existing)
-        print()
-        if not ask_yes_no("Reinstall get?", default="n"):
-            _print_github()
-            sys.exit(0)
-
-    # ------------------------------------------------------------------
-    # Install branch
-    # ------------------------------------------------------------------
-    banner("installer")
+    banner(tr("installer"))
     check_system()
     print()
 
-    src_bin = SCRIPT_DIR / ("get.exe" if IS_WINDOWS else "get")
+    src_bin = source_binary()
     if not src_bin.exists():
-        fail(f"Source binary not found: {src_bin}")
-        _print_github()
+        fail(tr("source_missing", path=src_bin))
+        print(f"\n  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}\n")
         sys.exit(1)
+    info(tr("source_binary", path=src_bin))
 
-    info(f"Source binary: {src_bin}")
-    print()
-    if not ask_yes_no("Install get?", default="y"):
-        info("Installation cancelled.")
-        _print_github()
+    existing = find_installed()
+    keep_config = False
+    if existing:
+        info(tr("existing", path=existing))
+        keep_config = ask_yes_no(tr("keep_config"), default="y")
+
+    if not ask_yes_no(tr("install_get"), default="y"):
+        info(tr("cancelled"))
         sys.exit(0)
-
-    # Installation type selection
-    extra_src = SCRIPT_DIR / "bin"
-    has_extra = extra_src.is_dir() and any(extra_src.iterdir())
-
-    if has_extra:
-        mode = ask_choice(
-            "Select installation type:",
-            [
-                (
-                    "full",
-                    "Full installation",
-                    "Install get, extra tools from bin/, and (Linux) man page.",
-                ),
-                (
-                    "minimal",
-                    "Minimal installation",
-                    "Install get and (Linux) man page only.",
-                ),
-            ],
-        )
-    else:
-        mode = "minimal"
-        info("No bin/ directory found -- performing minimal installation.")
 
     paths = install_paths()
     binary = paths["binary"]
-    path_dirs = paths["path_dirs"][:1] if mode == "minimal" else paths["path_dirs"]
+    man = paths["man"]
+    path_dirs = paths["path_dirs"]
+    assert isinstance(binary, Path)
+    assert isinstance(path_dirs, list)
 
-    # Confirm targets
     print()
-    info("Installation targets:")
-    print(f"    binary    : {binary}")
-    if mode == "full":
-        print(f"    extra bin : {paths['extra_bin']}")
-    if paths["man"]:
-        print(f"    man page  : {paths['man']}")
-    for d in path_dirs:
-        print(f"    PATH +=   : {d}")
+    info(tr("targets"))
+    print(f"    binary  : {binary}")
+    if isinstance(man, Path):
+        print(f"    man page: {man}")
+    for directory in path_dirs:
+        print(f"    PATH += : {directory}")
     print()
 
-    if not ask_yes_no("Proceed with installation?", default="y"):
-        info("Installation cancelled.")
-        _print_github()
+    if not ask_yes_no(tr("proceed"), default="y"):
+        info(tr("cancelled"))
         sys.exit(0)
 
-    print()
+    step(tr("installing_binary", path=binary))
+    copy_file(src_bin, binary, executable=True)
+    good(tr("binary_installed"))
+    strip_macos_quarantine([binary])
 
-    # Binary
-    step(f"Installing binary  -->  {binary}")
-    copy_file(src_bin, binary)
-    good("Binary installed")
-
-    # macOS: strip Gatekeeper quarantine xattr from binary + bundled tools
-    if IS_MACOS:
-        targets = [binary]
-        if mode == "full" and paths["extra_bin"].exists():
-            targets.extend(p for p in paths["extra_bin"].iterdir() if p.is_file())
-        for t in targets:
-            try:
-                subprocess.run(
-                    ["xattr", "-d", "com.apple.quarantine", str(t)],
-                    capture_output=True, check=False)
-            except Exception:
-                pass
-        good("Quarantine attribute removed (macOS Gatekeeper)")
-
-    # Man page
-    if paths["man"]:
+    if isinstance(man, Path):
         man_src = SCRIPT_DIR / "get.1"
         if man_src.exists():
-            step(f"Installing man page  -->  {paths['man']}")
-            copy_file(man_src, paths["man"])
-            good("Man page installed")
+            step(tr("installing_man", path=man))
+            copy_file(man_src, man)
+            good(tr("man_installed"))
         else:
-            warn("get.1 not found -- man page skipped")
+            warn(tr("man_missing"))
 
-    # Extra tools
-    if mode == "full":
-        step(f"Installing extra tools  -->  {paths['extra_bin']}")
-        paths["extra_bin"].mkdir(parents=True, exist_ok=True)
-        count = 0
-        for item in extra_src.iterdir():
-            if item.is_file():
-                copy_file(item, paths["extra_bin"] / item.name)
-                count += 1
-        good(f"{count} extra tool(s) installed")
-
-    # PATH
-    step("Updating PATH")
+    step(tr("updating_path"))
     if add_to_path(path_dirs):
-        good("PATH updated")
+        good(tr("path_updated"))
     else:
-        good("PATH already configured")
+        good(tr("path_already"))
 
-    # Shell
-    configure_shell(binary)
+    if existing and not keep_config:
+        reset_config(binary)
 
-    # LLM settings
+    configure_shell(binary, keep_config=keep_config)
+
     print()
-    if ask_yes_no("Configure LLM connection settings now?", default="y"):
+    if ask_yes_no(tr("configure_llm"), default="y"):
         configure_model(binary)
 
-    # Advanced settings
     print()
-    if ask_yes_no("Configure advanced settings now?", default="n"):
+    if ask_yes_no(tr("configure_advanced"), default="n"):
         configure_advanced(binary)
 
-    # Completion
+    banner(tr("title_done"))
+    info(tr("verify"))
+    print(f"    {Color.BOLD}get version{Color.RESET}")
+    print(f"    {Color.BOLD}get isok{Color.RESET}")
     print()
-    banner("installation complete")
-    info("Open a new terminal and run the following to verify:")
-    print(f"    {Color.BOLD}get version{Color.RESET}"
-          f"  {Color.DIM}-- verify installation{Color.RESET}")
-    print(f"    {Color.BOLD}get isok{Color.RESET}"
-          f"     {Color.DIM}-- verify configuration{Color.RESET}")
-    print()
-    if IS_LINUX or IS_MACOS:
-        info(
-            "To reload PATH in the current session: "
-            f"{Color.BOLD}source ~/.profile{Color.RESET}"
-        )
-    else:
-        info("Open a new terminal for PATH changes to take effect.")
-
-    _print_github()
+    info(tr("open_new_terminal"))
+    print(f"\n  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}\n")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-19
+## :Date: 2026-06-06
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -28,10 +28,10 @@ import utils
 # ---------------------------------------------------------------------------
 
 ## Default LLM API endpoint URL.
-const DEFAULT_URL* = "https://api.poe.com/v1"
+const DEFAULT_URL* = "https://api.xiaomimimo.com/v1"
 
 ## Default LLM model identifier.
-const DEFAULT_MODEL* = "gpt-5.3-codex"
+const DEFAULT_MODEL* = "mimo-v2.5-pro"
 
 ## Default for manual-confirm.
 const DEFAULT_MANUAL_CONFIRM* = false
@@ -73,9 +73,6 @@ const DEFAULT_LOG_MAX_ENTRIES* = 1000
 ## Default vivid mode flag.
 const DEFAULT_VIVID* = true
 
-## Default external-display flag.
-const DEFAULT_EXTERNAL_DISPLAY* = true
-
 ## Default maximum number of agent loop rounds.
 const DEFAULT_MAX_ROUNDS* = 3
 
@@ -107,7 +104,6 @@ type
     cacheTriggerThreshold*: int      ## Prior-run threshold before decision.
     logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
-    externalDisplay*: bool           ## Use bat/mdcat.
     maxRounds*: int                  ## Max agent loop rounds.
 
 # ---------------------------------------------------------------------------
@@ -217,6 +213,97 @@ when defined(windows):
 func implDefaultShell(): string =
   result = defaultShell()
 
+## Shell names recognised as well-supported by the prompt
+## builder; anything outside this set is flagged in vivid mode.
+const KNOWN_SHELLS = [
+  "bash", "zsh", "fish", "sh",
+  "powershell", "pwsh", "cmd"]
+
+# ---------------------------------------------------------------------------
+# Private helpers — semantic value classification (vivid mode)
+# ---------------------------------------------------------------------------
+
+## Classifies a boolean value for vivid colouring: true is
+## treated as the positive (green) state and false as the muted
+## (grey) state, applied uniformly to every boolean option.
+##
+## :param value: The boolean option value.
+## :returns: vsGood for true, vsBad for false.
+func classifyBool*(value: bool): ValueState =
+  if value: vsGood else: vsBad
+
+## Classifies an integer option against a recommended inclusive
+## range.  A disabled value (0 or negative) is muted; a value
+## inside the range is good; anything outside is flagged.
+##
+## :param value: The integer option value.
+## :param lo: Inclusive lower bound of the recommended range.
+## :param hi: Inclusive upper bound of the recommended range.
+## :returns: The semantic state for the value.
+func classifyInt*(value: int, lo: int, hi: int): ValueState =
+  if value <= 0:
+    return vsMuted
+  if value >= lo and value <= hi:
+    return vsGood
+  result = vsWarn
+
+## Classifies a shell name: recognised shells are good, others
+## are flagged so the user notices an unsupported configuration.
+##
+## :param shell: The configured shell name.
+## :returns: vsGood when recognised, vsWarn otherwise.
+func classifyShell*(shell: string): ValueState =
+  let lower = toLowerAscii(shell)
+  for known in KNOWN_SHELLS:
+    if lower == known or lower.contains(known):
+      return vsGood
+  result = vsWarn
+
+## Classifies a model name using the strong-model heuristic so
+## that recognised high-performance models appear green and
+## unknown / weak models appear amber.
+##
+## :param model: The configured model name.
+## :returns: vsGood when strong, vsWarn otherwise.
+func classifyModel*(model: string): ValueState =
+  if isKnownStrongModel(model): vsGood else: vsWarn
+
+## Classifies a URL value: a non-empty value is neutral, an
+## empty value is flagged as it prevents requests.
+##
+## :param url: The configured endpoint URL.
+## :returns: vsNeutral when set, vsWarn when empty.
+func classifyUrl*(url: string): ValueState =
+  if url.len > 0: vsNeutral else: vsWarn
+
+## Builds the display text, semantic state, and optional
+## highlighted trailer for the command-pattern value.  The
+## default built-in pattern is dimmed with a highlighted
+## ``(default: built-in)`` trailer; a disabled pattern is
+## flagged amber; a custom pattern is shown in emphatic red.
+##
+## :param pattern: The configured command-pattern option.
+## :returns: A tuple of (display text, state, trailer).
+func classifyCommandPattern*(
+  pattern: Option[string]
+): tuple[text: string, state: ValueState,
+         trailer: string] =
+  if pattern.isNone:
+    result = (
+      text: DEFAULT_COMMAND_PATTERN,
+      state: vsMuted,
+      trailer: "(default: built-in)")
+  elif pattern.get.len == 0:
+    result = (
+      text: "(disabled)",
+      state: vsWarn,
+      trailer: "")
+  else:
+    result = (
+      text: pattern.get,
+      state: vsDanger,
+      trailer: "(custom)")
+
 ## Parses a boolean string.  Empty input returns the default.
 ##
 ## :param value: Raw string from the CLI.
@@ -295,7 +382,6 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheTriggerThreshold": cfg.cacheTriggerThreshold,
     "logMaxEntries":   cfg.logMaxEntries,
     "vivid":           cfg.vivid,
-    "externalDisplay": cfg.externalDisplay,
     "maxRounds":       cfg.maxRounds
   }
   if cfg.commandPattern.isSome:
@@ -343,9 +429,6 @@ proc implJsonToConfig(
     logMaxEntries: node{"logMaxEntries"}.getInt(
       defaults.logMaxEntries),
     vivid: node{"vivid"}.getBool(defaults.vivid),
-    externalDisplay:
-      node{"externalDisplay"}.getBool(
-        defaults.externalDisplay),
     maxRounds: node{"maxRounds"}.getInt(
       defaults.maxRounds)
   )
@@ -396,7 +479,6 @@ func defaultConfig*(): Config =
       DEFAULT_CACHE_TRIGGER_THRESHOLD,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
     vivid:           DEFAULT_VIVID,
-    externalDisplay: DEFAULT_EXTERNAL_DISPLAY,
     maxRounds:       DEFAULT_MAX_ROUNDS
   )
 
@@ -508,6 +590,15 @@ proc saveConfig*(cfg: Config) =
 ## so the user can see exactly what is active.  When it is set to
 ## an empty string (disabled), "(disabled)" is shown.
 ##
+## In vivid mode each value is colourised according to its
+## meaning via ``styleConfigValue``: the key placeholder is
+## dimmed, booleans use a consistent green/grey pair, the
+## default command-pattern regex is dimmed with a highlighted
+## ``(default: built-in)`` trailer while a custom pattern is
+## shown in emphatic red, and recognised values (known shells,
+## strong models, in-range integers) are green with
+## questionable ones in amber.
+##
 ## :param sk: The active output style.
 ##
 ## .. code-block:: nim
@@ -521,49 +612,58 @@ proc displayConfig*(sk: StyleKind = skSimp) =
       "set (encrypted storage, value cannot be retrieved)"
     else:
       "not set"
-  let cmdPat =
-    if cfg.commandPattern.isNone:
-      DEFAULT_COMMAND_PATTERN & " (default: built-in)"
-    elif cfg.commandPattern.get.len == 0:
-      "(disabled)"
-    else:
-      cfg.commandPattern.get
+  styleConfigValue(sk, "key", keyDisplay,
+    (if key.isSome: vsMuted else: vsWarn))
+  styleConfigValue(sk, "url", cfg.url,
+    classifyUrl(cfg.url))
+  styleConfigValue(sk, "model", cfg.model,
+    classifyModel(cfg.model))
+  styleConfigValue(sk, "manual-confirm",
+    $cfg.manualConfirm, classifyBool(cfg.manualConfirm))
+  styleConfigValue(sk, "double-check",
+    $cfg.doubleCheck, classifyBool(cfg.doubleCheck))
+  styleConfigValue(sk, "instance", $cfg.instance,
+    classifyBool(cfg.instance))
+  styleConfigValue(sk, "timeout",
+    formatIntOrDisable(cfg.timeout),
+    classifyInt(cfg.timeout, 1, 3600))
+  styleConfigValue(sk, "max-token",
+    formatIntOrDisable(cfg.maxToken),
+    classifyInt(cfg.maxToken, 1024, 1_000_000))
+  styleConfigValue(sk, "max-rounds",
+    formatIntOrDisable(cfg.maxRounds),
+    classifyInt(cfg.maxRounds, 1, 10))
+  let (cmdPat, cmdState, cmdTrailer) =
+    classifyCommandPattern(cfg.commandPattern)
+  styleConfigValue(sk, "command-pattern", cmdPat,
+    cmdState, cmdTrailer)
   let sysPmt =
     if cfg.systemPrompt.isSome:
       cfg.systemPrompt.get else: ""
-  styleKeyValue(sk, "key", keyDisplay)
-  styleKeyValue(sk, "url", cfg.url)
-  styleKeyValue(sk, "model", cfg.model)
-  styleKeyValue(sk, "manual-confirm",
-    $cfg.manualConfirm)
-  styleKeyValue(sk, "double-check",
-    $cfg.doubleCheck)
-  styleKeyValue(sk, "instance", $cfg.instance)
-  styleKeyValue(sk, "timeout",
-    formatIntOrDisable(cfg.timeout))
-  styleKeyValue(sk, "max-token",
-    formatIntOrDisable(cfg.maxToken))
-  styleKeyValue(sk, "max-rounds",
-    formatIntOrDisable(cfg.maxRounds))
-  styleKeyValue(sk, "command-pattern", cmdPat)
-  styleKeyValue(sk, "system-prompt", sysPmt)
-  styleKeyValue(sk, "shell", cfg.shell)
-  styleKeyValue(sk, "log", $cfg.log)
-  styleKeyValue(sk, "hide-process",
-    $cfg.hideProcess)
-  styleKeyValue(sk, "cache", $cfg.cache)
-  styleKeyValue(sk, "cache-expiry",
-    formatIntOrDisable(cfg.cacheExpiry))
-  styleKeyValue(sk, "cache-max-entries",
-    formatIntOrDisable(cfg.cacheMaxEntries))
-  styleKeyValue(sk, "cache-trigger-threshold",
-    formatIntOrDisable(
-      cfg.cacheTriggerThreshold))
-  styleKeyValue(sk, "log-max-entries",
-    formatIntOrDisable(cfg.logMaxEntries))
-  styleKeyValue(sk, "vivid", $cfg.vivid)
-  styleKeyValue(sk, "external-display",
-    $cfg.externalDisplay)
+  styleConfigValue(sk, "system-prompt", sysPmt,
+    vsNeutral)
+  styleConfigValue(sk, "shell", cfg.shell,
+    classifyShell(cfg.shell))
+  styleConfigValue(sk, "log", $cfg.log,
+    classifyBool(cfg.log))
+  styleConfigValue(sk, "hide-process",
+    $cfg.hideProcess, classifyBool(cfg.hideProcess))
+  styleConfigValue(sk, "cache", $cfg.cache,
+    classifyBool(cfg.cache))
+  styleConfigValue(sk, "cache-expiry",
+    formatIntOrDisable(cfg.cacheExpiry),
+    classifyInt(cfg.cacheExpiry, 1, 365))
+  styleConfigValue(sk, "cache-max-entries",
+    formatIntOrDisable(cfg.cacheMaxEntries),
+    classifyInt(cfg.cacheMaxEntries, 1, 100_000))
+  styleConfigValue(sk, "cache-trigger-threshold",
+    formatIntOrDisable(cfg.cacheTriggerThreshold),
+    classifyInt(cfg.cacheTriggerThreshold, 0, 100))
+  styleConfigValue(sk, "log-max-entries",
+    formatIntOrDisable(cfg.logMaxEntries),
+    classifyInt(cfg.logMaxEntries, 1, 100_000))
+  styleConfigValue(sk, "vivid", $cfg.vivid,
+    classifyBool(cfg.vivid))
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -687,9 +787,6 @@ proc setConfigOption*(
   of "vivid":
     cfg.vivid = implParseBool(
       value, name, DEFAULT_VIVID)
-  of "external-display":
-    cfg.externalDisplay = implParseBool(
-      value, name, DEFAULT_EXTERNAL_DISPLAY)
   of "max-rounds":
     cfg.maxRounds = implParseIntOrDisable(
       value, name, DEFAULT_MAX_ROUNDS)

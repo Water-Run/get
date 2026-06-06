@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-21
+## :Date: 2026-06-06
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
@@ -89,9 +89,9 @@ query flags (per-invocation overrides):
 set options:
   key                LLM API key (string, default: empty)
   url                API endpoint URL (string,
-                       default: https://api.poe.com/v1)
+                       default: https://api.xiaomimimo.com/v1)
   model              LLM model name (string,
-                       default: gpt-5.3-codex)
+                       default: mimo-v2.5-pro)
   manual-confirm     prompt before executing
                        (true/false, default: false)
   double-check       second model safety review
@@ -130,8 +130,6 @@ set options:
                        (integer or false, default: 1000)
   vivid              vivid output mode with colours and animation
                        (true/false, default: true)
-  external-display   use bat/mdcat for output rendering
-                       (true/false, default: true)
 
   Integer options accept 'false' to disable the limit.
 
@@ -159,10 +157,10 @@ get flags:
 examples:
   get "system version"
   get "disk usage" --no-cache
-  get "list files" --model gpt-5.3-codex --vivid
-  get set model gpt-5.3-codex
+  get "list files" --model mimo-v2.5-pro --vivid
+  get set model mimo-v2.5-pro
   get set key sk-your-api-key
-  get set url https://api.openai.com/v1
+  get set url https://api.xiaomimimo.com/v1
   get set timeout false
   get set max-rounds 5
   get set command-pattern
@@ -308,17 +306,12 @@ proc implApplyOverrides(
 # Private helpers — style loading
 # ---------------------------------------------------------------------------
 
-## Loads the style and binDir from the config.
+## Resolves the active output style from the configuration.
 ##
 ## :param cfg: The loaded configuration.
-## :returns: A tuple of (StyleKind, binDir string).
-proc implLoadStyle(
-  cfg: Config
-): tuple[sk: StyleKind, binDir: string] =
-  result = (
-    sk: toStyleKind(cfg.vivid),
-    binDir: getBundledBinDir()
-  )
+## :returns: The StyleKind to use for output.
+func implLoadStyle(cfg: Config): StyleKind =
+  result = toStyleKind(cfg.vivid)
 
 # ---------------------------------------------------------------------------
 # Private helpers — LLM call wrappers
@@ -772,8 +765,6 @@ proc implHandleCacheOutcome(
 ## :param cfg: The effective configuration.
 ## :param key: The API key.
 ## :param sk: The active output style.
-## :param binDir: Bundled bin directory.
-## :param extDisplay: External display enabled flag.
 ## :param shell: The effective shell.
 ## :param info: System information snapshot.
 ## :param effectivePattern: Forbidden-command regex.
@@ -783,8 +774,6 @@ proc implInstanceFlow(
   cfg: Config,
   key: string,
   sk: StyleKind,
-  binDir: string,
-  extDisplay: bool,
   shell: string,
   info: SysInfo,
   effectivePattern: string,
@@ -806,8 +795,7 @@ proc implInstanceFlow(
   if cmd.isNone:
     if not cfg.hideProcess:
       styleSeparator(sk, DIV_SECTION)
-    styleResult(sk, resp.content, binDir,
-      extDisplay, false)
+    styleResult(sk, resp.content)
     implHandleCacheOutcome(cc, query, "",
       resp.content, cfg, key, sk)
     if cfg.log:
@@ -826,15 +814,13 @@ proc implInstanceFlow(
   if not cfg.hideProcess:
     styleSeparator(sk, DIV_WARN)
     styleProgress(sk, "executing...")
-  let execRes = executeCommand(
-    command, shell, info.binDir)
+  let execRes = executeCommand(command, shell)
 
   if not cfg.hideProcess:
     styleSeparator(sk, DIV_SECTION)
   var finalOutput = execRes.output.strip()
   if finalOutput.len > 0:
-    styleResult(sk, finalOutput, info.binDir,
-      extDisplay, false)
+    styleResult(sk, finalOutput)
   elif execRes.exitCode != 0:
     finalOutput =
       fmt"command exited with code " &
@@ -864,8 +850,6 @@ proc implInstanceFlow(
 ## :param cfg: The effective configuration.
 ## :param key: The API key.
 ## :param sk: The active output style.
-## :param binDir: Bundled bin directory.
-## :param extDisplay: External display enabled flag.
 ## :param shell: The effective shell.
 ## :param info: System information snapshot.
 ## :param effectivePattern: Forbidden-command regex.
@@ -875,8 +859,6 @@ proc implAgentFlow(
   cfg: Config,
   key: string,
   sk: StyleKind,
-  binDir: string,
-  extDisplay: bool,
   shell: string,
   info: SysInfo,
   effectivePattern: string,
@@ -929,8 +911,7 @@ proc implAgentFlow(
 
       if not cfg.hideProcess:
         styleProgress(sk, "executing...")
-      let execRes = executeCommand(
-        checkedCmd, shell, info.binDir)
+      let execRes = executeCommand(checkedCmd, shell)
 
       if not cfg.hideProcess:
         let preview =
@@ -969,8 +950,7 @@ proc implAgentFlow(
       if not cfg.hideProcess:
         styleSeparator(sk, DIV_WARN)
         styleProgress(sk, "executing...")
-      let execRes = executeCommand(
-        checkedCmd, shell, info.binDir)
+      let execRes = executeCommand(checkedCmd, shell)
 
       lastCommand = checkedCmd
       lastExitCode = execRes.exitCode
@@ -979,8 +959,7 @@ proc implAgentFlow(
       if not cfg.hideProcess:
         styleSeparator(sk, DIV_SECTION)
       if finalOutput.len > 0:
-        styleResult(sk, finalOutput, info.binDir,
-          extDisplay, false)
+        styleResult(sk, finalOutput)
       elif execRes.exitCode != 0:
         finalOutput =
           fmt"command exited with code " &
@@ -1007,8 +986,7 @@ proc implAgentFlow(
       if not cfg.hideProcess:
         styleSeparator(sk, DIV_WARN)
         styleProgress(sk, "executing...")
-      let execRes = executeCommand(
-        checkedCmd, shell, info.binDir)
+      let execRes = executeCommand(checkedCmd, shell)
 
       lastCommand = checkedCmd
       lastExitCode = execRes.exitCode
@@ -1031,8 +1009,7 @@ proc implAgentFlow(
         finalOutput = interpretResp.content
         if not cfg.hideProcess:
           styleSeparator(sk, DIV_SECTION)
-        styleResult(sk, finalOutput, info.binDir,
-          extDisplay, true)
+        styleResult(sk, finalOutput)
 
       if cfg.log:
         logExecution(query, checkedCmd,
@@ -1049,8 +1026,7 @@ proc implAgentFlow(
 
       if not cfg.hideProcess:
         styleSeparator(sk, DIV_SECTION)
-      styleResult(sk, finalOutput, info.binDir,
-        extDisplay, false)
+      styleResult(sk, finalOutput)
 
       if cfg.log:
         logExecution(query, "(none)",
@@ -1094,7 +1070,7 @@ proc implHandleSet(args: seq[string]) =
 ## :param args: Arguments after "config".
 proc implHandleConfig(args: seq[string]) =
   let cfg = loadConfig()
-  let (sk, _) = implLoadStyle(cfg)
+  let sk = implLoadStyle(cfg)
   if args.len == 0:
     displayConfig(sk)
     return
@@ -1114,75 +1090,85 @@ proc implHandleConfig(args: seq[string]) =
     of "key":
       let key = loadKey()
       if key.isSome:
-        styleKeyValue(sk, "key",
+        styleConfigValue(sk, "key",
           "set (encrypted storage, " &
-          "value cannot be retrieved)")
+          "value cannot be retrieved)", vsMuted)
       else:
-        styleKeyValue(sk, "key", "not set")
+        styleConfigValue(sk, "key", "not set",
+          vsWarn)
     of "url":
-      styleKeyValue(sk, "url", cfg.url)
+      styleConfigValue(sk, "url", cfg.url,
+        classifyUrl(cfg.url))
     of "model":
-      styleKeyValue(sk, "model", cfg.model)
+      styleConfigValue(sk, "model", cfg.model,
+        classifyModel(cfg.model))
     of "manual-confirm":
-      styleKeyValue(sk, "manual-confirm",
-        $cfg.manualConfirm)
+      styleConfigValue(sk, "manual-confirm",
+        $cfg.manualConfirm,
+        classifyBool(cfg.manualConfirm))
     of "double-check":
-      styleKeyValue(sk, "double-check",
-        $cfg.doubleCheck)
+      styleConfigValue(sk, "double-check",
+        $cfg.doubleCheck,
+        classifyBool(cfg.doubleCheck))
     of "instance":
-      styleKeyValue(sk, "instance",
-        $cfg.instance)
+      styleConfigValue(sk, "instance",
+        $cfg.instance, classifyBool(cfg.instance))
     of "timeout":
-      styleKeyValue(sk, "timeout",
-        formatIntOrDisable(cfg.timeout))
+      styleConfigValue(sk, "timeout",
+        formatIntOrDisable(cfg.timeout),
+        classifyInt(cfg.timeout, 1, 3600))
     of "max-token":
-      styleKeyValue(sk, "max-token",
-        formatIntOrDisable(cfg.maxToken))
+      styleConfigValue(sk, "max-token",
+        formatIntOrDisable(cfg.maxToken),
+        classifyInt(cfg.maxToken, 1024, 1_000_000))
     of "max-rounds":
-      styleKeyValue(sk, "max-rounds",
-        formatIntOrDisable(cfg.maxRounds))
+      styleConfigValue(sk, "max-rounds",
+        formatIntOrDisable(cfg.maxRounds),
+        classifyInt(cfg.maxRounds, 1, 10))
     of "command-pattern":
-      let pat =
-        if cfg.commandPattern.isNone:
-          DEFAULT_COMMAND_PATTERN &
-            " (default: built-in)"
-        elif cfg.commandPattern.get.len == 0:
-          "(disabled)"
-        else:
-          cfg.commandPattern.get
-      styleKeyValue(sk, "command-pattern", pat)
+      let (pat, state, trailer) =
+        classifyCommandPattern(cfg.commandPattern)
+      styleConfigValue(sk, "command-pattern", pat,
+        state, trailer)
     of "system-prompt":
       let pmt =
         if cfg.systemPrompt.isSome:
           cfg.systemPrompt.get else: ""
-      styleKeyValue(sk, "system-prompt", pmt)
+      styleConfigValue(sk, "system-prompt", pmt,
+        vsNeutral)
     of "shell":
-      styleKeyValue(sk, "shell", cfg.shell)
+      styleConfigValue(sk, "shell", cfg.shell,
+        classifyShell(cfg.shell))
     of "log":
-      styleKeyValue(sk, "log", $cfg.log)
+      styleConfigValue(sk, "log", $cfg.log,
+        classifyBool(cfg.log))
     of "hide-process":
-      styleKeyValue(sk, "hide-process",
-        $cfg.hideProcess)
+      styleConfigValue(sk, "hide-process",
+        $cfg.hideProcess,
+        classifyBool(cfg.hideProcess))
     of "cache":
-      styleKeyValue(sk, "cache", $cfg.cache)
+      styleConfigValue(sk, "cache", $cfg.cache,
+        classifyBool(cfg.cache))
     of "cache-expiry":
-      styleKeyValue(sk, "cache-expiry",
-        formatIntOrDisable(cfg.cacheExpiry))
+      styleConfigValue(sk, "cache-expiry",
+        formatIntOrDisable(cfg.cacheExpiry),
+        classifyInt(cfg.cacheExpiry, 1, 365))
     of "cache-max-entries":
-      styleKeyValue(sk, "cache-max-entries",
-        formatIntOrDisable(cfg.cacheMaxEntries))
+      styleConfigValue(sk, "cache-max-entries",
+        formatIntOrDisable(cfg.cacheMaxEntries),
+        classifyInt(cfg.cacheMaxEntries, 1, 100_000))
     of "cache-trigger-threshold":
-      styleKeyValue(sk,
+      styleConfigValue(sk,
         "cache-trigger-threshold",
-        formatIntOrDisable(cfg.cacheTriggerThreshold))
+        formatIntOrDisable(cfg.cacheTriggerThreshold),
+        classifyInt(cfg.cacheTriggerThreshold, 0, 100))
     of "log-max-entries":
-      styleKeyValue(sk, "log-max-entries",
-        formatIntOrDisable(cfg.logMaxEntries))
+      styleConfigValue(sk, "log-max-entries",
+        formatIntOrDisable(cfg.logMaxEntries),
+        classifyInt(cfg.logMaxEntries, 1, 100_000))
     of "vivid":
-      styleKeyValue(sk, "vivid", $cfg.vivid)
-    of "external-display":
-      styleKeyValue(sk, "external-display",
-        $cfg.externalDisplay)
+      styleConfigValue(sk, "vivid", $cfg.vivid,
+        classifyBool(cfg.vivid))
     else:
       implUsageError(
         fmt"unknown config option '{optName}'")
@@ -1196,7 +1182,7 @@ proc implHandleConfig(args: seq[string]) =
 ## :param args: Arguments after "cache".
 proc implHandleCache(args: seq[string]) =
   let cfg = loadConfig()
-  let (sk, _) = implLoadStyle(cfg)
+  let sk = implLoadStyle(cfg)
   if args.len == 0:
     displayCacheInfo(
       cfg.cache, cfg.cacheExpiry,
@@ -1232,7 +1218,7 @@ proc implHandleCache(args: seq[string]) =
 ## :param args: Arguments after "log".
 proc implHandleLog(args: seq[string]) =
   let cfg = loadConfig()
-  let (sk, _) = implLoadStyle(cfg)
+  let sk = implLoadStyle(cfg)
   if args.len == 0:
     displayLogInfo(cfg.log, cfg.logMaxEntries, sk)
     return
@@ -1250,7 +1236,7 @@ proc implHandleLog(args: seq[string]) =
 ## :param args: Arguments after "get".
 proc implHandleGet(args: seq[string]) =
   let cfg = loadConfig()
-  let (sk, _) = implLoadStyle(cfg)
+  let sk = implLoadStyle(cfg)
   if args.len == 0:
     styleSeparator(sk, DIV_SECTION)
     styleKeyValue(sk, "name",    APP_NAME)
@@ -1278,7 +1264,7 @@ proc implHandleGet(args: seq[string]) =
 ## Handles `get isok`.
 proc implHandleIsOk() =
   let cfg = loadConfig()
-  let (sk, _) = implLoadStyle(cfg)
+  let sk = implLoadStyle(cfg)
   let cfgReady = checkReady(sk)
   if not cfgReady:
     quit(1)
@@ -1350,12 +1336,8 @@ proc implHandleQuery(
       " Run: get set model <model>")
 
   let sk = toStyleKind(cfg.vivid)
-  let binDir = getBundledBinDir()
-  let extDisplay = cfg.externalDisplay
 
   if not cfg.hideProcess:
-    styleExternalDisplayCheck(
-      sk, extDisplay, binDir)
     implWarnIfWeakModel(cfg.model, sk)
 
   let shell = implEffectiveShell(cfg)
@@ -1404,8 +1386,7 @@ proc implHandleQuery(
             else:
               "(cached: context result)"
           styleProgress(sk, label)
-        styleResult(sk, hit.get.output,
-          binDir, extDisplay)
+        styleResult(sk, hit.get.output)
         return
       of cmCommand:
         if not cfg.hideProcess:
@@ -1418,11 +1399,10 @@ proc implHandleQuery(
           styleCommand(sk, "command",
             hit.get.command)
         let execRes = executeCommand(
-          hit.get.command, shell, binDir)
+          hit.get.command, shell)
         let output = execRes.output.strip()
         if output.len > 0:
-          styleResult(sk, output, binDir,
-            extDisplay, false)
+          styleResult(sk, output)
         elif execRes.exitCode != 0:
           styleError(sk,
             fmt"command exited with code " &
@@ -1456,12 +1436,10 @@ proc implHandleQuery(
 
   if cfg.instance:
     implInstanceFlow(query, cfg, key.get, sk,
-      binDir, extDisplay, shell, info,
-      effectivePattern, cc)
+      shell, info, effectivePattern, cc)
   else:
     implAgentFlow(query, cfg, key.get, sk,
-      binDir, extDisplay, shell, info,
-      effectivePattern, cc)
+      shell, info, effectivePattern, cc)
 
 # ---------------------------------------------------------------------------
 # Private helpers — top-level dispatcher
@@ -1502,9 +1480,8 @@ proc implMain() =
     implHandleIsOk()
   of "help", "--help", "-h":
     let cfg = loadConfig()
-    let (sk, binDir) = implLoadStyle(cfg)
-    styleHelp(sk, HELP_TEXT, binDir,
-      cfg.externalDisplay)
+    let sk = implLoadStyle(cfg)
+    styleHelp(sk, HELP_TEXT)
   else:
     let (query, ov) = implParseQueryArgs(args)
     if query.len == 0:

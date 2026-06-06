@@ -2,23 +2,21 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-17
+## :Date: 2026-06-06
 ## :File: sysinfo.nim
 ## :License: AGPL-3.0
 ##
 ## This module collects runtime system information such as OS
 ## type, CPU architecture, current working directory, username,
-## hostname, available command-line tools, and bundled binary
-## tools shipped alongside the executable.  The gathered snapshot
-## is included in LLM prompts so the model can generate context-
-## aware commands.  It also provides a startup environment check
-## that verifies Windows 10+ / Linux 6.0+ on a 64-bit platform.
+## hostname, and available command-line tools detected on PATH.
+## The gathered snapshot is included in LLM prompts so the model
+## can generate context-aware commands.  It also provides a
+## startup environment check that verifies Windows 10+ /
+## macOS 12+ / Linux 6.0+ on a 64-bit platform.
 
 {.experimental: "strictFuncs".}
 
 import std/[os, osproc, strformat, strutils]
-
-import utils
 
 # ---------------------------------------------------------------------------
 # Compile-time architecture gate
@@ -32,12 +30,6 @@ when not (hostCPU == "amd64" or hostCPU == "arm64"):
 # Types
 # ---------------------------------------------------------------------------
 
-## Describes a single tool bundled in the bin/ directory.
-type
-  BundledTool* = object
-    name*: string         ## Command name (platform-specific).
-    description*: string  ## Short description of capabilities.
-
 ## Holds a snapshot of the current system environment used to
 ## provide context to the LLM when generating commands.
 type
@@ -49,9 +41,7 @@ type
     cwd*: string            ## Current working directory.
     shell*: string          ## Configured shell name.
     shellVersion*: string   ## Shell --version first line.
-    availableTools*: seq[string]    ## Tools found on PATH.
-    bundledTools*: seq[BundledTool] ## Tools in bin/.
-    binDir*: string         ## Absolute path to bundled bin dir.
+    availableTools*: seq[string]  ## Tools found on PATH.
 
 # ---------------------------------------------------------------------------
 # Constants — tools to probe
@@ -104,155 +94,6 @@ func getProbeHint*(name: string): string =
   result = ""
 
 # ---------------------------------------------------------------------------
-# Constants — bundled tool definitions
-# ---------------------------------------------------------------------------
-
-## Bundled tool definitions for Linux.
-const BUNDLED_DEFS_LINUX = [
-  ("rg",
-   "ripgrep — ultra-fast regex search in files. " &
-   "Usage: rg <pattern> [path]. " &
-   "Key flags: -i (case-insensitive), -l (files " &
-   "only), -c (count), -n (line numbers), " &
-   "--type <t> (filter by file type), " &
-   "--json (JSON output). Read-only tool."),
-  ("fd",
-   "fd — fast file/directory finder. " &
-   "Usage: fd <pattern> [path]. " &
-   "Key flags: -e <ext>, -t f (files), " &
-   "-t d (dirs), --hidden. " &
-   "NEVER use -x/--exec with write commands. " &
-   "Read-only tool."),
-  ("sg",
-   "ast-grep (sg) — AST-level structural code " &
-   "search and lint. " &
-   "Usage: sg -p '<ast-pattern>' [path]. " &
-   "Supports many languages. Use sg run " &
-   "--pattern '<pat>' for quick searches. " &
-   "Read-only tool."),
-  ("pmc",
-   "pack-my-code — package source files into a " &
-   "single text block (ideal for LLM context). " &
-   "Usage: pmc [<directory>] (defaults to '.'). " &
-   "Key flags: -t (prepend directory tree), " &
-   "-s (append statistics), " &
-   "-m '<glob>' (include only matching), " &
-   "-x '<glob>' (exclude matching), " &
-   "-r (ignore .gitignore, direct scan), " &
-   "-w <mode> (wrap: md/nil/block), " &
-   "-p <mode> (path: relative/name/absolute). " &
-   "NEVER use -o or -c flags (they write files/" &
-   "clipboard). Read-only tool."),
-  ("tree",
-   "tree — classic Unix directory tree listing. " &
-   "Usage: tree [path]. " &
-   "Key flags: -L <n> (depth limit), " &
-   "-I <pattern> (exclude pattern), " &
-   "-a (show hidden files), " &
-   "-d (directories only), " &
-   "-f (full path prefix), " &
-   "-s (file sizes in bytes), " &
-   "-h (human-readable sizes), " &
-   "--gitignore (respect .gitignore), " &
-   "-J (JSON output), " &
-   "-o <file> is FORBIDDEN (writes files). " &
-   "Read-only tool."),
-  ("tokei",
-   "tokei — fast code statistics tool " &
-   "(lines of code, comments, blanks by " &
-   "language). " &
-   "Usage: tokei [path]. " &
-   "Key flags: -e <pattern> (exclude), " &
-   "-t <languages> (filter by language), " &
-   "-o <format> (output format: json, yaml). " &
-   "Read-only tool."),
-  ("lua",
-   "lua — Lua 5.x interpreter. " &
-   "Usage: lua <script.lua> or lua -e '<code>'." &
-   " Can run small scripts for calculations, " &
-   "text processing, and data formatting. " &
-   "NEVER use io.open with write mode or " &
-   "os.execute/os.rename/os.remove. " &
-   "Read-only use only."),
-  ("bat",
-   "bat — syntax-highlighting cat replacement. " &
-   "Usage: bat <file> or pipe input via stdin. " &
-   "Key flags: --style=plain (no decorations), " &
-   "--paging=never (disable pager), " &
-   "--color=always (force colour), " &
-   "-l <lang> (set language for highlighting), " &
-   "--line-range <start:end> (show line range). " &
-   "Read-only tool."),
-  ("mdcat",
-   "mdcat — terminal Markdown renderer. " &
-   "Usage: mdcat <file> or pipe Markdown via " &
-   "stdin. " &
-   "Key flags: --no-pager (disable pager). " &
-   "Renders headings, lists, code blocks, and " &
-   "emphasis with terminal formatting. " &
-   "Read-only tool.")
-]
-
-## Bundled tool definitions for Windows.
-const BUNDLED_DEFS_WINDOWS = [
-  ("rg",
-   "ripgrep — ultra-fast regex search in files. " &
-   "Usage: rg <pattern> [path]. " &
-   "Key flags: -i, -l, -c, -n, --type <t>, " &
-   "--json. Read-only tool."),
-  ("fd",
-   "fd — fast file/directory finder. " &
-   "Usage: fd <pattern> [path]. " &
-   "Key flags: -e <ext>, -t f, -t d, --hidden." &
-   " NEVER use -x/--exec with write commands. " &
-   "Read-only tool."),
-  ("sg",
-   "ast-grep (sg) — AST-level structural code " &
-   "search and lint. " &
-   "Usage: sg -p '<ast-pattern>' [path]. " &
-   "Read-only tool."),
-  ("pmc",
-   "pack-my-code — package source files into a " &
-   "single text block for LLM context. " &
-   "Usage: pmc [<directory>]. " &
-   "Key flags: -t, -s, -m '<glob>', " &
-   "-x '<glob>', -r, -w <mode>, -p <mode>. " &
-   "NEVER use -o or -c flags. Read-only tool."),
-  ("treepp",
-   "tree++ — enhanced directory tree for Windows." &
-   " Usage: treepp [path] /F. " &
-   "Key flags: /F (show files), /NB (no banner)," &
-   " /L <n> (depth limit), /X <pat> (exclude), " &
-   "/S (file sizes), /HR (human-readable sizes)," &
-   " /G (respect .gitignore), " &
-   "/RP (summary report), /B (batch mode). " &
-   "NEVER use /O (writes files). " &
-   "Read-only tool."),
-  ("tokei",
-   "tokei — fast code statistics tool " &
-   "(lines of code, comments, blanks by " &
-   "language). " &
-   "Usage: tokei [path]. " &
-   "Key flags: -e <pattern>, -t <languages>, " &
-   "-o <format> (json, yaml). Read-only tool."),
-  ("bat",
-   "bat — syntax-highlighting cat replacement. " &
-   "Usage: bat <file> or pipe input via stdin. " &
-   "Key flags: --style=plain (no decorations), " &
-   "--paging=never (disable pager), " &
-   "--color=always (force colour), " &
-   "-l <lang> (set language for highlighting), " &
-   "--line-range <start:end> (show line range). " &
-   "Read-only tool."),
-  ("mdcat",
-   "mdcat — terminal Markdown renderer. " &
-   "Usage: mdcat <file> or pipe Markdown via " &
-   "stdin. " &
-   "Key flags: --no-pager (disable pager). " &
-   "Read-only tool.")
-]
-
-# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
@@ -288,30 +129,6 @@ proc implToolAvailable(tool: string): bool =
   except OSError, IOError:
     result = false
 
-## Detects which bundled tools are present in the given
-## directory.
-##
-## :param binDir: Absolute path to the bundled bin directory.
-## :returns: A seq of BundledTool for every tool found.
-proc implDetectBundledTools(
-  binDir: string
-): seq[BundledTool] =
-  result = @[]
-  if binDir.len == 0 or not dirExists(binDir):
-    return
-  when defined(windows):
-    let defs = BUNDLED_DEFS_WINDOWS
-  else:
-    let defs = BUNDLED_DEFS_LINUX
-  for (name, desc) in defs:
-    when defined(windows):
-      let path = binDir / (name & ".exe")
-    else:
-      let path = binDir / name
-    if fileExists(path):
-      result.add(BundledTool(
-        name: name, description: desc))
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -326,7 +143,6 @@ proc implDetectBundledTools(
 ##     let info = collectSysInfo("bash")
 ##     assert info.os.len > 0
 proc collectSysInfo*(shell: string): SysInfo =
-  let binDir = getBundledBinDir()
   result = SysInfo(
     os: hostOS,
     arch: hostCPU,
@@ -335,9 +151,7 @@ proc collectSysInfo*(shell: string): SysInfo =
     cwd: getCurrentDir(),
     shell: shell,
     shellVersion: "",
-    availableTools: @[],
-    bundledTools: @[],
-    binDir: binDir
+    availableTools: @[]
   )
   try:
     result.hostname = getEnv("HOSTNAME",
@@ -356,8 +170,6 @@ proc collectSysInfo*(shell: string): SysInfo =
   for tool in PROBE_TOOLS:
     if implToolAvailable(tool):
       result.availableTools.add(tool)
-  result.bundledTools =
-    implDetectBundledTools(binDir)
 
 ## Formats a SysInfo snapshot into a multi-line string suitable
 ## for inclusion in an LLM prompt.
@@ -371,8 +183,7 @@ proc collectSysInfo*(shell: string): SysInfo =
 ##       hostname: "dev", username: "user",
 ##       cwd: "/home", shell: "bash",
 ##       shellVersion: "5.2",
-##       availableTools: @["git"],
-##       bundledTools: @[], binDir: "")
+##       availableTools: @["git"])
 ##     let s = formatSysInfo(info)
 ##     assert s.contains("linux")
 func formatSysInfo*(info: SysInfo): string =
@@ -392,28 +203,6 @@ func formatSysInfo*(info: SysInfo): string =
     lines.add(
       "Available tools: " &
       info.availableTools.join(", "))
-  result = lines.join("\n")
-
-## Formats bundled tool descriptions into a multi-line block for
-## inclusion in the LLM system prompt.
-##
-## :param tools: The list of detected bundled tools.
-## :returns: A descriptive block, or empty when no tools exist.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let s = formatBundledTools(@[])
-##     assert s.len == 0
-func formatBundledTools*(
-  tools: seq[BundledTool]
-): string =
-  if tools.len == 0:
-    return ""
-  var lines: seq[string] = @[]
-  lines.add("BUNDLED TOOLS (pre-installed, " &
-    "available in PATH for generated commands):")
-  for t in tools:
-    lines.add(fmt"- {t.name}: {t.description}")
   result = lines.join("\n")
 
 ## Checks whether the runtime environment meets the minimum
