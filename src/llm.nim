@@ -22,7 +22,7 @@
 {.experimental: "strictFuncs".}
 
 import std/[asyncdispatch, httpclient, json, os, osproc,
-            strformat, strutils, streams]
+            strformat, strutils, streams, net]
 
 import style
 import utils
@@ -543,7 +543,11 @@ proc sendLlmRequest*(
         fut, timeoutSec, hideProcess, sk,
         spinnerLabel)
     else:
-      let client = newAsyncHttpClient()
+      let client =
+        when defined(windows):
+          newAsyncHttpClient(sslContext = newContext(verifyMode = CVerifyNone))
+        else:
+          newAsyncHttpClient()
       client.headers = newHttpHeaders({
         "Authorization": fmt"Bearer {apiKey}",
         "Content-Type": "application/json"})

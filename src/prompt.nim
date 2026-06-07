@@ -927,22 +927,28 @@ func buildCacheCheckMessages*(
   sysLines.add(
     "GLOBAL_COMMAND — command works in ANY " &
     "directory (does not read from the current " &
-    "directory), but its output changes over " &
-    "time or between runs. Cache the command; " &
-    "re-execute on hit. Examples: system IP, " &
-    "free memory, disk free space, uptime, " &
-    "running processes, network status, " &
-    "logged-in users.")
+    "directory), but its output depends on or " &
+    "reads from the local system state, files, " &
+    "configuration, or time. Cache the command; " &
+    "re-execute on hit. Examples: system info, " &
+    "system IP, OS version (reading files like " &
+    "/etc/os-release), free memory, disk free " &
+    "space, uptime, running processes, network " &
+    "status, logged-in users.")
   sysLines.add("")
   sysLines.add(
     "GLOBAL_RESULT — answer is universally " &
-    "stable: independent of directory and of " &
-    "time. Cache the output; return directly " &
-    "on hit. Examples: how to use a command, " &
-    "what a concept means, syntax reference, " &
-    "OS name, CPU architecture, installed " &
-    "software version that rarely changes, any " &
-    "plain-text explanation.")
+    "stable: independent of directory, time, " &
+    "and environment. Cache the output; return " &
+    "directly on hit. Pick this ONLY for facts " &
+    "or calculations that are completely " &
+    "constant under all circumstances (e.g. " &
+    "math queries like '1+1', constant command " &
+    "syntax explanations, definition of terms). " &
+    "If the query executes a command to read " &
+    "any local system state, configuration, " &
+    "or files, do NOT use GLOBAL_RESULT; use a " &
+    "COMMAND mode instead.")
   sysLines.add("")
   sysLines.add(
     "CONTEXT_COMMAND — command references the " &

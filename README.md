@@ -16,7 +16,7 @@ get "latest get version at https://github.com/Water-Run/get"
 
 ## Installation
 
-Download from [GitHub Release](https://github.com/Water-Run/get/releases). The v2.0 archive is flat: it contains one binary per supported platform, `get_ready.py`, `get.1`, README files, and the license. After extracting, run the included Python installation script to install the right binary and configure PATH:
+Download from [GitHub Release](https://github.com/Water-Run/get/releases). Just run the installation script directly:
 
 ```bash
 python get_ready.py
@@ -24,7 +24,6 @@ python get_ready.py
 
 Follow the on-screen instructions. If an older installation is found, the installer asks whether to keep the existing configuration while replacing only the binary. Once done, run `get version` to verify the installation.
 
-> v2.0 no longer includes search/rendering tool binaries. Generated commands use tools already available on the system PATH.
 
 ## Prerequisites
 

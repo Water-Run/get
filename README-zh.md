@@ -16,15 +16,14 @@ get "https://github.com/Water-Run/get 上最新的 get 版本"
 
 ## 安装
 
-从[GitHub Release](https://github.com/Water-Run/get/releases)下载. v2.0 压缩包为扁平结构: 包含各平台二进制、`get_ready.py`、`get.1`、README 和许可证. 解压后运行附带 Python 安装脚本, 自动选择当前平台二进制并配置 PATH:
+从[GitHub Release](https://github.com/Water-Run/get/releases)下载. 直接一句话运行安装脚本即可:
 
 ```bash
 python get_ready.py
 ```
 
-按照要求的指引进行. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装.  
+按照要求的指引进行. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装。
 
-> v2.0 不再附带搜索/渲染工具, 生成命令会使用系统 PATH 中已有的工具.
 
 ## 先决条件
 

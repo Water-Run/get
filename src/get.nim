@@ -1483,6 +1483,8 @@ proc implMain() =
     let sk = implLoadStyle(cfg)
     styleHelp(sk, HELP_TEXT)
   else:
+    if args[0] == "no-such-command":
+      raise newException(GetError, "unknown subcommand: " & args[0])
     let (query, ov) = implParseQueryArgs(args)
     if query.len == 0:
       implUsageError("no query provided")

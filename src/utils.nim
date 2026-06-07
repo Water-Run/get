@@ -277,7 +277,7 @@ func extractCodeBlock*(text: string): Option[string] =
         continue
     else:
       let stripped = line.strip()
-      if stripped == "```":
+      if stripped.startsWith("```"):
         let content = blockLines.join("\n").strip()
         if content.len > 0:
           return some(content)
