@@ -28,10 +28,10 @@ import utils
 # ---------------------------------------------------------------------------
 
 ## Default LLM API endpoint URL.
-const DEFAULT_URL* = "https://api.xiaomimimo.com/v1"
+const DEFAULT_URL* = "https://api.minimaxi.com/v1"
 
 ## Default LLM model identifier.
-const DEFAULT_MODEL* = "mimo-v2.5-pro"
+const DEFAULT_MODEL* = "minimax-m3"
 
 ## Default for manual-confirm.
 const DEFAULT_MANUAL_CONFIRM* = false
@@ -53,6 +53,9 @@ const DEFAULT_LOG* = true
 
 ## Default hide-process flag.
 const DEFAULT_HIDE_PROCESS* = false
+
+## Default prefer-system-proxy flag.
+const DEFAULT_SYSTEM_PROXY* = false
 
 ## Default cache-enabled flag.
 const DEFAULT_CACHE* = true
@@ -98,6 +101,7 @@ type
     shell*: string                   ## Shell executable.
     log*: bool                       ## Log requests.
     hideProcess*: bool               ## Hide intermediate output.
+    systemProxy*: bool               ## Prefer system proxy settings.
     cache*: bool                     ## Enable response cache.
     cacheExpiry*: int                ## Cache expiry in days.
     cacheMaxEntries*: int            ## Max cached entries.
@@ -376,6 +380,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "shell":           cfg.shell,
     "log":             cfg.log,
     "hideProcess":     cfg.hideProcess,
+    "systemProxy":      cfg.systemProxy,
     "cache":           cfg.cache,
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
@@ -417,6 +422,8 @@ proc implJsonToConfig(
     log: node{"log"}.getBool(defaults.log),
     hideProcess: node{"hideProcess"}.getBool(
       defaults.hideProcess),
+    systemProxy: node{"systemProxy"}.getBool(
+      defaults.systemProxy),
     cache: node{"cache"}.getBool(defaults.cache),
     cacheExpiry: node{"cacheExpiry"}.getInt(
       defaults.cacheExpiry),
@@ -472,6 +479,7 @@ func defaultConfig*(): Config =
     shell:           implDefaultShell(),
     log:             DEFAULT_LOG,
     hideProcess:     DEFAULT_HIDE_PROCESS,
+    systemProxy:      DEFAULT_SYSTEM_PROXY,
     cache:           DEFAULT_CACHE,
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
@@ -648,6 +656,8 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     classifyBool(cfg.log))
   styleConfigValue(sk, "hide-process",
     $cfg.hideProcess, classifyBool(cfg.hideProcess))
+  styleConfigValue(sk, "system-proxy",
+    $cfg.systemProxy, classifyBool(cfg.systemProxy))
   styleConfigValue(sk, "cache", $cfg.cache,
     classifyBool(cfg.cache))
   styleConfigValue(sk, "cache-expiry",
@@ -768,6 +778,9 @@ proc setConfigOption*(
   of "hide-process":
     cfg.hideProcess = implParseBool(
       value, name, DEFAULT_HIDE_PROCESS)
+  of "system-proxy":
+    cfg.systemProxy = implParseBool(
+      value, name, DEFAULT_SYSTEM_PROXY)
   of "cache":
     cfg.cache = implParseBool(
       value, name, DEFAULT_CACHE)

@@ -2,11 +2,13 @@
 """
 get_ready.py -- installer for `get`.
 
-The v2.0 release package is intentionally flat:
+The v2.1 release package is intentionally flat:
 
     get_ready.py
     get-linux-x64
     get-windows-x64.exe
+    libcrypto-1_1-x64.dll
+    libssl-1_1-x64.dll
     get-macos-arm64
     get.1
     README.md
@@ -40,8 +42,12 @@ PROJECT_TAGLINE: str = "get -- get anything from your computer"
 PROJECT_GITHUB: str = "https://github.com/Water-Run/get"
 
 DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else ("zsh" if IS_MACOS else "bash")
-DEFAULT_URL: str = "https://api.xiaomimimo.com/v1"
-DEFAULT_MODEL: str = "mimo-v2.5-pro"
+DEFAULT_URL: str = "https://api.minimaxi.com/v1"
+DEFAULT_MODEL: str = "minimax-m3"
+WINDOWS_RUNTIME_FILES: tuple[str, ...] = (
+    "libcrypto-1_1-x64.dll",
+    "libssl-1_1-x64.dll",
+)
 
 MESSAGES: dict[str, dict[str, str]] = {
     "en": {
@@ -59,6 +65,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_get": "Install get?",
         "installing_binary": "Installing binary  -->  {path}",
         "installing_man": "Installing man page  -->  {path}",
+        "installing_runtime": "Installing runtime file  -->  {path}",
         "installer": "installer",
         "keep_config": "Keep existing get configuration?",
         "leave_default_model": "leave empty for default: {value}",
@@ -77,6 +84,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "shell_set": "Shell set to '{shell}'",
         "source_binary": "Source binary: {path}",
         "source_missing": "Source binary not found: {path}",
+        "runtime_missing": "Required runtime file not found: {path}",
         "targets": "Installation targets:",
         "title_done": "installation complete",
         "updating_path": "Updating PATH",
@@ -98,6 +106,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_get": "安装 get?",
         "installing_binary": "安装主程序  -->  {path}",
         "installing_man": "安装 man page  -->  {path}",
+        "installing_runtime": "安装运行时文件  -->  {path}",
         "installer": "安装器",
         "keep_config": "保留现有 get 配置?",
         "leave_default_model": "留空使用默认值: {value}",
@@ -116,6 +125,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "shell_set": "Shell 已设为 '{shell}'",
         "source_binary": "源主程序: {path}",
         "source_missing": "未找到源主程序: {path}",
+        "runtime_missing": "未找到必需运行时文件: {path}",
         "targets": "安装目标:",
         "title_done": "安装完成",
         "updating_path": "更新 PATH",
@@ -319,6 +329,12 @@ def source_binary() -> Path:
         if path.exists():
             return path
     return SCRIPT_DIR / candidates[0]
+
+
+def source_runtime_files() -> list[Path]:
+    if not IS_WINDOWS:
+        return []
+    return [SCRIPT_DIR / name for name in WINDOWS_RUNTIME_FILES]
 
 
 def find_installed() -> Path | None:
@@ -535,6 +551,12 @@ def main() -> None:
         print(f"\n  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}\n")
         sys.exit(1)
     info(tr("source_binary", path=src_bin))
+    runtime_files = source_runtime_files()
+    for runtime_file in runtime_files:
+        if not runtime_file.exists():
+            fail(tr("runtime_missing", path=runtime_file))
+            print(f"\n  {Color.DIM}{PROJECT_GITHUB}{Color.RESET}\n")
+            sys.exit(1)
 
     existing = find_installed()
     keep_config = False
@@ -570,6 +592,12 @@ def main() -> None:
     copy_file(src_bin, binary, executable=True)
     good(tr("binary_installed"))
     strip_macos_quarantine([binary])
+
+    for runtime_file in runtime_files:
+        runtime_target = binary.parent / runtime_file.name
+        step(tr("installing_runtime", path=runtime_target))
+        copy_file(runtime_file, runtime_target)
+        good(runtime_file.name)
 
     if isinstance(man, Path):
         man_src = SCRIPT_DIR / "get.1"

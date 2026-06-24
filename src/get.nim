@@ -66,6 +66,7 @@ usage:
   get cache [flags]            view or manage response cache
   get log [flags]              view or manage execution log
   get get [flags]              display application information
+  get author                   display application author
   get version                  display version
   get isok                     verify configuration readiness
   get help                     display this help message
@@ -81,6 +82,8 @@ query flags (per-invocation overrides):
   --no-instance                multi-step agent mode
   --hide-process               suppress intermediate output
   --no-hide-process            show intermediate output
+  --system-proxy               prefer OS system proxy settings
+  --no-system-proxy            follow terminal proxy environment only
   --vivid                      enable vivid output mode
   --no-vivid                   plain text output mode
   --model <name>               override LLM model
@@ -89,9 +92,9 @@ query flags (per-invocation overrides):
 set options:
   key                LLM API key (string, default: empty)
   url                API endpoint URL (string,
-                       default: https://api.xiaomimimo.com/v1)
+                       default: https://api.minimaxi.com/v1)
   model              LLM model name (string,
-                       default: mimo-v2.5-pro)
+                       default: minimax-m3)
   manual-confirm     prompt before executing
                        (true/false, default: false)
   double-check       second model safety review
@@ -115,6 +118,9 @@ set options:
   log                log requests and executions
                        (true/false, default: true)
   hide-process       hide intermediate output
+                       (true/false, default: false)
+  system-proxy       prefer OS system proxy settings; when false,
+                       only terminal proxy environment variables are used
                        (true/false, default: false)
   cache              enable response caching
                        (true/false, default: true)
@@ -149,7 +155,9 @@ log flags:
 
 get flags:
   (none)             display all application info
+  --name             display application name
   --intro            display introduction
+  --author           display author
   --version          display version
   --license          display license identifier
   --github           display GitHub URL
@@ -157,14 +165,16 @@ get flags:
 examples:
   get "system version"
   get "disk usage" --no-cache
-  get "list files" --model mimo-v2.5-pro --vivid
-  get set model mimo-v2.5-pro
+  get "list files" --model minimax-m3 --vivid
+  get set model minimax-m3
   get set key sk-your-api-key
-  get set url https://api.xiaomimimo.com/v1
+  get set url https://api.minimaxi.com/v1
   get set timeout false
   get set max-rounds 5
   get set command-pattern
   get set command-pattern ""
+  get author
+  get get --author
   get config --model
   get config --command-pattern
   get cache --clean
@@ -183,6 +193,7 @@ type
     doubleCheck*: Option[bool]   ## Override double-check.
     instance*: Option[bool]      ## Override instance mode.
     hideProcess*: Option[bool]   ## Override hide-process.
+    systemProxy*: Option[bool]   ## Override system-proxy.
     vivid*: Option[bool]         ## Override vivid mode.
     model*: Option[string]       ## Override model name.
     timeout*: Option[int]        ## Override timeout seconds.
@@ -221,6 +232,7 @@ func implParseQueryArgs(
     doubleCheck: none(bool),
     instance: none(bool),
     hideProcess: none(bool),
+    systemProxy: none(bool),
     vivid: none(bool),
     model: none(string),
     timeout: none(int)
@@ -249,6 +261,10 @@ func implParseQueryArgs(
       ov.hideProcess = some(true)
     of "--no-hide-process":
       ov.hideProcess = some(false)
+    of "--system-proxy":
+      ov.systemProxy = some(true)
+    of "--no-system-proxy":
+      ov.systemProxy = some(false)
     of "--vivid":
       ov.vivid = some(true)
     of "--no-vivid":
@@ -295,6 +311,8 @@ proc implApplyOverrides(
     cfg.instance = ov.instance.get
   if ov.hideProcess.isSome:
     cfg.hideProcess = ov.hideProcess.get
+  if ov.systemProxy.isSome:
+    cfg.systemProxy = ov.systemProxy.get
   if ov.vivid.isSome:
     cfg.vivid = ov.vivid.get
   if ov.model.isSome:
@@ -341,7 +359,8 @@ proc implLlmCall(
     key,
     timeoutSec = cfg.timeout,
     hideProcess = cfg.hideProcess,
-    sk = sk
+    sk = sk,
+    preferSystemProxy = cfg.systemProxy
   )
 
 # ---------------------------------------------------------------------------
@@ -611,7 +630,8 @@ proc implCacheDecision(
         else: 30),
       hideProcess = cfg.hideProcess,
       sk = sk,
-      spinnerLabel = "checking cache decision"
+      spinnerLabel = "checking cache decision",
+      preferSystemProxy = cfg.systemProxy
     )
     result = some(implParseCacheDecision(
       resp.content))
@@ -894,6 +914,23 @@ proc implAgentFlow(
       messages, cfg, key, sk)
     var parsed = extractAgentAction(resp.content)
 
+    if parsed.action != aaAnswer and
+        parsed.command.isNone:
+      var repaired = messages
+      repaired.add(LlmMessage(
+        role: "assistant",
+        content: resp.content))
+      repaired.add(LlmMessage(
+        role: "user",
+        content:
+          "Your previous response used an agent protocol " &
+          "marker without a shell command. Reply again " &
+          "with either a valid ```sh code block plus a " &
+          "protocol marker, or a plain final answer with " &
+          "no marker. Do not output a bare marker."))
+      messages = repaired
+      continue
+
     if parsed.action == aaContinue and
         round >= maxRounds:
       parsed = (action: aaFinal,
@@ -1146,6 +1183,10 @@ proc implHandleConfig(args: seq[string]) =
       styleConfigValue(sk, "hide-process",
         $cfg.hideProcess,
         classifyBool(cfg.hideProcess))
+    of "system-proxy":
+      styleConfigValue(sk, "system-proxy",
+        $cfg.systemProxy,
+        classifyBool(cfg.systemProxy))
     of "cache":
       styleConfigValue(sk, "cache", $cfg.cache,
         classifyBool(cfg.cache))
@@ -1248,8 +1289,12 @@ proc implHandleGet(args: seq[string]) =
     styleSeparator(sk, DIV_FOOTER)
     return
   case args[0]
+  of "--name":
+    styleValue(sk, APP_NAME)
   of "--intro":
     styleValue(sk, APP_INTRO)
+  of "--author":
+    styleValue(sk, APP_AUTHOR)
   of "--version":
     styleValue(sk, APP_VERSION)
   of "--license":
@@ -1290,7 +1335,8 @@ proc implHandleIsOk() =
     key.get,
     timeoutSec = cfg.timeout,
     hideProcess = cfg.hideProcess,
-    sk = sk
+    sk = sk,
+    preferSystemProxy = cfg.systemProxy
   )
   let answer = resp.content.strip().toLowerAscii()
   if answer.len == 0:
@@ -1445,6 +1491,26 @@ proc implHandleQuery(
 # Private helpers — top-level dispatcher
 # ---------------------------------------------------------------------------
 
+## Normalises shorthand application-info aliases so they share
+## the same implementation as `get get --<field>`.
+func implNormaliseArgs(args: seq[string]): seq[string] =
+  if args.len == 0:
+    return args
+  case args[0]
+  of "name", "intro", "author", "license", "github":
+    if args.len == 1:
+      return @["get", "--" & args[0]]
+  of "--name", "--intro", "--author", "--license", "--github":
+    if args.len == 1:
+      return @["get", args[0]]
+  else:
+    discard
+  result = args
+
+when defined(getTest):
+  func normaliseArgsForTest*(args: seq[string]): seq[string] =
+    result = implNormaliseArgs(args)
+
 ## Top-level CLI dispatcher.
 proc implMain() =
   initAnsi()
@@ -1457,7 +1523,7 @@ proc implMain() =
     styleWarning(
       toStyleKind(cfgForWarn.vivid), envWarning)
 
-  let args = commandLineParams()
+  let args = implNormaliseArgs(commandLineParams())
   if args.len == 0:
     implUsageError(
       "no command or query provided")

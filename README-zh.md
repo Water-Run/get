@@ -22,7 +22,7 @@ get "https://github.com/Water-Run/get 上最新的 get 版本"
 python get_ready.py
 ```
 
-按照要求的指引进行. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装。
+按照要求的指引进行. 运行安装器时请保持 Release 包内文件在同一目录. Windows 下 `get-windows-x64.exe`, `libcrypto-1_1-x64.dll`, `libssl-1_1-x64.dll` 都是必需文件. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装.
 
 
 ## 先决条件
@@ -60,8 +60,8 @@ get "你的问题"
 | 选项                | 说明                                 | 值类型                | 默认值                               |
 |---------------------|--------------------------------------|-----------------------|--------------------------------------|
 | `key`               | LLM API 密钥                         | 字符串                | 空                                   |
-| `url`               | LLM API 端点 URL                     | 字符串 (URL)          | `https://api.xiaomimimo.com/v1`      |
-| `model`             | LLM 模型名称                         | 字符串                | `mimo-v2.5-pro`                      |
+| `url`               | LLM API 端点 URL                     | 字符串 (URL)          | `https://api.minimaxi.com/v1`          |
+| `model`             | LLM 模型名称                         | 字符串                | `minimax-m3`                         |
 | `manual-confirm`    | 执行前是否要求手动确认               | `true` / `false`      | `false`                              |
 | `double-check`      | 是否进行二次安全审查                 | `true` / `false`      | `true`                               |
 | `instance`          | 是否使用单次调用快速模式             | `true` / `false`      | `false`                              |
@@ -73,6 +73,7 @@ get "你的问题"
 | `shell`             | 用于执行命令的 Shell                 | 字符串                | Windows: `powershell`; Linux: `bash` |
 | `log`               | 是否记录每次请求和执行               | `true` / `false`      | `true`                               |
 | `hide-process`      | 是否隐藏中间步骤                     | `true` / `false`      | `false`                              |
+| `system-proxy`      | 是否优先使用系统代理设置；否则只使用终端代理环境变量 | `true` / `false` | `false`                              |
 | `cache`             | 是否启用响应缓存                     | `true` / `false`      | `true`                               |
 | `cache-expiry`      | 缓存条目过期天数                     | 正整数 (天) / `false` | `30`                                 |
 | `cache-max-entries` | 缓存保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
@@ -108,6 +109,8 @@ get set log-max-entries false
 | `--no-instance`       | 多轮 agent 模式         |
 | `--hide-process`      | 隐藏中间过程输出        |
 | `--no-hide-process`   | 显示中间过程输出        |
+| `--system-proxy`      | 优先使用系统代理设置    |
+| `--no-system-proxy`   | 仅使用终端代理环境变量  |
 | `--vivid`             | 启用 vivid 输出模式     |
 | `--no-vivid`          | 使用纯文本输出模式      |
 | `--model <名称>`      | 覆盖本次使用的 LLM 模型 |
@@ -117,7 +120,7 @@ get set log-max-entries false
 
 ```bash
 get "磁盘使用情况" --no-cache
-get "列出文件" --model mimo-v2.5-pro --vivid
+get "列出文件" --model minimax-m3 --vivid
 ```
 
 ### `config` 命令  

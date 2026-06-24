@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "2.0"
+const APP_VERSION* = "2.1"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -76,10 +76,10 @@ const MODEL_STRENGTH_WARNING* =
   "device, a sufficiently capable model is the " &
   "foundation of safety.\n" &
   "Consider using a known strong model (e.g. " &
-  "GPT-5+, Claude Opus 4.5+/Sonnet 4.6+, " &
-  "Gemini 3+, Qwen 3.6+, MiniMax M2.7+, " &
-  "MiMo v2+, Kimi K2.5+, GLM-5+, DeepSeek V4+, " &
-  "Grok 4.2+)."
+  "MiniMax M3, GPT-5.4+, Claude Sonnet 4.6+, " &
+  "Gemini 3.1 Pro / 3.5 Flash, Qwen 3.7+, " &
+  "DeepSeek V4 Pro, GLM 5.2+, Grok 4.3+, " &
+  "Kimi K2.6+, or comparable current models)."
 
 # ---------------------------------------------------------------------------
 # Constants — safety
@@ -317,7 +317,12 @@ func extractOutputMode*(text: string): string =
 ## intended action together with the extracted command (if any).
 ##
 ## Parsing rules:
-##   1. If no fenced code block is found → aaAnswer.
+##   1. If no fenced code block is found and no protocol marker
+##      is present → aaAnswer.
+##      If a protocol marker is present without a code block,
+##      return aaContinue with no command so the agent loop can
+##      ask the model to repair the malformed response instead
+##      of displaying the marker to the user.
 ##   2. If a code block is found, scan for a marker:
 ##        <!-- CONTINUE -->  → aaContinue
 ##        <!-- INTERPRET --> → aaInterpret
@@ -344,6 +349,11 @@ func extractAgentAction*(
          command: Option[string]] =
   let cmd = extractCodeBlock(text)
   if cmd.isNone:
+    let upper = toUpperAscii(text)
+    if upper.contains("<!-- CONTINUE -->") or
+        upper.contains("<!-- INTERPRET -->") or
+        upper.contains("<!-- FINAL -->"):
+      return (action: aaContinue, command: none(string))
     return (action: aaAnswer, command: none(string))
   let upper = toUpperAscii(text)
   if upper.contains("<!-- CONTINUE -->"):
@@ -477,24 +487,23 @@ func implExtractVersion(
       return 0.0
   result = 0.0
 
-## Checks whether any weak-variant keyword is present in the
-## normalised model name.  The keyword set is deliberately
-## narrow: it covers only tiers that are weak regardless of
-## their version number.  ``mini`` and ``flash`` are NOT
-## included, because high-version variants such as
-## ``gemini-3.5-flash`` are genuinely strong; those families
-## are gated by version threshold instead.
-##
-## :param m: Normalised model name.
-## :returns: true when a weak keyword is found.
-func implHasWeakKeyword(m: string): bool =
-  const weakKeywords = [
-    "nano", "lite", "small", "haiku",
-    "light", "tiny", "micro", "instant"]
-  for w in weakKeywords:
-    if m.contains(w):
+func implContainsAny(
+  model: string,
+  parts: openArray[string]
+): bool =
+  for part in parts:
+    if model.contains(part):
       return true
   result = false
+
+func implVersionMax(
+  model: string,
+  families: openArray[string]
+): float =
+  result = 0.0
+  for family in families:
+    result = max(result,
+      implExtractVersion(model, family))
 
 # ---------------------------------------------------------------------------
 # Public API — model strength check
@@ -504,33 +513,11 @@ func implHasWeakKeyword(m: string): bool =
 ## known high-performance model suitable for command
 ## generation.
 ##
-## Recognition is purely family + version-threshold based; no
-## hard brand block-list is used.  Thresholds are calibrated
-## against current frontier-model rankings (mid-2026):
-##
-## ===============  =================================
-## Family           Minimum strong version
-## ===============  =================================
-## GPT / Codex      gpt >= 5, codex >= 5
-## OpenAI o-series  o >= 3
-## Claude Opus      >= 4.5  (unversioned -> strong)
-## Claude Sonnet    >= 4.6  (unversioned -> strong)
-## Gemini           >= 3
-## Qwen             >= 3.6
-## MiniMax          >= 2.7
-## MiMo             >= 2
-## Kimi / Moonshot  >= 2.5  (unversioned -> strong)
-## GLM              >= 5
-## DeepSeek         V >= 4 (distilled excluded)
-## Grok             >= 4.2
-## Nemotron         >= 3
-## ===============  =================================
-##
-## Models containing genuinely weak-tier keywords (nano,
-## lite, tiny, micro, haiku, instant, ...) are always treated
-## as weak.  ``mini`` and ``flash`` are intentionally NOT weak
-## keywords because high-version variants of those tiers can
-## be strong; they are gated by version threshold instead.
+## Recognition follows the ``mainstream_high_model_rules``
+## list dated 2026-06-24.  The user-facing tool only needs a
+## pass/reject decision, so coding-only and efficient pass
+## classes are treated as accepted except for families that are
+## explicitly marked as not high-performance (Phi, Gemma).
 ##
 ## Model names are normalised (lowercased, underscores ->
 ## hyphens) before comparison.
@@ -540,97 +527,200 @@ func implHasWeakKeyword(m: string): bool =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert isKnownStrongModel("mimo-v2.5-pro")
-##     assert isKnownStrongModel("gpt-5.5")
+##     assert isKnownStrongModel("minimax-m3")
+##     assert isKnownStrongModel("gpt-5.5-pro")
 ##     assert isKnownStrongModel("claude-opus-4.8")
 ##     assert isKnownStrongModel("qwen3.7-max")
+##     assert not isKnownStrongModel("gpt-5.2")
 ##     assert not isKnownStrongModel("claude-3-haiku")
 func isKnownStrongModel*(model: string): bool =
   let m = implNormaliseModel(model)
   if m.len == 0:
     return false
 
-  # Always-weak tiers, independent of version.
-  if implHasWeakKeyword(m):
+  # Explicit small-model families do not pass the strict
+  # high-performance gate even when they are efficient.
+  if m.contains("phi-") or m.startsWith("phi") or
+      m.contains("gemma"):
     return false
 
-  # MiMo (Xiaomi) family — checked before the generic
-  # "-o" o-series rule because "mimo" contains an 'o'.
-  if m.contains("mimo"):
-    let v = implExtractVersion(m, "mimo")
-    if v == 0.0: return true   # unversioned mimo flagship
-    return v >= 2.0
+  if m.contains("gpt"):
+    if implContainsAny(m, [
+        "mini", "nano", "instant", "spark",
+        "chat-latest"]):
+      return false
+    if m.contains("gpt-5-codex"):
+      return true
+    return implExtractVersion(m, "gpt") > 5.3
 
-  # GPT / Codex family.
-  if m.contains("gpt") or m.contains("codex"):
-    let v = max(
-      implExtractVersion(m, "gpt"),
-      implExtractVersion(m, "codex"))
-    return v >= 5.0
-
-  # OpenAI o-series reasoning models (o1/o3/o4 ...).
-  if m.startsWith("o") or m.contains("-o"):
-    let oIdx =
-      if m.startsWith("o"): 0
-      else: m.find("-o") + 1
-    if oIdx >= 0 and oIdx < m.len - 1 and
-        m[oIdx] == 'o' and
-        m[oIdx + 1] in {'0' .. '9'}:
-      return implExtractVersion(m, "o") >= 3.0
-
-  # Claude family.
   if m.contains("claude"):
-    if m.contains("opus"):
-      let v = implExtractVersion(m, "opus")
-      return v == 0.0 or v >= 4.5
-    if m.contains("sonnet"):
-      let v = implExtractVersion(m, "sonnet")
-      return v == 0.0 or v >= 4.6
     if m.contains("haiku"):
       return false
-    return implExtractVersion(m, "claude") >= 4.5
+    if m.contains("mythos"):
+      return implExtractVersion(m, "mythos") >= 5.0
+    if m.contains("fable"):
+      return implExtractVersion(m, "fable") >= 5.0
+    if m.contains("opus"):
+      let v = implExtractVersion(m, "opus")
+      return v > 4.5
+    if m.contains("sonnet"):
+      let v = implExtractVersion(m, "sonnet")
+      return v > 4.5
+    return false
 
-  # Gemini family.
   if m.contains("gemini"):
-    return implExtractVersion(m, "gemini") >= 3.0
+    if implContainsAny(m, [
+        "flash-lite", "lite", "nano"]):
+      return false
+    let v = implExtractVersion(m, "gemini")
+    if m.contains("gemini-3-flash"):
+      return true
+    if m.contains("pro") and v >= 3.1:
+      return true
+    if m.contains("flash") and v >= 3.5:
+      return true
+    return false
 
-  # Grok family.
   if m.contains("grok"):
-    return implExtractVersion(m, "grok") >= 4.2
+    if m.contains("grok-build"):
+      return true
+    if implContainsAny(m, ["mini", "fast", "lite"]):
+      return false
+    return implExtractVersion(m, "grok") >= 4.3
 
-  # MiniMax family ("minimax" contains "mini").
   if m.contains("minimax"):
-    return implExtractVersion(m, "minimax") >= 2.7
+    if implContainsAny(m, [
+        "minimax-m2.7", "minimax-m2.7-highspeed"]):
+      return true
+    if implContainsAny(m, [
+        "minimax-m2.5", "minimax-m2.1",
+        "minimax-m2"]):
+      return false
+    return implExtractVersion(m, "minimax-m") >= 3.0
 
-  # Qwen family — modern versions are strong.
-  if m.contains("qwen"):
-    return implExtractVersion(m, "qwen") >= 3.6
-
-  # GLM / ChatGLM family.
-  if m.contains("glm"):
-    return implExtractVersion(m, "glm") >= 5.0
-
-  # DeepSeek family — V4+ full variants are strong.
   if m.contains("deepseek"):
-    if m.contains("distill") or
-        m.contains("distilled"):
+    if implContainsAny(m, ["deepseek-v3", "deepseek-r1"]):
       return false
-    let vNum = implExtractVersion(m, "deepseek")
-    if vNum > 0.0 and vNum < 4.0:
+    let v = implVersionMax(m, ["deepseek-v", "deepseek"])
+    if v < 4.0:
       return false
-    return vNum >= 4.0
+    return m.contains("pro") or m.contains("flash")
 
-  # Kimi / Moonshot family — K2.5 and beyond are strong.
-  if m.contains("kimi") or m.contains("moonshot"):
-    let v = max(
-      implExtractVersion(m, "kimi"),
-      implExtractVersion(m, "k"))
-    if v == 0.0: return true   # unversioned flagship
+  if m.contains("qwen"):
+    if implContainsAny(m, [
+        "coder-30b", "turbo", "flash", "lite",
+        "mini", "0.6b", "1.7b", "4b", "8b",
+        "14b"]):
+      return false
+    if implContainsAny(m, [
+        "qwen3-max-thinking", "qwen3.6-plus",
+        "qwen3.6-35b-a3b", "qwen3-235b-a22b"]):
+      return true
+    let v = implExtractVersion(m, "qwen")
+    return v >= 3.7 and
+      (m.contains("max") or m.contains("plus"))
+
+  if m.contains("glm"):
+    if implContainsAny(m, [
+        "air", "flash", "lite", "speed"]):
+      return false
+    return implExtractVersion(m, "glm") > 5.1
+
+  if m.contains("mimo"):
+    if implContainsAny(m, ["flash", "lite", "small"]):
+      return false
+    let v = implExtractVersion(m, "mimo")
+    if m.contains("pro") and v >= 2.0:
+      return true
     return v >= 2.5
 
-  # NVIDIA Nemotron family.
-  if m.contains("nemotron"):
-    return implExtractVersion(m, "nemotron") >= 3.0
+  if m.contains("kimi") or m.contains("moonshot"):
+    if m.contains("moonshot-v1"):
+      return false
+    let v = implVersionMax(m, ["kimi-k", "kimi", "k"])
+    if m.contains("code"):
+      return v >= 2.7
+    return v >= 2.5
+
+  if m.contains("mistral") or m.contains("devstral"):
+    if implContainsAny(m, ["ministral", "tiny", "nemo"]):
+      return false
+    if m.contains("devstral"):
+      return true
+    if m.contains("mistral-small-4"):
+      return true
+    if m.contains("medium"):
+      return implExtractVersion(m, "medium") >= 3.5
+    if m.contains("large"):
+      return implExtractVersion(m, "large") >= 3.0
+    return false
+
+  if m.contains("llama"):
+    if m.contains("llama-3.1-405b"):
+      return true
+    if implContainsAny(m, [
+        "8b", "13b", "70b", "small", "mini"]):
+      return false
+    if m.contains("scout"):
+      return true
+    let v = implExtractVersion(m, "llama")
+    return v >= 4.0 and
+      (m.contains("maverick") or m.contains("behemoth"))
+
+  if m.contains("command"):
+    if m.contains("command-r"):
+      return false
+    return m.contains("command-a")
+
+  if m.contains("ernie"):
+    if implContainsAny(m, [
+        "speed", "tiny", "lite", "turbo",
+        "4.5", "4.0", "3.5"]):
+      return false
+    if m.contains("ernie-x1.1"):
+      return true
+    return implExtractVersion(m, "ernie") >= 5.0
+
+  if m.contains("doubao") or m.contains("seed"):
+    if implContainsAny(m, [
+        "lite", "mini", "1.5", "1-5"]):
+      return false
+    if m.contains("doubao-seed-1.8"):
+      return true
+    let v = implExtractVersion(m, "seed")
+    return v >= 2.0 and
+      (m.contains("pro") or m.contains("code"))
+
+  if m.contains("hunyuan") or m.contains("hy3"):
+    if implContainsAny(m, [
+        "lite", "role", "mt", "translation"]):
+      return false
+    if m.contains("hy3-preview"):
+      return true
+    return implContainsAny(m, [
+      "hunyuan-t1", "hunyuan-turbos",
+      "hunyuan-large"])
+
+  if m.contains("step"):
+    if implContainsAny(m, ["step-2", "step-1"]):
+      return false
+    return implExtractVersion(m, "step") >= 3.5 and
+      m.contains("flash")
+
+  if m.contains("nova"):
+    if m.contains("micro"):
+      return false
+    return implContainsAny(m, [
+      "nova-premier", "nova-pro", "nova-2-pro",
+      "nova-2-lite", "nova-lite"])
+
+  if m.contains("jamba"):
+    if implContainsAny(m, ["mini", "small"]):
+      return false
+    return m.contains("large")
+
+  if m.contains("ai21"):
+    return m.contains("jamba") and m.contains("large")
 
   # Unknown family.
   result = false

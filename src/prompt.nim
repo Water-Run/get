@@ -100,6 +100,9 @@ func implBuildShellRules(shell: string): string =
     lines.add(
       "    env           -> Get-ChildItem Env:")
     lines.add(
+      "    home directory -> $HOME  or  " &
+      "[Environment]::GetFolderPath('UserProfile')")
+    lines.add(
       "    df / du       -> Get-PSDrive  or  " &
       "Get-Volume")
     lines.add(
@@ -116,6 +119,12 @@ func implBuildShellRules(shell: string): string =
       "`| Sort-Object`, `| Measure-Object` " &
       "with script blocks instead of " &
       "awk/sed/cut.")
+    lines.add(
+      "- For the user's home directory, use " &
+      "`$HOME` or " &
+      "`[Environment]::GetFolderPath('UserProfile')`. " &
+      "NEVER infer the home directory by editing " &
+      "the current working directory or drive root.")
     lines.add(
       "- Use backtick (`) for line " &
       "continuation, NEVER backslash. Use `;` " &
@@ -395,6 +404,17 @@ func implBuildBaseContext(
     "- The command MUST be valid syntax for " &
     "the target shell: " & shell & ".")
   lines.add(
+    "- Return only commands that can run as-is " &
+    "in the current working directory. Do not " &
+    "use placeholders such as <file>, YOUR_*, " &
+    "example paths, or values the user has not " &
+    "provided.")
+  lines.add(
+    "- Prefer commands supported by the detected " &
+    "shell version. Avoid syntax that only works " &
+    "in newer shell releases unless the system " &
+    "information shows that release is available.")
+  lines.add(
     "- Output exactly ONE command per code " &
     "block. The command may use pipes, " &
     "chaining operators, and subshells, but " &
@@ -405,6 +425,14 @@ func implBuildBaseContext(
     "- Prefer commands whose output is clean, " &
     "concise, and directly answers the query " &
     "without requiring further processing.")
+  lines.add(
+    "- Never answer dynamic or machine-local " &
+    "questions from memory. For current time, " &
+    "date, year, hostname, username, paths, " &
+    "IP addresses, OS details, process state, " &
+    "disk state, or file-system facts, you " &
+    "MUST generate a read-only shell command " &
+    "that queries the local machine.")
   lines.add(
     "- Verify your command mentally before " &
     "outputting — syntax errors waste a round " &

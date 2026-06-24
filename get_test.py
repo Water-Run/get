@@ -54,7 +54,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 BOOL_OPTIONS = [
     "manual-confirm", "double-check", "instance", "log",
-    "hide-process", "cache", "vivid",
+    "hide-process", "system-proxy", "cache", "vivid",
 ]
 
 INT_OPTIONS_DEFAULTS = {
@@ -1064,20 +1064,23 @@ def _instance_query_table() -> List[Tuple[str, str,
     return [
         ("hostname",
          "reply with ONLY the local hostname, nothing else",
-         lambda o: f.hostname in o or host in o,
+         lambda o: f.hostname.lower() in o.lower()
+         or host.lower() in o.lower(),
          "matches socket.gethostname()"),
         ("username",
          "reply with ONLY the current unix/linux user name, "
          "nothing else",
-         lambda o: user and user in o,
+         lambda o: user and user.lower() in o.lower(),
          "matches getpass.getuser()"),
         ("cwd",
          "reply with ONLY the current working directory absolute path",
-         lambda o: cwd in o or f.cwd_basename in o,
+         lambda o: cwd.lower() in o.lower()
+         or f.cwd_basename.lower() in o.lower(),
          "matches os.getcwd()"),
         ("home",
          "reply with ONLY the user's home directory path",
-         lambda o: f.home in o or os.path.basename(f.home) in o,
+         lambda o: f.home.lower() in o.lower()
+         or os.path.basename(f.home).lower() in o.lower(),
          "matches $HOME"),
         ("os_name",
          "reply with ONLY the operating system kernel/family name "
@@ -1086,7 +1089,8 @@ def _instance_query_table() -> List[Tuple[str, str,
          or ("mac" in o.lower() and plt == "darwin")
          or ("darwin" in o.lower() and plt == "darwin")
          or ("macos" in o.lower() and plt == "darwin")
-         or ("windows" in o.lower() and plt == "windows"),
+         or ("windows" in o.lower() and plt == "windows")
+         or ("win32nt" in o.lower() and plt == "windows"),
          "matches platform.system()"),
         ("year",
          f"reply with ONLY the current year as a 4-digit number",

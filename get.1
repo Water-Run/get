@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-06-06" "get 2.0" "User Commands"
+.TH GET 1 "2026-06-24" "get 2.1" "User Commands"
 .\"
 .\" ====================================================================
 .SH NAME
@@ -30,7 +30,7 @@ get \- get anything from your computer
 .RI [ \-\-clean ]
 .br
 .B get get
-.RI [ \-\-intro | \-\-version | \-\-license | \-\-github ]
+.RI [ \-\-name | \-\-intro | \-\-author | \-\-version | \-\-license | \-\-github ]
 .br
 .B get version
 .br
@@ -51,10 +51,17 @@ All generated commands are restricted to
 operations and pass through multiple safety layers before execution.
 .PP
 .B get
-v2.0 ships as a compact binary without helper tool payloads.
+v2.1 ships as a compact binary without helper tool payloads.
 Generated commands use standard system utilities and any third-party
 tools already available on the user's
 .BR PATH .
+On Windows, keep
+.BR get-windows-x64.exe ,
+.BR libcrypto-1_1-x64.dll ,
+and
+.B libssl-1_1-x64.dll
+in the same release directory when running
+.BR get_ready.py .
 .PP
 Two execution modes are supported:
 .TP
@@ -239,6 +246,12 @@ Suppress intermediate output; show only the final result.
 .B \-\-no\-hide\-process
 Show intermediate output.
 .TP
+.B \-\-system\-proxy
+Prefer OS system proxy settings.
+.TP
+.B \-\-no\-system\-proxy
+Use terminal proxy environment variables only.
+.TP
 .B \-\-vivid
 Enable vivid output mode.
 .TP
@@ -273,12 +286,12 @@ Default: empty.
 .BI "url " URL
 LLM API endpoint URL (OpenAI-compatible).
 Default:
-.IR https://api.xiaomimimo.com/v1 .
+.IR https://api.minimaxi.com/v1 .
 .TP
 .BI "model " string
 LLM model identifier.
 Default:
-.IR mimo\-v2.5\-pro .
+.IR minimax\-m3 .
 .TP
 .BI "manual\-confirm " bool
 Require interactive y/N confirmation before executing each command,
@@ -366,6 +379,16 @@ When enabled,
 .B get
 also suppresses its own warning/progress text for the query path
 (for example model advisory warnings and cache-decision progress text).
+Default:
+.IR false .
+.TP
+.BI "system\-proxy " bool
+Prefer OS system proxy settings. When disabled,
+.B get
+uses only terminal proxy environment variables such as
+.B HTTPS_PROXY
+or
+.BR HTTP_PROXY .
 Default:
 .IR false .
 .TP
@@ -552,65 +575,41 @@ whitelist of known high-performance models.
 An advisory warning is emitted when the model is unrecognised or
 belongs to a reduced-capability variant; execution is not blocked.
 .PP
-Recognised strong families and minimum versions:
-.TP
-.B GPT / CodeX
-version \(>= 5 (e.g.\&
-.IR gpt\-5 ).
-.TP
-.B OpenAI o-series
-version \(>= 3.
-.TP
-.B Claude Opus
-version \(>= 4.5, or unversioned Opus.
-.TP
-.B Claude Sonnet
-version \(>= 4.6, or unversioned Sonnet.
-.TP
-.B Gemini
-version \(>= 3.
-.TP
-.B Qwen
-version \(>= 3.6.
-.TP
-.B MiniMax
-version \(>= 2.7.
-.TP
-.B Mimo
-version \(>= 2, or unversioned flagship.
-.TP
-.B Kimi / Moonshot
-version \(>= 2.5.
-.TP
-.B GLM / ChatGLM
-version \(>= 5.
-.TP
-.B DeepSeek
-version \(>= 4, full variants only (non-distilled).
-.TP
-.B Grok
-version \(>= 4.2.
-.TP
-.B Nemotron
-version \(>= 3, or unversioned flagship.
+The built-in rule set is
+.BR mainstream_high_model_rules_2026_06_24 .
+For the CLI warning gate, pass, coding-only pass, and efficient pass
+all count as accepted. Explicit small-model families such as
+.B Phi
+and
+.B Gemma
+remain rejected as strict high-performance models.
 .PP
-Models whose name contains
-.BR nano ,
-.BR lite ,
-.BR small ,
-.BR haiku ,
-.BR light ,
-.BR tiny ,
-.BR micro ,
-or
-.B instant
-are always treated as weak.
-Names containing
-.B mini
-or
-.B flash
-are gated by family/version thresholds instead of being treated as
-weak automatically.
+Accepted examples include:
+.IR minimax\-m3 ,
+.IR gpt\-5.4 ,
+.IR gpt\-5\-codex ,
+.IR claude\-sonnet\-4.6 ,
+.IR gemini\-3.1\-pro ,
+.IR gemini\-3.5\-flash ,
+.IR grok\-4.3 ,
+.IR deepseek\-v4\-pro ,
+.IR qwen3.7\-plus ,
+.IR glm\-5.2 ,
+.IR mimo\-v2.5\-pro ,
+.IR kimi\-k2.6 ,
+.IR mistral\-large\-3 ,
+.IR llama\-4\-maverick ,
+.IR command\-a ,
+.IR ernie\-5.0 ,
+.IR doubao\-seed\-2.0\-pro ,
+.IR hy3\-preview ,
+.IR step\-3.5\-flash ,
+.IR nova\-pro ,
+and
+.IR jamba\-large .
+.PP
+Reduced, lite, mini, legacy, translation, or small-model variants are
+rejected according to their family-specific rules.
 .\"
 .\" ====================================================================
 .SH OUTPUT MODES
@@ -885,7 +884,7 @@ Bypass the cache for a single query:
 Override the model and enable vivid output for one query:
 .PP
 .RS
-.B get \(dqlist files\(dq \-\-model gpt\-5.3\-codex \-\-vivid
+.B get \(dqlist files\(dq \-\-model minimax\-m3 \-\-vivid
 .RE
 .PP
 Force instance (single-call) mode:
@@ -901,7 +900,7 @@ Configure the API key, endpoint, and model:
 .br
 .B get set url https://api.openai.com/v1
 .br
-.B get set model gpt\-5.3\-codex
+.B get set model minimax\-m3
 .RE
 .PP
 Remove the stored API key:

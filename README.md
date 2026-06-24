@@ -22,7 +22,7 @@ Download from [GitHub Release](https://github.com/Water-Run/get/releases). Just 
 python get_ready.py
 ```
 
-Follow the on-screen instructions. If an older installation is found, the installer asks whether to keep the existing configuration while replacing only the binary. Once done, run `get version` to verify the installation.
+Follow the on-screen instructions. Keep the files from the release package in the same directory when running the installer. On Windows, `get-windows-x64.exe`, `libcrypto-1_1-x64.dll`, and `libssl-1_1-x64.dll` are all required. If an older installation is found, the installer asks whether to keep the existing configuration while replacing only the binary. Once done, run `get version` to verify the installation.
 
 
 ## Prerequisites
@@ -60,8 +60,8 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | Option              | Description                                    | Value Type                        | Default                              |
 |---------------------|------------------------------------------------|-----------------------------------|--------------------------------------|
 | `key`               | LLM API key                                    | String                            | Empty                                |
-| `url`               | LLM API endpoint URL                           | String (URL)                      | `https://api.xiaomimimo.com/v1`      |
-| `model`             | LLM model name                                 | String                            | `mimo-v2.5-pro`                      |
+| `url`               | LLM API endpoint URL                           | String (URL)                      | `https://api.minimaxi.com/v1`          |
+| `model`             | LLM model name                                 | String                            | `minimax-m3`                         |
 | `manual-confirm`    | Require manual confirmation before execution   | `true` / `false`                  | `false`                              |
 | `double-check`      | Enable secondary safety review of commands     | `true` / `false`                  | `true`                               |
 | `instance`          | Use single-call fast mode                      | `true` / `false`                  | `false`                              |
@@ -73,6 +73,7 @@ Integer options accept `false` to disable the feature entirely (equivalent to 0)
 | `shell`             | Shell used to execute commands                 | String                            | Windows: `powershell`; Linux: `bash` |
 | `log`               | Log each request and execution                 | `true` / `false`                  | `true`                               |
 | `hide-process`      | Hide intermediate steps                        | `true` / `false`                  | `false`                              |
+| `system-proxy`      | Prefer OS system proxy settings; otherwise use terminal proxy environment only | `true` / `false` | `false`                              |
 | `cache`             | Enable response caching                        | `true` / `false`                  | `true`                               |
 | `cache-expiry`      | Cache entry expiry in days                     | Positive integer (days) / `false` | `30`                                 |
 | `cache-max-entries` | Maximum number of cache entries to retain      | Positive integer / `false`        | `1000`                               |
@@ -109,6 +110,8 @@ The following flags can override persistent configuration for a single query, pl
 | `--no-instance`       | Multi-round agent mode                  |
 | `--hide-process`      | Hide intermediate process output        |
 | `--no-hide-process`   | Show intermediate process output        |
+| `--system-proxy`      | Prefer OS system proxy settings         |
+| `--no-system-proxy`   | Use terminal proxy environment only     |
 | `--vivid`             | Enable vivid output mode                |
 | `--no-vivid`          | Use plain text output mode              |
 | `--model <name>`      | Override the LLM model for this query   |
@@ -118,7 +121,7 @@ Examples:
 
 ```bash
 get "disk usage" --no-cache
-get "list files" --model mimo-v2.5-pro --vivid
+get "list files" --model minimax-m3 --vivid
 ```
 
 ### `config` Command

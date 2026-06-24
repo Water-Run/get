@@ -429,7 +429,7 @@ proc clearSpinner*() =
 
 ## Writes the final result to stdout as plain text.  The result
 ## text is always echoed verbatim; no external rendering is
-## performed because v2.0 ships no terminal renderer binaries.
+## performed because v2.1 ships no terminal renderer binaries.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.

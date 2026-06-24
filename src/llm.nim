@@ -11,13 +11,12 @@
 ## displays elapsed-time progress on stderr while the HTTP
 ## round-trip is in flight.
 ##
-## The module auto-detects a system HTTP/HTTPS proxy (either
-## from environment variables or, on Windows, from the user's
-## Internet Settings registry keys) and applies it to the
-## underlying async HTTP client.  Low-level network failures
-## are classified and wrapped into a short, user-friendly
-## message so that operating-system specific or async traceback
-## noise is never shown to the user.
+## The module honors terminal proxy environment variables and
+## can optionally prefer the operating-system proxy settings
+## (Windows Internet Settings) when requested by configuration.
+## Low-level network failures are classified and wrapped into a
+## short, user-friendly message so that operating-system specific
+## or async traceback noise is never shown to the user.
 
 {.experimental: "strictFuncs".}
 
@@ -67,15 +66,15 @@ type
 # Private helpers — proxy detection
 # ---------------------------------------------------------------------------
 
-## Detects the system proxy configuration.
+## Detects the proxy configuration.
 ##
-## Environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY
-## in both upper- and lower-case) take precedence.  On Windows
-## the function falls back to the user's Internet Settings
-## registry keys when no environment variable is set.  The
-## per-protocol ``http=...;https=...`` format that Windows
-## uses when different proxies are configured for each scheme
-## is handled correctly.
+## Terminal environment variables (HTTPS_PROXY, HTTP_PROXY,
+## ALL_PROXY in both upper- and lower-case) provide terminal
+## behavior.  When ``preferSystemProxy`` is enabled, Windows
+## Internet Settings take precedence over terminal environment
+## variables.  The per-protocol ``http=...;https=...`` format
+## that Windows uses when different proxies are configured for
+## each scheme is handled correctly.
 ##
 ## On Windows the registry is read via the Win32 Registry API
 ## directly (RegOpenKeyExW / RegQueryValueExW), avoiding the
@@ -84,13 +83,41 @@ type
 ##
 ## :returns: The proxy URL (e.g. "http://127.0.0.1:7890"),
 ##           or an empty string when no proxy is configured.
-proc implDetectSystemProxy(): string =
+func implChooseProxy(
+  terminalProxy: string,
+  systemProxy: string,
+  preferSystemProxy: bool
+): tuple[url: string, source: string] =
+  if preferSystemProxy and systemProxy.len > 0:
+    return (url: systemProxy, source: "system")
+  if terminalProxy.len > 0:
+    return (url: terminalProxy, source: "terminal")
+  result = (url: "", source: "")
+
+when defined(getTest):
+  func chooseProxyForTest*(
+    terminalProxy: string,
+    systemProxy: string,
+    preferSystemProxy: bool
+  ): tuple[url: string, source: string] =
+    result = implChooseProxy(
+      terminalProxy, systemProxy, preferSystemProxy)
+
+proc implDetectSystemProxy(
+  preferSystemProxy: bool
+): tuple[url: string, source: string] =
+  var terminalProxy = ""
   for name in ["HTTPS_PROXY", "https_proxy",
                "HTTP_PROXY",  "http_proxy",
                "ALL_PROXY",   "all_proxy"]:
     let v = getEnv(name, "")
     if v.len > 0:
-      return v
+      terminalProxy = v
+      break
+
+  if not preferSystemProxy:
+    return implChooseProxy(
+      terminalProxy, "", preferSystemProxy)
 
   when defined(windows):
       try:
@@ -100,7 +127,8 @@ proc implDetectSystemProxy(): string =
         let (enableOut, enableCode) = execCmdEx(
           fmt"""reg query "{keyPath}" /v ProxyEnable""")
         if enableCode != 0:
-          return ""
+          return implChooseProxy(
+            terminalProxy, "", preferSystemProxy)
 
         var enabled = false
         for line in enableOut.splitLines():
@@ -114,12 +142,14 @@ proc implDetectSystemProxy(): string =
                 enabled = false
             break
         if not enabled:
-          return ""
+          return implChooseProxy(
+            terminalProxy, "", preferSystemProxy)
 
         let (srvOut, srvCode) = execCmdEx(
           fmt"""reg query "{keyPath}" /v ProxyServer""")
         if srvCode != 0:
-          return ""
+          return implChooseProxy(
+            terminalProxy, "", preferSystemProxy)
 
         var srv = ""
         for line in srvOut.splitLines():
@@ -130,7 +160,8 @@ proc implDetectSystemProxy(): string =
             break
 
         if srv.len == 0:
-          return ""
+          return implChooseProxy(
+            terminalProxy, "", preferSystemProxy)
 
         # Handle per-protocol format:
         # "http=host:port;https=host:port"
@@ -154,13 +185,17 @@ proc implDetectSystemProxy(): string =
           elif httpProxy.len > 0:
             srv = httpProxy
           else:
-            return ""
+            return implChooseProxy(
+              terminalProxy, "", preferSystemProxy)
 
         if not srv.contains("://"):
           srv = "http://" & srv
-        return srv
+        return implChooseProxy(
+          terminalProxy, srv, preferSystemProxy)
       except CatchableError:
         discard
+  result = implChooseProxy(
+    terminalProxy, "", preferSystemProxy)
   
 # ---------------------------------------------------------------------------
 # Private helpers — error classification
@@ -299,7 +334,8 @@ proc implPostViaCurlAsync(
   endpoint: string,
   body: string,
   apiKey: string,
-  timeoutSec: int
+  timeoutSec: int,
+  proxyUrl: string
 ): Future[string] {.async.} =
   var args = @[
     "-sS",
@@ -309,6 +345,9 @@ proc implPostViaCurlAsync(
     "-H", "Content-Type: application/json",
     "--data-binary", "@-",
     "-w", "\n%{http_code}"]
+  if proxyUrl.len > 0:
+    args.add("--proxy")
+    args.add(proxyUrl)
   if timeoutSec > 0:
     args.add("--max-time")
     args.add($timeoutSec)
@@ -453,6 +492,46 @@ proc implAwaitWithProgress(
 # Private helpers — response parsing
 # ---------------------------------------------------------------------------
 
+## Removes provider-visible reasoning tags from message content.
+##
+## Some OpenAI-compatible providers return hidden reasoning in
+## ``<think>...</think>`` text inside ``message.content``.  That
+## text is not part of the user-facing answer and breaks strict
+## token checks such as ``get isok``.
+func implStripOneXmlBlock(
+  text: string,
+  tag: string
+): string =
+  result = text
+  let openTag = "<" & tag & ">"
+  let closeTag = "</" & tag & ">"
+  while true:
+    let lower = toLowerAscii(result)
+    let start = lower.find(openTag)
+    if start < 0:
+      break
+    let close = lower.find(closeTag, start + openTag.len)
+    if close < 0:
+      if start == 0:
+        result = ""
+      else:
+        result = result[0 ..< start]
+      break
+    let afterClose = close + closeTag.len
+    let before =
+      if start > 0: result[0 ..< start] else: ""
+    let after =
+      if afterClose < result.len:
+        result[afterClose .. ^1]
+      else:
+        ""
+    result = before & after
+
+func implStripThinkBlocks(content: string): string =
+  result = implStripOneXmlBlock(content, "think")
+  result = implStripOneXmlBlock(result, "thinking")
+  result = result.strip()
+
 ## Parses the raw JSON body into an LlmResponse.
 ##
 ## :param body: The raw JSON string.
@@ -478,19 +557,27 @@ proc implParseResponse(body: string): LlmResponse =
   if content.isNil:
     raise newException(LlmApiError,
       "API response missing 'content'")
+  let cleanContent = implStripThinkBlocks(
+    content.getStr())
   result = LlmResponse(
-    content: content.getStr().strip(),
+    content: cleanContent,
     tokensUsed:
       node{"usage"}{"total_tokens"}.getInt(0))
+
+when defined(getTest):
+  ## Exposes response parsing for test builds.
+  proc parseResponseForTest*(body: string): LlmResponse =
+    result = implParseResponse(body)
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 ## Sends an LlmRequest to the configured endpoint and returns
-## the parsed LlmResponse.  Automatically applies any detected
-## system proxy and wraps low-level network failures into a
-## short, user-friendly message.
+## the parsed LlmResponse.  Applies terminal proxy environment
+## variables, optionally applies OS system proxy settings, and
+## wraps low-level network failures into a short, user-friendly
+## message.
 ##
 ## :param req: The request payload.
 ## :param url: The API base URL.
@@ -514,7 +601,8 @@ proc sendLlmRequest*(
   timeoutSec: int = 300,
   hideProcess: bool = false,
   sk: StyleKind = skSimp,
-  spinnerLabel: string = "requesting"
+  spinnerLabel: string = "requesting",
+  preferSystemProxy: bool = false
 ): LlmResponse =
   if apiKey.len == 0:
     raise newException(GetError,
@@ -525,10 +613,10 @@ proc sendLlmRequest*(
   let endpoint =
     implNormaliseUrl(url) & CHAT_COMPLETIONS_PATH
 
-  let proxyUrl = implDetectSystemProxy()
-  if proxyUrl.len > 0 and not hideProcess:
+  let proxy = implDetectSystemProxy(preferSystemProxy)
+  if proxy.url.len > 0 and not hideProcess:
     styleProgress(sk,
-      fmt"using system proxy: {proxyUrl}")
+      fmt"using {proxy.source} proxy: {proxy.url}")
 
   let bodyStr = $implBuildRequestBody(req)
 
@@ -536,9 +624,10 @@ proc sendLlmRequest*(
   # event-loop yielding, allowing the spinner animation loop to execute.
   proc impl(): Future[LlmResponse] {.async.} =
     var respBody: string
-    if proxyUrl.len > 0:
+    if proxy.url.len > 0:
       let fut = implPostViaCurlAsync(
-        endpoint, bodyStr, apiKey, timeoutSec)
+        endpoint, bodyStr, apiKey, timeoutSec,
+        proxy.url)
       respBody = await implAwaitWithProgress(
         fut, timeoutSec, hideProcess, sk,
         spinnerLabel)
