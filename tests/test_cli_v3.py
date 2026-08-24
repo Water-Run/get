@@ -194,19 +194,24 @@ class GetV3CliTests(unittest.TestCase):
 
     def test_09_http_proxy_uses_the_reusable_transport(self) -> None:
         ProxyHandler.request_count = 0
+        proxy_url = f"http://127.0.0.1:{self.proxy_port}"
+        proxy_env = {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": "",
+            "ALL_PROXY": "",
+            "NO_PROXY": "",
+        }
+        if self.target_os != "windows":
+            proxy_env.update({
+                "http_proxy": "",
+                "https_proxy": "",
+                "all_proxy": "",
+                "no_proxy": "",
+            })
         result = self.run_get(
             "proxy cli",
             "--no-cache",
-            env_override={
-                "HTTP_PROXY": f"http://127.0.0.1:{self.proxy_port}",
-                "http_proxy": "",
-                "HTTPS_PROXY": "",
-                "https_proxy": "",
-                "ALL_PROXY": "",
-                "all_proxy": "",
-                "NO_PROXY": "",
-                "no_proxy": "",
-            },
+            env_override=proxy_env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "native-ok")

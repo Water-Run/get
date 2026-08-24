@@ -116,9 +116,13 @@ class Handler(BaseHTTPRequestHandler):
             ])
             return
         if "slow command" in user_text and has_tools:
+            slow_command = (
+                "ping -n 11 127.0.0.1 >NUL" if is_cmd else
+                "ping -n 11 127.0.0.1 | Out-Null" if is_windows else
+                "sleep 10"
+            )
             self._tool_completion([
-                ("slow-1", "ping -n 11 127.0.0.1 >NUL" if is_windows
-                 else "sleep 10", "return_raw"),
+                ("slow-1", slow_command, "return_raw"),
             ])
             return
         if "large output" in user_text and has_tools:
