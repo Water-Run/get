@@ -1,199 +1,200 @@
-# `get` -- get anything from your computer
+# `get` — get anything from your computer
 
-[英文](README.md)  
+[English](README.md)
 
-`get` 是一个小巧的命令行二进制工具, 通过自然语言调用大语言模型 (LLM) 生成 Shell 命令, 并在你的设备上执行, 以获取你需要的任何信息.
-
-`get` 以 `AGPL-3.0` 许可证在 [GitHub](https://github.com/Water-Run/get) 上开源.
-
-使用示例:
+`get` 把自然语言问题转换为安全、只读的本地检查。3.0 将旧版 instance/agent 两条执行链统一为一个类型化 Harness：它可以直接回答、执行一条命令、根据观察继续推理，也可以并行执行互不依赖的检查。
 
 ```bash
-get "设备的IP地址"
-get "当前目录下的代码结构"
-get "https://github.com/Water-Run/get 上最新的 get 版本"
+get "这台设备的 IP 地址"
+get "当前目录的代码结构"
+get "当前 Git 分支和未提交文件"
 ```
 
-## 安装
+## v3 的主要变化
 
-从[GitHub Release](https://github.com/Water-Run/get/releases)下载. 直接一句话运行安装脚本即可:
+- 统一的 `Model → Action → Policy → Tool → Observation` 状态机。
+- 默认使用原生 function tools，并提供结构化 JSON 与 v2 Markdown 兼容层。
+- `auto`、`direct`、`loop`、`parallel` 四种策略共用同一个运行时。
+- 常规命令只需一次模型调用；不再额外调用路由器或缓存分类模型。
+- 复用 HTTP 连接，请求完成即唤醒；快速响应不再被固定轮询额外拖慢一秒。
+- 收到 HTTP 响应前的瞬态传输故障会在原请求超时内最多重试三次；HTTP 与解析错误不会重试，响应体有 8 MiB 硬上限，携带 Bearer 凭据的请求不会跟随重定向。
+- 本地上下文惰性采集，不再启动大量进程探测 shell 版本和 PATH 工具。
+- 独立只读检查可真正并行执行。
+- 每条命令都有超时和输出上限，并会跨平台终止对应的进程树。
+- 不可关闭的强制只读策略；正则、模型复核、手动确认是附加层。
+- 生产级缓存：SHA-256 身份、跨进程写入、原子持久化、最近良好版本恢复和有界解析；缓存命令仍走完整安全门。
+
+## 安装与配置
+
+从 [GitHub Releases](https://github.com/Water-Run/get/releases) 下载，保持包内文件位于同一目录后运行：
 
 ```bash
 python get_ready.py
-```
-
-按照要求的指引进行. 运行安装器时请保持 Release 包内文件在同一目录. Windows 下 `get-windows-x64.exe`, `libcrypto-1_1-x64.dll`, `libssl-1_1-x64.dll` 都是必需文件. 如果检测到旧版本安装, 安装器会询问是否保留现有配置并仅替换主程序. 完成后, 运行 `get version` 校验安装.
-
-
-## 先决条件
-
-使用前, 至少需要配置大语言模型的相关参数. `get` 兼容 OpenAI API 规范. 使用以下命令进行配置:
-
-```bash
 get set model 你的模型名称
-get set url 你的接口地址
+get set url https://你的服务地址/v1
 get set key 你的API密钥
+get isok
 ```
 
-配置完成后, 运行 `get isok` 进行验证.
+安装器可以保留旧配置。v2 配置会自动迁移：`instance=true` 转换为 `harness=direct`；其他情况使用新的默认值 `harness=auto`。
 
-若要取消某项配置, 将值留空即可. 例如取消 Key 设置:
+Windows 下需让 `get-windows-x64.exe`、`libcrypto-1_1-x64.dll`、`libssl-1_1-x64.dll` 与安装器保持在一起；安装时会一并复制。
+
+API 密钥不会被打印或写入日志。Linux 密钥文件权限为 `0600`；Windows 使用 DPAPI 保护。
+
+## Harness 策略
+
+| 策略 | 行为 | 常见模型调用数 |
+|---|---|---:|
+| `auto` | 直接优先，仅在确实需要时继续或批量执行 | 1 |
+| `direct` | 固定一次模型调用，最多一个终止工具调用 | 1 |
+| `loop` | 对有依赖关系的工作串行反馈观察 | 1–3 |
+| `parallel` | 允许互不依赖的只读调用并发执行 | 1–3 |
 
 ```bash
-get set key
+get set harness auto
+get "同时比较磁盘和内存使用" --harness parallel
+get "显示当前目录" --harness direct
 ```
 
-## 快速开始
-
-用法非常简单:
+工具协议与 Harness 相互独立：
 
 ```bash
-get "你的问题"
+get set tool-protocol auto     # 原生工具被拒绝时兼容回退
+get set tool-protocol native   # 必须使用原生 function tools
+get set tool-protocol legacy   # 结构化 JSON，并接受 v2 Markdown
 ```
 
-> `get` 设计为仅执行只读操作. 每条生成的命令在执行前会经过多层安全验证 (默认的危险命令正则匹配拦截、以及可选的二次审查和手动确认).
+## 安全模型
 
-## `set` 选项参考
+每条由模型生成、模型修改或缓存取出的命令，都经过同一个安全门：
 
-整数选项接受 `false` 以完全禁用该功能 (等同于 0).
+1. 校验类型化工具名称和参数。
+2. 执行不可关闭的强制只读策略。
+3. 执行 `command-pattern` 附加黑名单。
+4. 可选第二模型复核（`double-check`）。
+5. 如果复核模型修改命令，再次执行两层确定性检查。
+6. 可选手动确认。
+7. 在超时和输出上限内执行。
 
-| 选项                | 说明                                 | 值类型                | 默认值                               |
-|---------------------|--------------------------------------|-----------------------|--------------------------------------|
-| `key`               | LLM API 密钥                         | 字符串                | 空                                   |
-| `url`               | LLM API 端点 URL                     | 字符串 (URL)          | `https://api.minimaxi.com/v1`          |
-| `model`             | LLM 模型名称                         | 字符串                | `minimax-m3`                         |
-| `manual-confirm`    | 执行前是否要求手动确认               | `true` / `false`      | `false`                              |
-| `double-check`      | 是否进行二次安全审查                 | `true` / `false`      | `true`                               |
-| `instance`          | 是否使用单次调用快速模式             | `true` / `false`      | `false`                              |
-| `timeout`           | 单次 API 请求超时时间                | 正整数 (秒) / `false` | `300`                                |
-| `max-token`         | 每次请求的最大 token 消耗            | 正整数 / `false`      | `20480`                              |
-| `max-rounds`        | Agent 模式的最大循环轮数             | 正整数 / `false`      | `3`                                  |
-| `command-pattern`   | 禁止命令正则匹配模式                 | 正则字符串            | 内置黑名单（不传值还原默认；传 `""` 清空） |
-| `system-prompt`     | 自定义系统提示词                     | 字符串                | 空                                   |
-| `shell`             | 用于执行命令的 Shell                 | 字符串                | Windows: `powershell`; Linux: `bash` |
-| `log`               | 是否记录每次请求和执行               | `true` / `false`      | `true`                               |
-| `hide-process`      | 是否隐藏中间步骤                     | `true` / `false`      | `false`                              |
-| `system-proxy`      | 是否优先使用系统代理设置；否则只使用终端代理环境变量 | `true` / `false` | `false`                              |
-| `cache`             | 是否启用响应缓存                     | `true` / `false`      | `true`                               |
-| `cache-expiry`      | 缓存条目过期天数                     | 正整数 (天) / `false` | `30`                                 |
-| `cache-max-entries` | 缓存保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
-| `cache-trigger-threshold` | 触发缓存判定所需的历史执行次数   | 正整数 / `false`      | `1`                                  |
-| `log-max-entries`   | 日志保留的最大条目数                 | 正整数 / `false`      | `1000`                               |
-| `vivid`             | 是否启用 vivid 输出模式 (语义颜色与进度动画) | `true` / `false` | `true`                               |
+强制策略会拒绝已知修改型命令、普通文件输出重定向、原地编辑参数、修改型 Git/容器/集群/包管理操作、上传或非只读 curl 请求，以及任意内联解释器代码。清空 `command-pattern` 只会关闭附加正则，不会关闭强制策略。
 
-禁用整数选项的示例:
+`double-check` 在 v3 中默认是 `false`，因此日常请求只需一次模型调用。需要独立模型复核时可显式开启：
 
 ```bash
-get set timeout false
-get set cache-expiry false
-get set log-max-entries false
+get "检查服务状态" --double-check
+get set manual-confirm true
 ```
 
-`command-pattern` 在 shell 展开前对命令字符串本身做匹配。仅屏蔽某个
-文件名可被通配符绕过（例如 `cat *.txt`），因此更可靠的策略是匹配命令
-动词（如 `cat`、`head`、`cp` 等）。
+任何 Shell 策略都无法形式化证明任意代码无副作用。敏感环境中请检查命令并启用手动确认。
 
-### 执行时覆写  
+## 配置
 
-以下标志可在查询时覆盖持久化配置, 置于查询字符串之后:
+使用 `get config` 查看全部配置，`get config --<选项>` 查看单项，`get config --reset` 恢复默认值。
 
-| 标志                  | 说明                    |
-|-----------------------|-------------------------|
-| `--no-cache`          | 本次查询绕过缓存        |
-| `--cache`             | 本次查询强制使用缓存    |
-| `--manual-confirm`    | 执行前要求确认          |
-| `--no-manual-confirm` | 跳过确认提示            |
-| `--double-check`      | 启用二次安全审查        |
-| `--no-double-check`   | 跳过二次安全审查        |
-| `--instance`          | 快速单次调用模式        |
-| `--no-instance`       | 多轮 agent 模式         |
-| `--hide-process`      | 隐藏中间过程输出        |
-| `--no-hide-process`   | 显示中间过程输出        |
-| `--system-proxy`      | 优先使用系统代理设置    |
-| `--no-system-proxy`   | 仅使用终端代理环境变量  |
-| `--vivid`             | 启用 vivid 输出模式     |
-| `--no-vivid`          | 使用纯文本输出模式      |
-| `--model <名称>`      | 覆盖本次使用的 LLM 模型 |
-| `--timeout <秒数>`    | 覆盖本次请求超时时间    |
+| 选项 | 默认值 | 说明 |
+|---|---:|---|
+| `url` | `https://api.minimaxi.com/v1` | API 基础 URL |
+| `model` | `minimax-m3` | 模型标识 |
+| `manual-confirm` | `false` | 逐条命令手动确认 |
+| `double-check` | `false` | 增加第二模型安全复核 |
+| `harness` | `auto` | `auto`、`direct`、`loop`、`parallel` |
+| `tool-protocol` | `auto` | `auto`、`native`、`legacy` |
+| `timeout` | `300` | API 超时秒数；`false` 表示不限 |
+| `max-token` | `20480` | 响应 token 上限；`false` 表示不传 |
+| `max-rounds` | `3` | 模型轮次硬上限 |
+| `max-tool-calls` | `8` | 每次运行工具调用硬上限 |
+| `max-parallel` | `4` | 最大并发工具数 |
+| `command-timeout` | `30` | 单条命令硬超时（秒） |
+| `max-output-bytes` | `1048576` | 单条命令捕获字节上限 |
+| `command-pattern` | 内置 | 附加禁止命令正则 |
+| `system-prompt` | 空 | 附加模型指令 |
+| `shell` | `bash` / `powershell` | 命令 Shell |
+| `log` | `true` | 记录执行日志 |
+| `hide-process` | `false` | 隐藏进度和中间观察 |
+| `system-proxy` | `false` | 优先使用 Windows Internet Settings，而不是终端代理变量 |
+| `cache` | `true` | 启用确定性缓存 |
+| `cache-expiry` | `30` | 缓存天数；`false` 表示不过期 |
+| `cache-max-entries` | `1000` | 缓存上限；`false` 表示不限 |
+| `log-max-entries` | `1000` | 日志上限；`false` 表示不限 |
+| `vivid` | `true` | ANSI 色彩和进度动画 |
+| `instance` | `false` | v2 兼容别名，对应 `harness=direct` |
 
-示例:
+Harness 与命令安全上限必须是正整数，不能关闭。省略值可恢复默认：
 
 ```bash
-get "磁盘使用情况" --no-cache
-get "列出文件" --model minimax-m3 --vivid
+get set max-parallel 6
+get set command-timeout 20
+get set max-output-bytes 2097152
+get set max-parallel            # 恢复为 4
 ```
 
-### `config` 命令  
-
-`config`命令用于获取当前的配置.  
+`command-pattern` 有三种方式：
 
 ```bash
-get config                # 显示所有当前配置
-get config --reset        # 重置所有配置为默认值
-get config --<选项名>     # 显示单个选项的当前值
+get set command-pattern '\b(ssh|curl)\b'  # 自定义附加策略
+get set command-pattern                    # 恢复内置正则
+get set command-pattern ""                 # 强制策略仍然有效
 ```
 
-`--<选项名>` 接受上方 `set` 表格中的所有选项名称. `get config --key` 显示密钥是否已配置。存储值经加密处理，无法取回原文。禁用的整数选项显示 `false`.
+## 单次查询覆盖参数
+
+```text
+--no-cache / --cache
+--manual-confirm / --no-manual-confirm
+--double-check / --no-double-check
+--harness <auto|direct|loop|parallel>
+--protocol <auto|native|legacy>
+--instance / --no-instance          兼容别名
+--hide-process / --no-hide-process
+--system-proxy / --no-system-proxy
+--vivid / --no-vivid
+--model <名称>
+--timeout <秒>
+```
+
+默认读取终端中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。Windows 上启用 `system-proxy=true` 后，已开启的 Internet Settings 优先；`NO_PROXY` 会绕过两类代理来源。
+
+## 缓存
+
+v3 不会再花费一次模型调用判断缓存策略。
+
+- 成功的单命令终止运行会缓存当前上下文中的命令。
+- 缓存命中为零模型调用；命令重新通过安全门并再次执行，动态信息仍保持最新。
+- 没有可复用命令时，显式 `--cache` 可以缓存最终文本。
+- 多步骤结果不会被猜测性缓存。
+- SHA-256 缓存键包含 v3、工作目录、服务 URL、模型、Harness、协议、Shell、自定义提示、安全配置、系统和架构；v2 条目不会碰撞。
+- 写入在短期跨进程锁内完成读—改—写，多个 `get` 进程同时结束时不会互相覆盖。
+- 快照刷新后原子替换；POSIX 权限为 `0600`。主文件损坏时自动读取最近良好的 `.bak` 快照。
+- 文件与字段均有 Schema 校验和尺寸硬上限；过期清理、重复替换与最旧条目淘汰均为确定性行为。
 
 ```bash
-get config --command-pattern   # 查看当前正则（默认时显示完整内置表达式）
-get set command-pattern        # 还原内置默认
-get set command-pattern ""     # 清空，禁用模式过滤
+get cache
+get cache --clean
+get cache --unset "系统版本"
 ```
 
-## 命令参考
+## 文件与退出码
 
-### 缓存
+- 配置：Linux `~/.config/get/config.json`；Windows `%APPDATA%/get/config.json`
+- 密钥：Linux `~/.config/get/key`；Windows `%APPDATA%/get/key`
+- 日志与缓存：同目录下 `get.log`、`cache.json`
 
-`get` 采用延迟决策缓存机制. 查询在首次执行时不会缓存. 只有当同一查询的历史执行次数达到 `cache-trigger-threshold`（默认 `1`，即第二次执行触发）或显式传入 `--cache` 时, `get` 才会调用 LLM 判断最优缓存策略. 在该判定阶段（当未隐藏过程输出时），会显示进度文本 `checking whether to cache...`. 支持五种策略: `GLOBAL_COMMAND` (全局缓存命令, 命中时重新执行), `GLOBAL_RESULT` (全局缓存结果, 命中时直接返回), `CONTEXT_COMMAND` (按上下文缓存命令, 命中时重新执行), `CONTEXT_RESULT` (按上下文缓存结果, 命中时直接返回), 或 `NOCACHE` (不缓存).
+- `0`：成功
+- `1`：配置、服务、协议、安全策略或一般错误
+- `124`：命令超时
+- `130`：Ctrl+C 中断
+- 其他非零值：终止命令的退出码
 
-全局条目在任意工作目录下生效; 上下文条目仅在原始查询的目录下生效.
+## 开发
 
-当启用 `hide-process` 时, `get` 会抑制自身中间进度与 warning 文案（包括缓存判定提示与模型建议 warning），仅输出最终结果或必要错误。
-
-当配置 `cache=false` 且未启用 `hide-process` 时, 会输出 warning: `warning: cache is disabled in config; all cache logic is bypassed`.
+需要 Nim 2.2.x。
 
 ```bash
-get cache                     # 显示缓存状态
-get cache --clean             # 清除所有缓存条目和已见记录
-get cache --unset "系统版本"  # 移除匹配查询的缓存条目
-get set cache false           # 禁用缓存 (停用所有缓存逻辑)
+nim c -d:release -o:get src/get.nim
+python get_test.py --key dummy --skip-llm
 ```
 
-### 日志
+`tests/` 中的测试覆盖协议解析、原生工具载荷、状态迁移、配置迁移、强制安全策略、受限执行和真实并行执行。
 
-`get` 将每次查询执行记录到本地文件. 超过 `log-max-entries` 限制时, 最旧的条目会被自动移除.
-
-```bash
-get log              # 显示日志状态
-get log --clean      # 清除所有日志条目
-get set log false    # 禁用日志
-```
-
-### 其他
-
-```bash
-get get             # 显示 get 的基本信息
-get get --intro     # 显示简介
-get get --version   # 显示版本 (等价 get version)
-get get --license   # 显示许可证标识
-get get --github    # 显示 GitHub 链接
-get isok            # 验证当前配置是否可用
-get help            # 显示使用帮助
-```
-
-## 文件存储与退出码
-
-### 文件存储位置
-
-- `配置文件`: Linux `~/.config/get/config.json` / Windows `%APPDATA%/get/config.json`
-- `API 密钥`: Linux `~/.config/get/key`（权限 0600）/ Windows `%APPDATA%/get/key`（DPAPI 加密）
-- `执行日志`: Linux `~/.config/get/get.log` / Windows `%APPDATA%/get/get.log`
-- `响应缓存`: Linux `~/.config/get/cache.json` / Windows `%APPDATA%/get/cache.json`
-
-### 退出码
-
-- `0`: 成功完成
-- `1`: 配置错误、LLM 通信失败、安全检查拒绝或一般错误
-- `130`: 被 Ctrl+C（SIGINT）中断
-- `N`: 当生成的命令以非零码退出时, 该退出码会被传递为 `get` 的退出码
+`get` 使用 AGPL-3.0-or-later 许可证。源码：[github.com/Water-Run/get](https://github.com/Water-Run/get)。

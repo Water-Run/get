@@ -1,831 +1,637 @@
-## Response caching with deferred decision for the get tool.
+## Production-grade deterministic caching for the get v3 harness.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-04-21
+## :Date: 2026-08-24
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
-## This module implements a disk-backed cache with a deferred
-## decision mechanism.  Queries are cached only when repeated:
-## the first execution merely records the query in a "seen" set;
-## the second execution triggers an LLM call that chooses one of
-## five caching strategies:
-##
-##   NOCACHE         — do not cache anything.
-##   GLOBAL_COMMAND  — cache the command globally; re-execute
-##                     on hit.
-##   GLOBAL_RESULT   — cache the output globally; return
-##                     directly on hit.
-##   CONTEXT_COMMAND — cache the command for this context;
-##                     re-execute on hit.
-##   CONTEXT_RESULT  — cache the output for this context;
-##                     return directly on hit.
-##
-## Global entries ignore the working directory; context entries
-## include it in their hash key.  On lookup the four possible
-## hit types are checked in priority order: context result,
-## global result, context command, global command.
+## Cache identity is provider- and policy-aware, persistence is atomic, and
+## every read is size-bounded and schema-validated. Writers use a small
+## cross-process lock so concurrent get invocations cannot lose updates.
+## A last-good backup provides transparent recovery from a damaged primary.
 
 {.experimental: "strictFuncs".}
 
-import std/[algorithm, json, options, os, strformat,
-            strutils, times]
+import std/[algorithm, json, monotimes, options, os, strformat,
+            strutils, tables, times]
 
-import checksums/md5
+when defined(posix):
+  import std/posix
+
+import checksums/sha2
 
 import style
 import utils
 
 # ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+## On-disk cache schema. Older hashes are intentionally invalidated by SHA-256.
+const CACHE_SCHEMA_VERSION* = 3
+
+## Hard input bound protecting startup from an unexpectedly large cache file.
+const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024
+
+## Bounds for individual persisted values.
+const MAX_CACHE_QUERY_CHARS* = 32_768
+const MAX_CACHE_COMMAND_CHARS* = 32_768
+const MAX_CACHE_OUTPUT_BYTES* = 4 * 1024 * 1024
+
+## Cross-process writer lock behavior.
+const CACHE_LOCK_WAIT_MS = 2_000
+const CACHE_LOCK_POLL_MS = 10
+const CACHE_STALE_LOCK_SECONDS = 30
+
+## Timestamps farther into the future are treated as malformed.
+const MAX_CACHE_CLOCK_SKEW_SECONDS = 86_400'i64
+
+# ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
-## Whether a cache entry applies globally or only within a
-## specific working-directory context.
+## Raised when a cache write cannot be completed safely.
+type
+  CacheError* = object of GetError
+
+## Whether a cache entry applies globally or to one working directory.
 type
   CacheScope* = enum
     csGlobal  ## Valid regardless of working directory.
     csContext ## Valid only for the original context.
 
-## Behaviour when a cache entry is hit.
+## Behavior when a cache entry is hit.
 type
   CacheMode* = enum
-    cmCommand ## Re-execute the cached command.
-    cmResult  ## Return the cached output directly.
+    cmCommand ## Revalidate and re-execute the cached command.
+    cmResult  ## Return the cached text without a provider request.
 
-## The five possible outcomes of the LLM cache-worthiness
-## check.
-type
-  CacheDecision* = enum
-    cdNoCache        ## Do not cache anything.
-    cdGlobalCommand  ## Cache command globally.
-    cdGlobalResult   ## Cache result globally.
-    cdContextCommand ## Cache command for this context.
-    cdContextResult  ## Cache result for this context.
-
-## A single cached entry.
+## A single validated cache entry.
 type
   CacheEntry* = object
-    hash*: string         ## Global or context hash key.
+    hash*: string         ## SHA-256 global or context identity.
     scope*: CacheScope    ## Global or context scope.
-    cacheMode*: CacheMode ## Behaviour on hit.
+    cacheMode*: CacheMode ## Command or final-result behavior.
     query*: string        ## Original user query text.
-    command*: string      ## Generated shell command.
-    output*: string       ## Final output (cmResult only).
+    command*: string      ## Generated shell command for cmCommand.
+    output*: string       ## Final output for cmResult.
     timestamp*: int64     ## Unix epoch seconds when created.
 
-## Records that a query has been executed at least once.
-type
-  SeenEntry* = object
-    queryHash*: string ## MD5 of the query text.
-    timestamp*: int64  ## Unix epoch seconds.
-    count*: int        ## Number of observed executions.
-
-## Records that a query has been evaluated by the cache
-## decision LLM and explicitly classified as NOCACHE, so that
-## subsequent executions can skip the decision call entirely.
-type
-  NoCacheEntry* = object
-    queryHash*: string ## MD5 of the query text.
-    timestamp*: int64  ## Unix epoch seconds.
-
-## In-memory representation of the cache file.
+## In-memory representation of the v3 cache file.
 type
   CacheStore* = object
-    entries*: seq[CacheEntry]    ## Cached results.
-    seen*: seq[SeenEntry]        ## Seen-query tracker.
-    nocache*: seq[NoCacheEntry]  ## NOCACHE decisions.
+    entries*: seq[CacheEntry] ## Validated, de-duplicated entries.
 
-## Groups the cache-related state that the main dispatcher
-## passes into the instance and agent flow functions.
+## Minimal cache state carried by the unified query dispatcher.
 type
   CacheContext* = object
-    useCache*: bool      ## Cache pipeline active.
-    wasSeen*: bool       ## Query was previously seen.
-    queryHash*: string   ## Hash of query text only.
-    globalHash*: string  ## Hash without cwd.
-    contextHash*: string ## Hash including cwd.
+    useCache*: bool      ## Whether this invocation uses the cache.
+    globalHash*: string  ## Identity without working directory.
+    contextHash*: string ## Identity including working directory.
 
 # ---------------------------------------------------------------------------
-# Private helpers — string conversion
+# Private helpers — identity and validation
 # ---------------------------------------------------------------------------
 
-## Converts a CacheScope to its JSON string.
-##
-## :param scope: The scope value.
-## :returns: "global" or "context".
+## Returns a canonical SHA-256 hex digest.
+func implSha256(value: string): string =
+  var state = initSha_256()
+  state.update(value)
+  result = $state.digest()
+
 func implScopeToStr(scope: CacheScope): string =
   case scope
-  of csGlobal:  result = "global"
+  of csGlobal: result = "global"
   of csContext: result = "context"
 
-## Parses a string into a CacheScope.
-##
-## :param s: The string to parse.
-## :returns: The corresponding CacheScope.
-func implStrToScope(s: string): CacheScope =
-  if toLowerAscii(s) == "global":
-    result = csGlobal
-  else:
-    result = csContext
-
-## Converts a CacheMode to its JSON string.
-##
-## :param mode: The cache mode value.
-## :returns: "command" or "result".
 func implModeToStr(mode: CacheMode): string =
   case mode
   of cmCommand: result = "command"
-  of cmResult:  result = "result"
+  of cmResult: result = "result"
 
-## Parses a string into a CacheMode.
-##
-## :param s: The string to parse.
-## :returns: The corresponding CacheMode.
-func implStrToMode(s: string): CacheMode =
-  if toLowerAscii(s) == "command":
-    result = cmCommand
-  else:
-    result = cmResult
+func implParseScope(value: string): Option[CacheScope] =
+  case toLowerAscii(value.strip())
+  of "global": result = some(csGlobal)
+  of "context": result = some(csContext)
+  else: result = none(CacheScope)
 
-## Compares two cache entries by timestamp (ascending).
-##
-## :param a: First entry.
-## :param b: Second entry.
-## :returns: Negative if a is older, positive if newer.
-func implCmpTimestamp(
-  a, b: CacheEntry
-): int =
+func implParseMode(value: string): Option[CacheMode] =
+  case toLowerAscii(value.strip())
+  of "command": result = some(cmCommand)
+  of "result": result = some(cmResult)
+  else: result = none(CacheMode)
+
+func implValidHash(value: string): bool =
+  if value.len != 64:
+    return false
+  for character in value:
+    if character notin {'0'..'9', 'a'..'f'}:
+      return false
+  result = true
+
+func implFreshTimestamp(
+  timestamp: int64,
+  nowEpoch: int64,
+  expiryDays: int
+): bool =
+  if timestamp <= 0 or
+      timestamp > nowEpoch + MAX_CACHE_CLOCK_SKEW_SECONDS:
+    return false
+  if expiryDays <= 0:
+    return true
+  let maxAge =
+    if expiryDays.int64 > high(int64) div 86_400'i64:
+      high(int64)
+    else:
+      expiryDays.int64 * 86_400'i64
+  result = nowEpoch - timestamp <= maxAge
+
+func implValidEntry(entry: CacheEntry, nowEpoch: int64): bool =
+  if not implValidHash(entry.hash) or
+      entry.query.len == 0 or
+      entry.query.len > MAX_CACHE_QUERY_CHARS or
+      entry.command.len > MAX_CACHE_COMMAND_CHARS or
+      entry.output.len > MAX_CACHE_OUTPUT_BYTES or
+      entry.query.contains('\0') or
+      entry.command.contains('\0') or
+      entry.output.contains('\0') or
+      not implFreshTimestamp(entry.timestamp, nowEpoch, 0):
+    return false
+  case entry.cacheMode
+  of cmCommand:
+    result = entry.command.strip().len > 0
+  of cmResult:
+    result = entry.output.len > 0
+
+func implEntryKey(entry: CacheEntry): string =
+  result = $entry.scope & ":" & entry.hash
+
+func implCmpEntry(a, b: CacheEntry): int =
   result = cmp(a.timestamp, b.timestamp)
+  if result == 0:
+    result = cmp(implEntryKey(a), implEntryKey(b))
+
+## Parses one entry and rejects malformed or oversized fields.
+proc implParseEntry(
+  node: JsonNode,
+  defaultScope: CacheScope,
+  nowEpoch: int64
+): Option[CacheEntry] =
+  if node.kind != JObject:
+    return none(CacheEntry)
+  try:
+    let scope =
+      if node{"scope"}.isNil:
+        some(defaultScope)
+      else:
+        implParseScope(node{"scope"}.getStr(""))
+    let mode = implParseMode(node{"cacheMode"}.getStr(""))
+    if scope.isNone or mode.isNone:
+      return none(CacheEntry)
+    let entry = CacheEntry(
+      hash: node{"hash"}.getStr(""),
+      scope: scope.get,
+      cacheMode: mode.get,
+      query: node{"query"}.getStr(""),
+      command: node{"command"}.getStr(""),
+      output: node{"output"}.getStr(""),
+      timestamp: node{"timestamp"}.getBiggestInt(0).int64
+    )
+    if implValidEntry(entry, nowEpoch):
+      result = some(entry)
+    else:
+      result = none(CacheEntry)
+  except CatchableError:
+    result = none(CacheEntry)
+
+## De-duplicates identities and keeps the newest valid entry.
+proc implNormalizeEntries(entries: seq[CacheEntry]): seq[CacheEntry] =
+  var positions = initTable[string, int]()
+  for entry in entries:
+    let key = implEntryKey(entry)
+    if positions.hasKey(key):
+      let index = positions[key]
+      if entry.timestamp >= result[index].timestamp:
+        result[index] = entry
+    else:
+      positions[key] = result.len
+      result.add(entry)
+  result.sort(implCmpEntry)
 
 # ---------------------------------------------------------------------------
-# Public API — hash computation
+# Public API — cache identity
 # ---------------------------------------------------------------------------
 
-## Computes an MD5 hex hash from the query text alone.  Used
-## as the key for the "seen" tracker.
-##
-## :param query: The user's natural-language query.
-## :returns: A 32-character lowercase hex string.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let h = computeQueryHash("test")
-##     assert h.len == 32
-proc computeQueryHash*(query: string): string =
-  result = $toMD5(toLowerAscii(query.strip()))
-
-## Computes a global hash that includes every context field
-## except the working directory.  Used as the key for global
-## cache entries (GLOBAL_COMMAND, GLOBAL_RESULT).
-##
-## :param query: The user's natural-language query.
-## :param shell: Configured shell name.
-## :param model: LLM model identifier.
-## :param instance: Whether instance mode is active.
-## :param systemPrompt: Custom system prompt, if any.
-## :param commandPattern: Command-pattern regex, if any.
-## :returns: A 32-character lowercase hex string.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     import std/options
-##     let h = computeGlobalHash("test", "bash",
-##       "gpt", false, none(string), none(string))
-##     assert h.len == 32
-proc computeGlobalHash*(
+## Computes a v3 global key across provider, strategy, protocol, and policy.
+proc computeGlobalHashV3*(
   query: string,
   shell: string,
   model: string,
-  instance: bool,
+  providerUrl: string,
+  harness: string,
+  toolProtocol: string,
   systemPrompt: Option[string],
   commandPattern: Option[string]
 ): string =
-  let sysPmt =
+  let customInstruction =
     if systemPrompt.isSome: systemPrompt.get
     else: ""
-  let cmdPat =
-    if commandPattern.isSome: commandPattern.get
-    else: ""
-  let parts = @[
-    toLowerAscii(query.strip()),
-    shell, model, $instance,
-    sysPmt, cmdPat, hostOS, hostCPU]
-  result = $toMD5(parts.join("|"))
+  let filterPattern =
+    if commandPattern.isSome:
+      "custom:" & commandPattern.get
+    else:
+      "built-in:" & DEFAULT_COMMAND_PATTERN
+  result = implSha256($(%*[
+    "get-v3",
+    query.strip(),
+    shell,
+    model,
+    providerUrl,
+    harness,
+    toolProtocol,
+    customInstruction,
+    filterPattern,
+    hostOS,
+    hostCPU
+  ]))
 
-## Computes a context hash that includes the working directory
-## and all other context fields.  Used as the key for context
-## cache entries (CONTEXT_COMMAND, CONTEXT_RESULT).
-##
-## :param query: The user's natural-language query.
-## :param cwd: Current working directory.
-## :param shell: Configured shell name.
-## :param model: LLM model identifier.
-## :param instance: Whether instance mode is active.
-## :param systemPrompt: Custom system prompt, if any.
-## :param commandPattern: Command-pattern regex, if any.
-## :returns: A 32-character lowercase hex string.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     import std/options
-##     let h = computeContextHash("test", "/tmp",
-##       "bash", "gpt", false,
-##       none(string), none(string))
-##     assert h.len == 32
-proc computeContextHash*(
+## Computes a v3 context key by adding the working directory.
+proc computeContextHashV3*(
   query: string,
   cwd: string,
   shell: string,
   model: string,
-  instance: bool,
+  providerUrl: string,
+  harness: string,
+  toolProtocol: string,
   systemPrompt: Option[string],
   commandPattern: Option[string]
 ): string =
-  let sysPmt =
-    if systemPrompt.isSome: systemPrompt.get
-    else: ""
-  let cmdPat =
-    if commandPattern.isSome: commandPattern.get
-    else: ""
-  let parts = @[
-    toLowerAscii(query.strip()),
-    cwd, shell, model, $instance,
-    sysPmt, cmdPat, hostOS, hostCPU]
-  result = $toMD5(parts.join("|"))
+  let globalHash = computeGlobalHashV3(
+    query,
+    shell,
+    model,
+    providerUrl,
+    harness,
+    toolProtocol,
+    systemPrompt,
+    commandPattern
+  )
+  result = implSha256($(%*[
+    "get-v3-context",
+    globalHash,
+    cwd
+  ]))
 
 # ---------------------------------------------------------------------------
-# Public API — persistence
+# Private helpers — decoding and bounded reads
 # ---------------------------------------------------------------------------
 
-## Loads the cache store from disk.  Returns an empty store
-## when the file does not exist or cannot be parsed.  Old-
-## format files (top-level JSON Array) are migrated
-## transparently: entries are assigned csContext scope and
-## cmResult mode; seen and nocache are left empty.  The new
-## object format includes "entries", "seen", and "nocache"
-## arrays.
-##
-## :returns: The loaded cache store.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+proc implDecodeCache(content: string): CacheStore =
+  let node = parseJson(content)
+  let nowEpoch = epochTime().int64
+  var parsed: seq[CacheEntry] = @[]
+  if node.kind == JArray:
+    # v2 arrays are read only for graceful migration. Their 32-character
+    # hashes fail v3 validation and therefore cannot collide with v3 entries.
+    for item in node:
+      let entry = implParseEntry(item, csContext, nowEpoch)
+      if entry.isSome:
+        parsed.add(entry.get)
+  elif node.kind == JObject:
+    let entriesNode = node{"entries"}
+    if entriesNode.isNil or entriesNode.kind != JArray:
+      raise newException(CacheError,
+        "cache entries must be a JSON array")
+    let schemaNode = node{"schemaVersion"}
+    if schemaNode.isNil or schemaNode.kind != JInt or
+        schemaNode.getInt() != CACHE_SCHEMA_VERSION:
+      raise newException(CacheError,
+        "cache schema version is unsupported")
+    let algorithmNode = node{"hashAlgorithm"}
+    if algorithmNode.isNil or algorithmNode.kind != JString or
+        algorithmNode.getStr() != "sha256":
+      raise newException(CacheError,
+        "cache hash algorithm is unsupported")
+    for item in entriesNode:
+      let entry = implParseEntry(item, csContext, nowEpoch)
+      if entry.isSome:
+        parsed.add(entry.get)
+  else:
+    raise newException(CacheError,
+      "cache root must be a JSON object")
+  result = CacheStore(entries: implNormalizeEntries(parsed))
+
+proc implTryLoadPath(path: string): Option[CacheStore] =
+  if not fileExists(path):
+    return none(CacheStore)
+  try:
+    let size = getFileSize(path)
+    if size < 0 or size > MAX_CACHE_FILE_BYTES:
+      return none(CacheStore)
+    result = some(implDecodeCache(readFile(path)))
+  except CatchableError:
+    result = none(CacheStore)
+
+## Loads the primary cache, transparently falling back to the last-good copy.
 proc loadCache*(): CacheStore =
   let path = getCacheFilePath()
-  if not fileExists(path):
-    return CacheStore(
-      entries: @[], seen: @[], nocache: @[])
-  try:
-    let content = readFile(path)
-    let node = parseJson(content)
-    # Backward compatibility: old format is a JSON Array.
-    if node.kind == JArray:
-      var entries: seq[CacheEntry] = @[]
-      for item in node:
-        let entry = CacheEntry(
-          hash: item{"hash"}.getStr(""),
-          scope: csContext,
-          cacheMode: implStrToMode(
-            item{"cacheMode"}.getStr("result")),
-          query: item{"query"}.getStr(""),
-          command: item{"command"}.getStr(""),
-          output: item{"output"}.getStr(""),
-          timestamp:
-            item{"timestamp"}.getBiggestInt(
-              0).int64)
-        if entry.hash.len > 0:
-          entries.add(entry)
-      return CacheStore(
-        entries: entries, seen: @[], nocache: @[])
-    if node.kind != JObject:
-      return CacheStore(
-        entries: @[], seen: @[], nocache: @[])
-    # New format: { "entries": [...], "seen": [...],
-    #               "nocache": [...] }
-    var entries: seq[CacheEntry] = @[]
-    let eNode = node{"entries"}
-    if not eNode.isNil and eNode.kind == JArray:
-      for item in eNode:
-        let entry = CacheEntry(
-          hash: item{"hash"}.getStr(""),
-          scope: implStrToScope(
-            item{"scope"}.getStr("context")),
-          cacheMode: implStrToMode(
-            item{"cacheMode"}.getStr("result")),
-          query: item{"query"}.getStr(""),
-          command: item{"command"}.getStr(""),
-          output: item{"output"}.getStr(""),
-          timestamp:
-            item{"timestamp"}.getBiggestInt(
-              0).int64)
-        if entry.hash.len > 0:
-          entries.add(entry)
-    var seen: seq[SeenEntry] = @[]
-    let sNode = node{"seen"}
-    if not sNode.isNil and sNode.kind == JArray:
-      for item in sNode:
-        let se = SeenEntry(
-          queryHash:
-            item{"queryHash"}.getStr(""),
-          timestamp:
-            item{"timestamp"}.getBiggestInt(
-              0).int64,
-          count: item{"count"}.getInt(1))
-        if se.queryHash.len > 0:
-          seen.add(se)
-    var nocache: seq[NoCacheEntry] = @[]
-    let nNode = node{"nocache"}
-    if not nNode.isNil and nNode.kind == JArray:
-      for item in nNode:
-        let ne = NoCacheEntry(
-          queryHash:
-            item{"queryHash"}.getStr(""),
-          timestamp:
-            item{"timestamp"}.getBiggestInt(
-              0).int64)
-        if ne.queryHash.len > 0:
-          nocache.add(ne)
-    result = CacheStore(
-      entries: entries,
-      seen: seen,
-      nocache: nocache)
-  except JsonParsingError, IOError:
-    result = CacheStore(
-      entries: @[], seen: @[], nocache: @[])
+  let primary = implTryLoadPath(path)
+  if primary.isSome:
+    return primary.get
+  let backup = implTryLoadPath(path & ".bak")
+  if backup.isSome:
+    return backup.get
+  result = CacheStore(entries: @[])
 
-## Writes the cache store to disk as a JSON object with
-## "entries", "seen", and "nocache" arrays.
-##
-## :param store: The cache store to persist.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
-proc saveCache*(store: CacheStore) =
-  let path = getCacheFilePath()
-  var eArr = newJArray()
-  for e in store.entries:
-    eArr.add(%*{
-      "hash":      e.hash,
-      "scope":     implScopeToStr(e.scope),
-      "cacheMode": implModeToStr(e.cacheMode),
-      "query":     e.query,
-      "command":   e.command,
-      "output":    e.output,
-      "timestamp": e.timestamp})
-  var sArr = newJArray()
-  for s in store.seen:
-    sArr.add(%*{
-      "queryHash": s.queryHash,
-      "timestamp": s.timestamp,
-      "count": s.count})
-  var nArr = newJArray()
-  for n in store.nocache:
-    nArr.add(%*{
-      "queryHash": n.queryHash,
-      "timestamp": n.timestamp})
-  let root = %*{
-    "entries": eArr,
-    "seen":    sArr,
-    "nocache": nArr}
+# ---------------------------------------------------------------------------
+# Private helpers — lock and atomic persistence
+# ---------------------------------------------------------------------------
+
+proc implAcquireCacheLock(path: string): string =
+  result = path & ".lock"
+  let started = getMonoTime()
+  while true:
+    try:
+      if not existsOrCreateDir(result):
+        return
+      try:
+        let age = epochTime().int64 -
+          getLastModificationTime(result).toUnix
+        if age > CACHE_STALE_LOCK_SECONDS:
+          removeDir(result)
+          continue
+      except OSError, IOError:
+        discard
+    except OSError, IOError:
+      discard
+    if (getMonoTime() - started).inMilliseconds >=
+        CACHE_LOCK_WAIT_MS:
+      raise newException(CacheError,
+        "cache is busy; retry the operation")
+    sleep(CACHE_LOCK_POLL_MS)
+
+proc implReleaseCacheLock(lockPath: string) =
   try:
-    writeFile(path, pretty(root, 2) & "\n")
-  except IOError:
+    removeDir(lockPath)
+  except OSError, IOError:
     discard
 
+proc implEncodeCache(store: CacheStore): string =
+  var entries = implNormalizeEntries(store.entries)
+  entries.sort(implCmpEntry)
+  var entryArray = newJArray()
+  for entry in entries:
+    entryArray.add(%*{
+      "hash": entry.hash,
+      "scope": implScopeToStr(entry.scope),
+      "cacheMode": implModeToStr(entry.cacheMode),
+      "query": entry.query,
+      "command": entry.command,
+      "output": entry.output,
+      "timestamp": entry.timestamp
+    })
+  let root = %*{
+    "schemaVersion": CACHE_SCHEMA_VERSION,
+    "hashAlgorithm": "sha256",
+    "entries": entryArray
+  }
+  result = pretty(root, 2) & "\n"
+
+proc implWriteFileDurable(path: string, content: string) =
+  var file: File
+  if not open(file, path, fmWrite):
+    raise newException(CacheError,
+      "cannot open temporary cache file")
+  try:
+    when defined(posix):
+      # Restrict a newly created temporary before any cache data is written.
+      setFilePermissions(path, {fpUserRead, fpUserWrite})
+    file.write(content)
+    file.flushFile()
+    when defined(posix):
+      if posix.fsync(getFileHandle(file).cint) != 0:
+        raise newException(CacheError,
+          "cannot flush temporary cache file")
+  finally:
+    file.close()
+
+proc implSyncCacheDirectory(path: string) =
+  when defined(posix):
+    let directory = parentDir(path)
+    let descriptor = posix.open(directory.cstring, O_RDONLY)
+    if descriptor >= 0:
+      discard posix.fsync(descriptor)
+      discard posix.close(descriptor)
+
+proc implSaveCacheUnlocked(store: CacheStore, path: string) =
+  let payload = implEncodeCache(store)
+  if payload.len > MAX_CACHE_FILE_BYTES:
+    raise newException(CacheError,
+      fmt"cache exceeds the {MAX_CACHE_FILE_BYTES}-byte hard limit")
+  let processTag = $getCurrentProcessId()
+  let tempPath = path & ".tmp." & processTag
+  let backupTempPath = path & ".bak.tmp." & processTag
+  try:
+    implWriteFileDurable(tempPath, payload)
+    implWriteFileDurable(backupTempPath, payload)
+    moveFile(backupTempPath, path & ".bak")
+    moveFile(tempPath, path)
+    implSyncCacheDirectory(path)
+  except CacheError:
+    discard tryRemoveFile(tempPath)
+    discard tryRemoveFile(backupTempPath)
+    raise
+  except CatchableError as error:
+    discard tryRemoveFile(tempPath)
+    discard tryRemoveFile(backupTempPath)
+    raise newException(CacheError,
+      "cannot persist cache: " & error.msg)
+
+## Atomically persists a complete cache snapshot under the writer lock.
+proc saveCache*(store: CacheStore) =
+  let path = getCacheFilePath()
+  let lockPath = implAcquireCacheLock(path)
+  try:
+    implSaveCacheUnlocked(store, path)
+  finally:
+    implReleaseCacheLock(lockPath)
+
 # ---------------------------------------------------------------------------
-# Public API — seen tracking
+# Public API — lookup and mutation
 # ---------------------------------------------------------------------------
 
-## Returns how many times a query has been seen within the
-## active expiry window.
-##
-## :param store: The loaded cache store.
-## :param queryHash: The query-text hash to inspect.
-## :param expiryDays: Maximum age in days (0 = never expire).
-## :returns: Execution count for this query (0 if not seen).
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let store = CacheStore(entries: @[], seen: @[],
-##                            nocache: @[])
-##     assert getSeenCount(store, "abc", 30) == 0
-proc getSeenCount*(
-  store: CacheStore,
-  queryHash: string,
-  expiryDays: int
-): int =
-  let now = epochTime().int64
-  for s in store.seen:
-    if s.queryHash == queryHash:
-      let safeCount = max(s.count, 1)
-      if expiryDays <= 0:
-        return safeCount
-      let maxAge = expiryDays.int64 * 86400'i64
-      if (now - s.timestamp) <= maxAge:
-        return safeCount
-      return 0
-  result = 0
-
-## Checks whether a query has been seen before (i.e. executed
-## at least once within the expiry window).
-##
-## :param store: The loaded cache store.
-## :param queryHash: The query-text hash to check.
-## :param expiryDays: Maximum age in days (0 = never expire).
-## :returns: true when the query has been seen.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let store = CacheStore(entries: @[], seen: @[],
-##                            nocache: @[])
-##     assert not isSeen(store, "abc", 30)
-proc isSeen*(
-  store: CacheStore,
-  queryHash: string,
-  expiryDays: int
-): bool =
-  result = getSeenCount(
-    store, queryHash, expiryDays) > 0
-
-## Records a query as seen.  Replaces an existing entry for
-## the same hash and enforces the maximum entry cap on the
-## seen list.
-##
-## :param store: The cache store to mutate.
-## :param queryHash: The query-text hash to record.
-## :param maxEntries: Maximum seen entries (0 = unlimited).
-## :param expiryDays: Expiry in days (0 = no purge).
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
-proc markSeen*(
+## Prunes invalid, expired, duplicate, and over-capacity entries in place.
+proc pruneCacheStore*(
   store: var CacheStore,
-  queryHash: string,
   maxEntries: int,
   expiryDays: int
 ) =
-  let now = epochTime().int64
-  let maxAge =
-    if expiryDays > 0:
-      expiryDays.int64 * 86400'i64
-    else:
-      0'i64
-
-  var kept: seq[SeenEntry] = @[]
-  var nextCount = 1
-
-  for s in store.seen:
-    let isExpired =
-      expiryDays > 0 and
-      ((now - s.timestamp) > maxAge)
-    if isExpired:
-      continue
-    if s.queryHash == queryHash:
-      nextCount = max(s.count, 1) + 1
-      continue
-    kept.add(s)
-
-  kept.add(SeenEntry(
-    queryHash: queryHash,
-    timestamp: now,
-    count: nextCount))
-
+  let nowEpoch = epochTime().int64
+  var kept: seq[CacheEntry] = @[]
+  for entry in store.entries:
+    if implValidEntry(entry, nowEpoch) and
+        implFreshTimestamp(entry.timestamp, nowEpoch, expiryDays):
+      kept.add(entry)
+  kept = implNormalizeEntries(kept)
   if maxEntries > 0 and kept.len > maxEntries:
     kept = kept[kept.len - maxEntries .. ^1]
+  store.entries = kept
 
-  store.seen = kept
-
-## Checks whether a query has been explicitly decided as
-## NOCACHE by a prior cache-decision LLM call.  A hit on this
-## predicate allows callers to skip the decision step.
-##
-## :param store: The loaded cache store.
-## :param queryHash: The query-text hash to check.
-## :param expiryDays: Maximum age in days (0 = never expire).
-## :returns: true when the query has a live NOCACHE decision.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let store = CacheStore(entries: @[], seen: @[],
-##                            nocache: @[])
-##     assert not isNoCacheDecided(store, "abc", 30)
-proc isNoCacheDecided*(
-  store: CacheStore,
-  queryHash: string,
-  expiryDays: int
-): bool =
-  let now = epochTime().int64
-  for n in store.nocache:
-    if n.queryHash == queryHash:
-      if expiryDays <= 0:
-        return true
-      let maxAge = expiryDays.int64 * 86400'i64
-      if (now - n.timestamp) <= maxAge:
-        return true
-      else:
-        return false
-  result = false
-
-## Records a query as explicitly decided to be not cached.
-## Replaces any existing entry for the same hash, enforces the
-## expiry window, and caps the list at maxEntries.
-##
-## :param store: The cache store to mutate.
-## :param queryHash: The query-text hash to record.
-## :param maxEntries: Maximum nocache entries (0 = unlimited).
-## :param expiryDays: Expiry in days (0 = no purge).
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
-proc markNoCacheDecided*(
-  store: var CacheStore,
-  queryHash: string,
-  maxEntries: int,
-  expiryDays: int
-) =
-  let now = epochTime().int64
-  var kept: seq[NoCacheEntry] = @[]
-  for n in store.nocache:
-    if n.queryHash != queryHash:
-      kept.add(n)
-  kept.add(NoCacheEntry(
-    queryHash: queryHash, timestamp: now))
-  if expiryDays > 0:
-    let maxAge = expiryDays.int64 * 86400'i64
-    var fresh: seq[NoCacheEntry] = @[]
-    for n in kept:
-      if (now - n.timestamp) <= maxAge:
-        fresh.add(n)
-    kept = fresh
-  if maxEntries > 0 and kept.len > maxEntries:
-    kept = kept[kept.len - maxEntries .. ^1]
-  store.nocache = kept
-
-# ---------------------------------------------------------------------------
-# Private helpers — seen/nocache removal
-# ---------------------------------------------------------------------------
-
-## Removes all seen entries matching a query hash.
-##
-## :param store: The cache store to mutate.
-## :param queryHash: The hash to remove.
-proc implRemoveSeen(
-  store: var CacheStore,
-  queryHash: string
-) =
-  var kept: seq[SeenEntry] = @[]
-  for s in store.seen:
-    if s.queryHash != queryHash:
-      kept.add(s)
-  store.seen = kept
-
-## Removes all nocache-decision entries matching a query hash.
-##
-## :param store: The cache store to mutate.
-## :param queryHash: The hash to remove.
-proc implRemoveNoCache(
-  store: var CacheStore,
-  queryHash: string
-) =
-  var kept: seq[NoCacheEntry] = @[]
-  for n in store.nocache:
-    if n.queryHash != queryHash:
-      kept.add(n)
-  store.nocache = kept
-
-# ---------------------------------------------------------------------------
-# Public API — lookup
-# ---------------------------------------------------------------------------
-
-## Looks up a cache hit using priority order:
-##   1. contextHash + cmResult  (most precise, fastest)
-##   2. globalHash  + cmResult
-##   3. contextHash + cmCommand (precise, re-execute)
-##   4. globalHash  + cmCommand
-##
-## Returns the first non-expired match.
-##
-## :param store: The loaded cache store.
-## :param globalHash: Hash without cwd.
-## :param contextHash: Hash including cwd.
-## :param expiryDays: Maximum age in days (0 = no expiry).
-## :returns: The matching entry, or none.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     import std/options
-##     let store = CacheStore(entries: @[], seen: @[])
-##     assert lookupCache(store, "a", "b", 30).isNone
+## Returns the newest non-expired match using context-result, global-result,
+## context-command, then global-command priority.
 proc lookupCache*(
   store: CacheStore,
   globalHash: string,
   contextHash: string,
   expiryDays: int
 ): Option[CacheEntry] =
-  let now = epochTime().int64
-  var ctxResult:  Option[CacheEntry] = none(CacheEntry)
-  var glbResult:  Option[CacheEntry] = none(CacheEntry)
-  var ctxCommand: Option[CacheEntry] = none(CacheEntry)
-  var glbCommand: Option[CacheEntry] = none(CacheEntry)
-  for e in store.entries:
-    if expiryDays > 0:
-      let maxAge = expiryDays.int64 * 86400'i64
-      if (now - e.timestamp) > maxAge:
-        continue
-    if e.scope == csContext and
-        e.hash == contextHash:
-      if e.cacheMode == cmResult and
-          ctxResult.isNone:
-        ctxResult = some(e)
-      elif e.cacheMode == cmCommand and
-          ctxCommand.isNone:
-        ctxCommand = some(e)
-    elif e.scope == csGlobal and
-        e.hash == globalHash:
-      if e.cacheMode == cmResult and
-          glbResult.isNone:
-        glbResult = some(e)
-      elif e.cacheMode == cmCommand and
-          glbCommand.isNone:
-        glbCommand = some(e)
-  if ctxResult.isSome:  return ctxResult
-  if glbResult.isSome:  return glbResult
-  if ctxCommand.isSome: return ctxCommand
-  if glbCommand.isSome: return glbCommand
+  let nowEpoch = epochTime().int64
+  var candidates: array[4, Option[CacheEntry]]
+  for entry in store.entries:
+    if not implFreshTimestamp(
+        entry.timestamp, nowEpoch, expiryDays):
+      continue
+    var slot = -1
+    if entry.scope == csContext and
+        entry.hash == contextHash:
+      slot = if entry.cacheMode == cmResult: 0 else: 2
+    elif entry.scope == csGlobal and
+        entry.hash == globalHash:
+      slot = if entry.cacheMode == cmResult: 1 else: 3
+    if slot >= 0 and
+        (candidates[slot].isNone or
+         entry.timestamp > candidates[slot].get.timestamp):
+      candidates[slot] = some(entry)
+  for candidate in candidates:
+    if candidate.isSome:
+      return candidate
   result = none(CacheEntry)
 
-# ---------------------------------------------------------------------------
-# Public API — mutation
-# ---------------------------------------------------------------------------
-
-## Adds or replaces a cache entry and enforces the maximum
-## entry cap and expiry on the entries list.
-##
-## :param store: The cache store to mutate.
-## :param entry: The new cache entry to insert.
-## :param maxEntries: Maximum entries (0 = unlimited).
-## :param expiryDays: Expiry in days (0 = no purge).
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Adds or replaces one identity and applies expiry and age-based caps.
 proc addCacheEntry*(
   store: var CacheStore,
   entry: CacheEntry,
   maxEntries: int,
   expiryDays: int
 ) =
+  let nowEpoch = epochTime().int64
+  if not implValidEntry(entry, nowEpoch):
+    raise newException(CacheError,
+      "refusing to persist an invalid cache entry")
   var kept: seq[CacheEntry] = @[]
-  for e in store.entries:
-    if e.hash != entry.hash or
-        e.scope != entry.scope:
-      kept.add(e)
+  for existing in store.entries:
+    if existing.hash != entry.hash or
+        existing.scope != entry.scope:
+      kept.add(existing)
   kept.add(entry)
-  if expiryDays > 0:
-    let now = epochTime().int64
-    let maxAge = expiryDays.int64 * 86400'i64
-    var fresh: seq[CacheEntry] = @[]
-    for e in kept:
-      if (now - e.timestamp) <= maxAge:
-        fresh.add(e)
-    kept = fresh
-  if maxEntries > 0 and kept.len > maxEntries:
-    kept.sort(implCmpTimestamp)
-    kept = kept[kept.len - maxEntries .. ^1]
   store.entries = kept
+  pruneCacheStore(store, maxEntries, expiryDays)
 
-## Removes all cache entries whose query matches the given
-## text (case-insensitive) and also removes the corresponding
-## seen entry.
-##
-## :param store: The cache store to mutate.
-## :param query: The query text to match against.
-## :returns: The number of cache entries removed.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Performs a lock-scoped read-modify-write so concurrent processes cannot
+## overwrite one another's cache entries.
+proc putCacheEntry*(
+  entry: CacheEntry,
+  maxEntries: int,
+  expiryDays: int
+) =
+  let path = getCacheFilePath()
+  let lockPath = implAcquireCacheLock(path)
+  try:
+    var store = loadCache()
+    addCacheEntry(store, entry, maxEntries, expiryDays)
+    implSaveCacheUnlocked(store, path)
+  finally:
+    implReleaseCacheLock(lockPath)
+
+## Removes all identities whose normalized query matches the given text.
 proc unsetCacheEntries*(
   store: var CacheStore,
   query: string
 ): int =
   let target = toLowerAscii(query.strip())
   var kept: seq[CacheEntry] = @[]
-  var removed = 0
-  for e in store.entries:
-    if toLowerAscii(e.query.strip()) == target:
-      removed += 1
+  for entry in store.entries:
+    if toLowerAscii(entry.query.strip()) == target:
+      result += 1
     else:
-      kept.add(e)
+      kept.add(entry)
   store.entries = kept
-  let qh = computeQueryHash(query)
-  implRemoveSeen(store, qh)
-  implRemoveNoCache(store, qh)
-  result = removed
 
 # ---------------------------------------------------------------------------
 # Public API — management commands
 # ---------------------------------------------------------------------------
 
-## Removes all entries and seen records from the cache file.
-##
-## :returns: The number of cache entries removed.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Atomically removes every cache entry.
 proc cleanCache*(): int =
-  var store = loadCache()
-  result = store.entries.len
-  store.entries = @[]
-  store.seen = @[]
-  store.nocache = @[]
-  saveCache(store)
+  let path = getCacheFilePath()
+  let lockPath = implAcquireCacheLock(path)
+  try:
+    let store = loadCache()
+    result = store.entries.len
+    implSaveCacheUnlocked(CacheStore(entries: @[]), path)
+  finally:
+    implReleaseCacheLock(lockPath)
 
-## Removes cache entries matching a query and persists.
-##
-## :param query: The query text to match.
-## :returns: The number of entries removed.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Atomically removes cache entries matching a query.
 proc unsetCache*(query: string): int =
-  var store = loadCache()
-  result = unsetCacheEntries(store, query)
-  saveCache(store)
+  let path = getCacheFilePath()
+  let lockPath = implAcquireCacheLock(path)
+  try:
+    var store = loadCache()
+    result = unsetCacheEntries(store, query)
+    implSaveCacheUnlocked(store, path)
+  finally:
+    implReleaseCacheLock(lockPath)
 
-## Prints a summary of the cache state including per-scope
-## and per-mode entry counts and seen tracker statistics.
-##
-## :param cacheEnabled: Whether cache is enabled.
-## :param expiryDays: Configured expiry in days.
-## :param maxEntries: Configured max entry count.
-## :param sk: The active output style.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Prints live, expiry-aware cache statistics.
 proc displayCacheInfo*(
   cacheEnabled: bool,
   expiryDays: int,
   maxEntries: int,
   sk: StyleKind = skSimp
 ) =
-  let store = loadCache()
+  var store = loadCache()
+  pruneCacheStore(store, maxEntries, expiryDays)
   let path = getCacheFilePath()
-  let status =
-    if cacheEnabled: "enabled" else: "disabled"
-  styleKeyValue(sk, "cache", status)
-  styleKeyValue(sk, "entries",
-    $store.entries.len)
-  var gcCount = 0
-  var grCount = 0
-  var ccCount = 0
-  var crCount = 0
-  for e in store.entries:
-    case e.scope
+  styleKeyValue(sk, "cache",
+    if cacheEnabled: "enabled" else: "disabled")
+  styleKeyValue(sk, "schema-version", $CACHE_SCHEMA_VERSION)
+  styleKeyValue(sk, "entries", $store.entries.len)
+  var globalCommands = 0
+  var globalResults = 0
+  var contextCommands = 0
+  var contextResults = 0
+  for entry in store.entries:
+    case entry.scope
     of csGlobal:
-      case e.cacheMode
-      of cmCommand: gcCount += 1
-      of cmResult:  grCount += 1
+      if entry.cacheMode == cmCommand:
+        globalCommands += 1
+      else:
+        globalResults += 1
     of csContext:
-      case e.cacheMode
-      of cmCommand: ccCount += 1
-      of cmResult:  crCount += 1
-  styleKeyValue(sk, "global-command entries",
-    $gcCount)
-  styleKeyValue(sk, "global-result entries",
-    $grCount)
-  styleKeyValue(sk, "context-command entries",
-    $ccCount)
-  styleKeyValue(sk, "context-result entries",
-    $crCount)
-  styleKeyValue(sk, "seen entries",
-    $store.seen.len)
-  styleKeyValue(sk, "nocache decisions",
-    $store.nocache.len)
-  styleKeyValue(sk, "max-entries",
-    formatIntOrDisable(maxEntries))
-  let expiryStr =
-    if expiryDays <= 0: "never"
-    else: fmt"{expiryDays} days"
-  styleKeyValue(sk, "expiry", expiryStr)
+      if entry.cacheMode == cmCommand:
+        contextCommands += 1
+      else:
+        contextResults += 1
+  styleKeyValue(sk, "global-command entries", $globalCommands)
+  styleKeyValue(sk, "global-result entries", $globalResults)
+  styleKeyValue(sk, "context-command entries", $contextCommands)
+  styleKeyValue(sk, "context-result entries", $contextResults)
+  styleKeyValue(sk, "max-entries", formatIntOrDisable(maxEntries))
+  styleKeyValue(sk, "expiry",
+    if expiryDays <= 0: "never" else: fmt"{expiryDays} days")
   styleKeyValue(sk, "file", path)
   if fileExists(path):
     let size = getFileSize(path)
-    let sizeStr =
+    let sizeText =
       if size < 1024:
         fmt"{size} B"
       elif size < 1024 * 1024:
         fmt"{size div 1024} KB"
       else:
         fmt"{size div (1024 * 1024)} MB"
-    styleKeyValue(sk, "file-size", sizeStr)
+    styleKeyValue(sk, "file-size", sizeText)
   else:
     styleKeyValue(sk, "file-size", "0 B")

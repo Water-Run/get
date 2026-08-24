@@ -3,7 +3,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-08-24
 ## :File: utils.nim
 ## :License: AGPL-3.0
 ##
@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "2.1"
+const APP_VERSION* = "3.0.0"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -140,8 +140,10 @@ type
 ## without circular imports.
 type
   LlmMessage* = object
-    role*: string     ## "system", "user", or "assistant".
-    content*: string  ## Message content text.
+    role*: string           ## System, user, assistant, or tool role.
+    content*: string        ## Message content text.
+    toolCallId*: string     ## Provider tool-call identifier for tool results.
+    toolCallsJson*: string  ## Raw validated assistant tool_calls JSON array.
 
 ## Describes the action the LLM chose in the agent loop
 ## protocol.  Used by the prompt parser and the main dispatcher

@@ -3,33 +3,35 @@
 """
 get_test.py -- Comprehensive end-to-end test suite for the `get` CLI.
 
-Sections (188 test cases total):
+Sections cover configuration, safety, cache, and live harness behavior.
 
     A  info_help          -- version / help / get get / intro / license
-    B  boolean_options    -- 8 booleans x {true,false,default}
-    C  integer_options    -- 7 integers x {pos,zero,disabled,default}
+    B  boolean_options    -- 7 booleans x {true,false,default}
+    C  integer_options    -- disableable values plus hard Harness limits
     D  string_options     -- url / model / system-prompt set/clear/reset
     E  command_pattern    -- default / disabled / custom / dangerous / reset
     F  key_and_config     -- key set/clear isolation, config --reset, fields
     G  invalid_inputs     -- malformed CLI arguments, missing values, types
     H  cache_log_mgmt     -- clean/display/unset for cache and log stores
-    I  instance_queries   -- real LLM queries with ground-truth validation
-    J  agent_queries      -- real tool-invoking agent queries
-    K  cache_behaviour    -- threshold / force / hit-timing / unset / expiry
+    I  direct_queries     -- direct-Harness ground-truth validation
+    J  harness_queries    -- auto-Harness tool invocation
+    K  cache_behaviour    -- deterministic store / hit / unset / expiry
     L  param_interactions -- model/timeout/max-rounds/system-prompt/pattern
     M  missing_config     -- key/url/model absence
     Z  teardown           -- full configuration restore and diff
 
 Usage:
-    python get_test.py --key <API_KEY> [--url URL] [--model MODEL]
+    GET_TEST_API_KEY=<API_KEY> python get_test.py [--url URL] [--model MODEL]
                        [--skip-llm] [--only A,B,...] [--stop-on-fail]
-                       [--verbose]
+                       [--live-config] [--verbose]
 
-Assumes `get` is installed and on $PATH.
+`--key` remains available, but the environment avoids process-argument leaks.
+Assumes `get` is installed and on $PATH. Configuration is isolated by default.
 """
 from __future__ import annotations
 
 import argparse
+import atexit
 import getpass
 import os
 import platform
@@ -57,14 +59,25 @@ BOOL_OPTIONS = [
     "hide-process", "system-proxy", "cache", "vivid",
 ]
 
-INT_OPTIONS_DEFAULTS = {
+DISABLABLE_INT_OPTIONS_DEFAULTS = {
     "timeout":                 "300",
     "max-token":               "20480",
-    "max-rounds":              "3",
     "cache-expiry":            "30",
     "cache-max-entries":       "1000",
-    "cache-trigger-threshold": "1",
     "log-max-entries":         "1000",
+}
+
+HARD_LIMIT_OPTIONS_DEFAULTS = {
+    "max-rounds":       "3",
+    "max-tool-calls":   "8",
+    "max-parallel":     "4",
+    "command-timeout":  "30",
+    "max-output-bytes": "1048576",
+}
+
+INT_OPTIONS_DEFAULTS = {
+    **DISABLABLE_INT_OPTIONS_DEFAULTS,
+    **HARD_LIMIT_OPTIONS_DEFAULTS,
 }
 
 STRING_OPTIONS = ["url", "model", "system-prompt"]
@@ -355,8 +368,28 @@ def log_entries_count() -> int:
 class ConfigManager:
     """Wrapper around `get set` / `get config` for test orchestration."""
     backup: Dict[str, str] = field(default_factory=dict)
+    key_existed: bool = False
+    key_bytes: bytes = b""
+    key_mode: int = 0
+
+    @staticmethod
+    def key_path() -> Path:
+        """Return the key-store path used by the current test environment."""
+
+        if os.name == "nt":
+            base = Path(os.environ.get(
+                "APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        else:
+            base = Path(os.environ.get(
+                "XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        return base / "get" / "key"
 
     def snapshot(self) -> None:
+        key_path = self.key_path()
+        self.key_existed = key_path.is_file()
+        if self.key_existed:
+            self.key_bytes = key_path.read_bytes()
+            self.key_mode = key_path.stat().st_mode & 0o777
         self.backup = dict(get_config())
         log_info(f"backed up {len(self.backup)} configuration options")
 
@@ -402,6 +435,19 @@ class ConfigManager:
             if now != v and k not in ("command-pattern", "system-prompt"):
                 diffs.append(f"{k}: was={v!r} now={now!r}")
         return diffs
+
+    def restore_key(self) -> bool:
+        """Restore the exact key-store bytes captured before the test run."""
+
+        key_path = self.key_path()
+        if self.key_existed:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_path.write_bytes(self.key_bytes)
+            if os.name != "nt":
+                key_path.chmod(self.key_mode)
+        elif key_path.exists():
+            key_path.unlink()
+        return key_path.is_file() == self.key_existed
 
 
 # =============================================================================
@@ -563,6 +609,8 @@ def _apply_test_preset(cm: ConfigManager, args) -> None:
     cm.set("vivid",          "false")
     cm.set("log",            "true")
     cm.set("cache",          "true")
+    cm.set("harness",        "auto")
+    cm.set("tool-protocol",  "auto")
 
 
 # =============================================================================
@@ -579,12 +627,19 @@ def section_info_help(stats: Stats) -> None:
     log_sub("A.1 version")
     r = run_get("version")
     a_exit_ok(stats, "A01 get version exits 0", r)
+    ver = r.out_plain.strip()
     if r.ok:
-        ver = r.out_plain.strip()
         a_regex(stats, "A02 version matches X.Y(.Z)", ver,
                 r"\d+\.\d+")
         a_not_contains(stats, "A03 version has no stack trace",
                        ver, "traceback", case_insensitive=True)
+    aliases = [run_get("--version"), run_get("-V")]
+    if all(item.ok and item.out_plain.strip() == ver for item in aliases):
+        stats.pass_("A25 --version and -V match get version")
+    else:
+        stats.fail(
+            "A25 version aliases",
+            f"exits={[item.returncode for item in aliases]}")
 
     # A-2 help variants
     log_sub("A.2 help / --help / -h")
@@ -668,10 +723,10 @@ def section_boolean_options(stats: Stats) -> None:
 
 def section_integer_options(stats: Stats) -> None:
     stats.section = "C"
-    log_hdr("SECTION C -- integer options (int / disabled / default)")
+    log_hdr("SECTION C -- integer options and hard limits")
     cm = ConfigManager()
     idx = 1
-    for opt, default_val in INT_OPTIONS_DEFAULTS.items():
+    for opt, default_val in DISABLABLE_INT_OPTIONS_DEFAULTS.items():
         log_sub(f"C.{opt}")
         prev = get_config_field(opt)
 
@@ -693,6 +748,31 @@ def section_integer_options(stats: Stats) -> None:
         idx += 1
 
         # restore user value
+        if prev and prev != default_val:
+            cm.set(opt, prev)
+
+    for opt, default_val in HARD_LIMIT_OPTIONS_DEFAULTS.items():
+        log_sub(f"C.{opt}")
+        prev = get_config_field(opt)
+        test_value = "12" if opt == "max-rounds" else "42"
+
+        cm.set(opt, test_value)
+        a_cfg_eq(stats, f"C{idx:02d} set {opt}={test_value}",
+                 opt, test_value)
+        idx += 1
+
+        rejected = not cm.set(opt, "false")
+        if rejected and get_config_field(opt) == test_value:
+            stats.pass_(f"C{idx:02d} {opt} rejects disabled hard limit")
+        else:
+            stats.fail(f"C{idx:02d} {opt} accepted disabled hard limit")
+        idx += 1
+
+        cm.clear(opt)
+        a_cfg_eq(stats, f"C{idx:02d} reset {opt} default",
+                 opt, default_val)
+        idx += 1
+
         if prev and prev != default_val:
             cm.set(opt, prev)
 
@@ -852,8 +932,8 @@ def section_key_and_config(stats: Stats) -> None:
     # F.4 config shows many fields
     log_sub("F.2 config view")
     cfg = get_config()
-    a_eq(stats, "F04 config has >= 15 fields",
-         len(cfg) >= 15, True, detail=f"count={len(cfg)}")
+    a_eq(stats, "F04 config has >= 24 fields",
+         len(cfg) >= 24, True, detail=f"count={len(cfg)}")
 
     # F.5-F.10 each known key present
     for idx, opt in enumerate(
@@ -878,6 +958,19 @@ def section_key_and_config(stats: Stats) -> None:
     # F.14 unknown --xxx
     r = run_get("config", "--totally-unknown-opt")
     a_exit_nonzero(stats, "F14 unknown config flag fails", r)
+
+    for idx, value in enumerate(
+            ["auto", "direct", "loop", "parallel"], start=15):
+        cm.set("harness", value)
+        a_cfg_eq(stats, f"F{idx:02d} harness={value}",
+                 "harness", value)
+    for idx, value in enumerate(
+            ["auto", "native", "legacy"], start=19):
+        cm.set("tool-protocol", value)
+        a_cfg_eq(stats, f"F{idx:02d} tool-protocol={value}",
+                 "tool-protocol", value)
+    cm.set("harness", "auto")
+    cm.set("tool-protocol", "auto")
 
     # reapply test credentials since reset wiped them
     _apply_test_preset(cm, ARGS)
@@ -930,6 +1023,16 @@ def section_invalid_inputs(stats: Stats) -> None:
          ["get", "--no-such-meta"]),
         ("G18 integer option 'true' not allowed",
          ["set", "timeout", "true"]),
+        ("G20 unknown harness rejected",
+         ["set", "harness", "rough"]),
+        ("G21 unknown tool protocol rejected",
+         ["set", "tool-protocol", "magic"]),
+        ("G22 disabled hard limit rejected",
+         ["set", "max-rounds", "false"]),
+        ("G23 zero-valued timeout rejected",
+         ["set", "timeout", "0"]),
+        ("G24 zero-valued query timeout rejected",
+         ["what is two plus two", "--timeout", "0"]),
     ]
     for name, argv in cases:
         r = run_get(*argv, timeout=15)
@@ -1018,13 +1121,12 @@ def section_cache_log_mgmt(stats: Stats) -> None:
 
 # =============================================================================
 # =============================================================================
-#                   S E C T I O N   I :   INSTANCE LLM QUERIES
+#                  S E C T I O N   I :   DIRECT LLM QUERIES
 # =============================================================================
 # =============================================================================
 #
-# Each test runs a real query in *instance* mode (single-shot, no tools) and
-# validates the response against locally-computed ground truth or structural
-# expectations.
+# Each test runs a real query through the direct Harness strategy and validates
+# the response against locally computed ground truth or structural expectations.
 
 def _llm_precondition(stats: Stats, prefix: str,
                       count: int) -> bool:
@@ -1048,12 +1150,12 @@ def _run_query(query: str, *flags: str,
     return run_get(query, *args, timeout=timeout)
 
 
-# ---- instance-mode ground-truth query table -------------------------------
+# ---- direct-Harness ground-truth query table ------------------------------
 #
 # (name, query_text, validator(plain_output) -> bool, notes)
 
-def _instance_query_table() -> List[Tuple[str, str,
-                                          Callable[[str], bool], str]]:
+def _direct_query_table() -> List[Tuple[str, str,
+                                        Callable[[str], bool], str]]:
     f = FACTS
     host = f.short_host
     user = f.username
@@ -1097,19 +1199,22 @@ def _instance_query_table() -> List[Tuple[str, str,
          lambda o: year in o,
          "current year"),
         ("python_version",
-         "reply with ONLY the major.minor version of the system "
-         "Python 3 interpreter (e.g. 3.12)",
+         "Use exactly the read-only command `python3 --version` (never -c), "
+         "then return its version.",
          lambda o: pyv in o,
          "matches sys.version_info"),
         ("ip_format",
-         "reply with ONLY the primary local IPv4 address of this machine "
-         "in dotted-decimal form",
+         "Use a read-only system command to discover this machine's primary "
+         "local IPv4 address (`hostname -I` on Linux, "
+         "`ipconfig getifaddr en0` on macOS, or `ipconfig` on Windows). "
+         "Return ONLY the dotted-decimal IPv4 address.",
          lambda o: re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", o)
          is not None,
          "IPv4 regex match"),
         ("disk_listing_exists",
-         "list root-level directories under /  (or C:\\ on windows). "
-         "reply with at least three entries separated by newlines or spaces",
+         "Use the read-only command `ls -1 /` on Unix or `dir /b C:\\` "
+         "on Windows. Return at least three directory names, not the root "
+         "path itself.",
          lambda o: any(
              tok in o for tok in
              ("/bin", "/etc", "/usr", "/var",
@@ -1127,8 +1232,8 @@ def _instance_query_table() -> List[Tuple[str, str,
          lambda o: "56088" in o,
          "123*456=56088"),
         ("string_len",
-         "how many characters are in the word 'encyclopedia'. "
-         "reply with ONLY the number.",
+         "Use the read-only command `printf %s encyclopedia | wc -c` and "
+         "return only its numeric output.",
          lambda o: "12" in o,
          "len('encyclopedia')==12"),
         ("uppercase",
@@ -1142,8 +1247,8 @@ def _instance_query_table() -> List[Tuple[str, str,
          lambda o: "314" in o,
          "json parse"),
         ("yes_no_file",
-         "is /etc/hostname a reasonable path for a Linux system "
-         "file that stores the hostname? answer yes or no only.",
+         "Without calling a tool: is /etc/hostname a reasonable path for a "
+         "Linux hostname file? Answer yes or no only.",
          lambda o: "yes" in o.lower(),
          "yes/no factual"),
         ("short_poem",
@@ -1178,15 +1283,15 @@ def _instance_query_table() -> List[Tuple[str, str,
     ]
 
 
-def section_instance_queries(stats: Stats) -> None:
+def section_direct_queries(stats: Stats) -> None:
     stats.section = "I"
-    log_hdr("SECTION I -- instance-mode real LLM queries (ground truth)")
-    table = _instance_query_table()
+    log_hdr("SECTION I -- direct-Harness real LLM queries (ground truth)")
+    table = _direct_query_table()
     if not _llm_precondition(stats, "I", len(table) + 8):
         return
 
     cm = ConfigManager()
-    cm.set("instance", "true")
+    cm.set("harness", "direct")
     cm.set("double-check", "false")
     cm.set("manual-confirm", "false")
     cm.set("hide-process", "true")
@@ -1281,15 +1386,15 @@ def section_instance_queries(stats: Stats) -> None:
 
 # =============================================================================
 # =============================================================================
-#                    S E C T I O N   J :   AGENT LLM QUERIES
+#                  S E C T I O N   J :   HARNESS TOOL QUERIES
 # =============================================================================
 # =============================================================================
 #
-# Agent mode -- the tool uses shell commands to produce the answer.
+# Auto Harness -- the model uses bounded read-only tools when needed.
 
-def _agent_query_table(scratch: Path
-                       ) -> List[Tuple[str, str,
-                                       Callable[[str], bool], str]]:
+def _harness_query_table(scratch: Path
+                         ) -> List[Tuple[str, str,
+                                         Callable[[str], bool], str]]:
     f = FACTS
     return [
         ("uname",
@@ -1297,52 +1402,52 @@ def _agent_query_table(scratch: Path
          "include the os name in the reply.",
          lambda o: f.platform_name in o.lower()
          or ("darwin" in o.lower() and f.platform_name == "darwin"),
-         "agent invokes `uname` or equivalent"),
+         "Harness invokes `uname` or equivalent"),
         ("hostname_tool",
          "report the local hostname.  include the hostname string "
          "in the reply.",
          lambda o: f.hostname in o or f.short_host in o,
-         "agent invokes `hostname`"),
+         "Harness invokes `hostname`"),
         ("current_user",
          "who am i? report the current unix user. include the "
          "username in the reply.",
          lambda o: f.username in o,
-         "agent invokes `whoami` or `id`"),
+         "Harness invokes `whoami` or `id`"),
         ("pwd",
          "print the current working directory of this shell session. "
          "include the path in the reply.",
          lambda o: f.cwd in o or f.cwd_basename in o,
-         "agent invokes `pwd`"),
+         "Harness invokes `pwd`"),
         ("list_scratch",
          f"list the files directly inside the directory "
          f"'{scratch}'. include the filename 'alpha.txt' in the reply.",
          lambda o: "alpha.txt" in o,
-         "agent invokes `ls <path>`"),
+         "Harness invokes `ls <path>`"),
         ("count_lines",
          f"how many lines are in the file '{scratch / 'numbers.txt'}'? "
          f"reply with the number prominently.",
          lambda o: "10" in o,
-         "agent invokes `wc -l`"),
+         "Harness invokes `wc -l`"),
         ("grep_content",
          f"find which line in '{scratch / 'words.txt'}' contains "
          f"the word 'needle'. include the word 'needle' in the reply.",
          lambda o: "needle" in o.lower(),
-         "agent invokes `grep`"),
+         "Harness invokes `grep`"),
         ("first_line",
          f"what is the first line of '{scratch / 'alpha.txt'}'? "
          f"include its text prominently.",
          lambda o: "first-line-marker-42" in o,
-         "agent invokes `head -n 1` or `sed`"),
+         "Harness invokes `head -n 1` or `sed`"),
         ("file_size",
          f"how many bytes does '{scratch / 'alpha.txt'}' occupy "
          f"on disk? include the number prominently.",
          lambda o: re.search(r"\b\d{1,6}\b", o) is not None,
-         "agent invokes `stat` or `wc -c`"),
-        ("python_version_agent",
+         "Harness invokes `stat` or `wc -c`"),
+        ("python_version_tool",
          "what is the installed python 3 version on this system? "
          "include the version number in the reply.",
          lambda o: f.py_major_minor in o or f.py_major in o,
-         "agent invokes `python3 --version`"),
+         "Harness invokes `python3 --version`"),
     ]
 
 
@@ -1364,19 +1469,19 @@ def _build_scratch() -> Path:
     return tmp
 
 
-def section_agent_queries(stats: Stats) -> None:
+def section_harness_queries(stats: Stats) -> None:
     stats.section = "J"
-    log_hdr("SECTION J -- agent-mode queries (tool invocation)")
+    log_hdr("SECTION J -- auto-Harness queries (tool invocation)")
     scratch = _build_scratch()
     log_info(f"scratch dir: {scratch}")
 
-    table = _agent_query_table(scratch)
+    table = _harness_query_table(scratch)
     if not _llm_precondition(stats, "J", len(table) + 6):
         shutil.rmtree(scratch, ignore_errors=True)
         return
 
     cm = ConfigManager()
-    cm.set("instance", "false")
+    cm.set("harness", "auto")
     cm.set("double-check", "false")
     cm.set("manual-confirm", "false")
     cm.set("hide-process", "true")
@@ -1521,7 +1626,7 @@ def section_cache_behaviour(stats: Stats) -> None:
         return
 
     cm = ConfigManager()
-    cm.set("instance", "true")
+    cm.set("harness", "direct")
     cm.set("double-check", "false")
     cm.set("manual-confirm", "false")
     cm.set("hide-process", "true")
@@ -1551,74 +1656,83 @@ def section_cache_behaviour(stats: Stats) -> None:
     a_eq(stats, "K03 entries == 0 after clean",
          cache_entries_count(), 0)
 
-    # K.3 cache-trigger-threshold=1: first query does NOT create entry
-    log_sub("K.3 threshold=1 first-run behaviour")
-    cm.set("cache-trigger-threshold", "1")
+    # K.3 plain text is not stored implicitly, while a successful one-command
+    # result is stored deterministically without a classifier call.
+    log_sub("K.3 deterministic text-or-command storage")
     q1 = _unique_query("k3")
     n0 = cache_entries_count()
     r1 = _run_query(q1, timeout=120)
-    a_exit_ok(stats, "K04 first query with threshold=1 exit 0", r1)
+    a_exit_ok(stats, "K04 first unforced text query exits 0", r1)
     n1 = cache_entries_count()
-    a_eq(stats, "K05 entries unchanged after first query",
-         n1, n0)
-
-    # K.4 second identical query may trigger classification
-    log_sub("K.4 threshold=1 second-run classification")
-    r2 = _run_query(q1, timeout=120)
-    a_exit_ok(stats, "K06 second identical query exit 0", r2)
-    n2 = cache_entries_count()
-    if n2 >= n1:
-        stats.pass_(f"K07 entries {n1} -> {n2} (may have classified)")
+    if n1 in (n0, n0 + 1):
+        stats.pass_(
+            "K05 unforced result follows deterministic storage",
+            detail=f"entries={n1} (text=0, single command=1)")
     else:
-        stats.fail("K07 entries decreased?", f"{n1} -> {n2}")
+        stats.fail("K05 deterministic first-run storage",
+                   f"entries={n0}->{n1}")
 
-    # K.5 threshold=0 classifies immediately
-    log_sub("K.5 threshold=0 immediate classification")
+    # K.4 repeating can create one command entry if the model switches from a
+    # text answer to a shell call, but it cannot create classifier entries.
+    log_sub("K.4 repeated query creates at most one command entry")
+    r2 = _run_query(q1, timeout=120)
+    a_exit_ok(stats, "K06 repeated unforced query exits 0", r2)
+    n2 = cache_entries_count()
+    if n1 <= n2 <= n0 + 1:
+        stats.pass_("K07 no classifier-created entries",
+                    detail=f"entries={n0}->{n1}->{n2}")
+    else:
+        stats.fail("K07 deterministic repeat storage",
+                   f"entries={n0}->{n1}->{n2}")
+
+    # K.5 a clean store follows the same deterministic rule.
+    log_sub("K.5 deterministic behavior after clean")
     run_get("cache", "--clean")
-    cm.set("cache-trigger-threshold", "0")
     q5 = _unique_query("k5")
     r = _run_query(q5, timeout=120)
-    a_exit_ok(stats, "K08 threshold=0 first query exit 0", r)
+    a_exit_ok(stats, "K08 clean-store query exits 0", r)
     n = cache_entries_count()
-    if n >= 0:
-        stats.pass_(f"K09 threshold=0 after first query entries={n}")
+    if n in (0, 1):
+        stats.pass_("K09 clean-store write remains deterministic",
+                    detail=f"entries={n} (text=0, command=1)")
     else:
-        stats.fail("K09 cache entries unreadable", "")
+        stats.fail("K09 clean-store write", f"entries={n}")
 
-    # K.6 threshold=3 requires three runs before classification
-    log_sub("K.6 threshold=3 delayed classification")
+    # K.6 multiple runs never trigger a hidden classifier call.
+    log_sub("K.6 repeated queries never invoke a hidden classifier")
     run_get("cache", "--clean")
-    cm.set("cache-trigger-threshold", "3")
     q6 = _unique_query("k6")
     entries_trace: List[int] = []
     for i in range(3):
         r = _run_query(q6, timeout=120)
         if not r.ok:
-            stats.fail(f"K10 threshold=3 run {i + 1} failed",
+            stats.fail(f"K10 compatibility run {i + 1} failed",
                        f"exit={r.returncode}")
             entries_trace.append(-1)
             continue
         entries_trace.append(cache_entries_count())
-    if all(e >= 0 for e in entries_trace):
-        stats.pass_(f"K10 threshold=3 three runs completed",
-                    detail=f"entries trace = {entries_trace}")
-    # K.11 after threshold+1 runs, classification is possible
+    trace_is_valid = all(entry in (0, 1) for entry in entries_trace) \
+        and entries_trace == sorted(entries_trace)
+    if trace_is_valid:
+        stats.pass_("K10 repeated queries create at most one entry",
+                    detail=f"entries trace={entries_trace}")
+    else:
+        stats.fail("K10 deterministic repeated storage",
+                   f"entries trace={entries_trace}")
     r = _run_query(q6, timeout=120)
-    a_exit_ok(stats, "K11 threshold=3 fourth run exit 0", r)
+    a_exit_ok(stats, "K11 fourth unforced query exits 0", r)
 
-    cm.clear("cache-trigger-threshold")  # back to default
-
-    # K.7 --cache forces immediate classification
-    log_sub("K.7 --cache flag forces classification")
+    # K.7 --cache explicitly stores a text response immediately.
+    log_sub("K.7 --cache explicitly stores text")
     run_get("cache", "--clean")
     q7 = _unique_query("k7")
     r = _run_query(q7, "--cache", timeout=120)
     a_exit_ok(stats, "K12 --cache flag first run exit 0", r)
     n = cache_entries_count()
-    if n >= 0:
+    if n > 0:
         stats.pass_(f"K13 --cache first-run entries={n}")
     else:
-        stats.fail("K13 --cache first-run", "entries unreadable")
+        stats.fail("K13 --cache first-run", f"entries={n}")
 
     # K.8 --no-cache bypasses cache completely
     log_sub("K.8 --no-cache bypass")
@@ -1631,26 +1745,30 @@ def section_cache_behaviour(stats: Stats) -> None:
         stats.fail("K14 --no-cache repeats",
                    f"exits={r1.returncode},{r2.returncode}")
 
-    # K.9 cache-hit timing: if second run is hit, it should be fast
-    log_sub("K.9 cache-hit timing")
+    # K.9 an explicitly stored text result is reused exactly.
+    log_sub("K.9 deterministic text cache hit")
     run_get("cache", "--clean")
     q9 = _unique_query("k9")
     r_first = _run_query(q9, "--cache", timeout=180)
+    first_entries = cache_entries_count()
     r_secnd = _run_query(q9, "--cache", timeout=180)
+    second_entries = cache_entries_count()
     if r_first.ok and r_secnd.ok:
         stats.pass_(
             "K15 two runs with --cache succeeded",
             detail=f"1st={r_first.elapsed:.1f}s "
             f"2nd={r_secnd.elapsed:.1f}s")
-        # Only flag speed-up if second is noticeably faster
-        if r_secnd.elapsed <= r_first.elapsed * 0.5 \
-                or r_secnd.elapsed < 1.5:
-            stats.pass_("K16 second run appears cache-accelerated",
-                        detail=f"{r_secnd.elapsed:.1f}s")
+        if first_entries > 0 \
+                and second_entries == first_entries \
+                and r_secnd.out_plain == r_first.out_plain:
+            stats.pass_("K16 second run reused the exact stored result",
+                        detail=f"entries={second_entries} "
+                        f"elapsed={r_secnd.elapsed:.1f}s")
         else:
-            stats.pass_("K16 second run not faster — likely re-run path",
-                        detail=f"{r_secnd.elapsed:.1f}s "
-                        f"(acceptable; classifier choice)")
+            stats.fail(
+                "K16 deterministic cache hit",
+                f"entries={first_entries}->{second_entries} "
+                f"same_output={r_secnd.out_plain == r_first.out_plain}")
     else:
         stats.fail("K15 cache-hit runs",
                    f"exits={r_first.returncode},{r_secnd.returncode}")
@@ -1684,7 +1802,6 @@ def section_cache_behaviour(stats: Stats) -> None:
     # K.12 cache-max-entries limit enforced by churning queries
     log_sub("K.12 cache-max-entries enforcement")
     cm.set("cache-max-entries", "3")
-    cm.set("cache-trigger-threshold", "0")
     for i in range(6):
         _run_query(_unique_query(f"kcap{i}"),
                    "--cache", timeout=120)
@@ -1695,7 +1812,6 @@ def section_cache_behaviour(stats: Stats) -> None:
     else:
         stats.fail("K21 cache-max-entries=3", f"entries={n_final}")
     cm.clear("cache-max-entries")
-    cm.clear("cache-trigger-threshold")
 
     # K.13 cache expiry: set expiry=1 day — we can only assert the
     # field roundtrip; true expiry is time-based.
@@ -1750,7 +1866,7 @@ def section_param_interactions(stats: Stats) -> None:
         return
 
     cm = ConfigManager()
-    cm.set("instance", "true")
+    cm.set("harness", "direct")
     cm.set("double-check", "false")
     cm.set("manual-confirm", "false")
     cm.set("hide-process", "true")
@@ -1860,31 +1976,31 @@ def section_param_interactions(stats: Stats) -> None:
     a_exit_ok(stats, "L11 set manual-confirm=false", r)
     a_cfg_eq(stats, "L12 manual-confirm = false", "manual-confirm", "false")
 
-    # L.8 --instance / --no-instance flip runtime mode
-    log_sub("L.7 instance / agent runtime flip")
-    cm.set("instance", "false")   # make global = agent
+    # L.8 legacy instance flags remain per-call compatibility aliases.
+    log_sub("L.7 instance compatibility alias")
+    cm.set("instance", "false")
     r = _run_query("reply with 'instance-forced'",
                    "--no-cache", "--instance", timeout=120)
-    a_exit_ok(stats, "L13 --instance forces instance at runtime", r)
+    a_exit_ok(stats, "L13 --instance forces direct Harness", r)
     still = get_config_field("instance")
     a_eq(stats, "L14 --instance flag does not persist to config",
          still, "false")
-    cm.set("instance", "true")    # restore
+    cm.set("harness", "direct")
 
-    # L.9 max-rounds=0 — agent mode expected to error or refuse;
-    # we accept either behaviour as long as it doesn't hang.
-    log_sub("L.8 max-rounds=0 edge")
+    # L.9 a one-turn model budget is valid and bounded.
+    log_sub("L.8 max-rounds=1 budget")
     prev_mr = get_config_field("max-rounds")
-    cm.set("instance", "false")
-    cm.set("max-rounds", "0")
-    r = _run_query("reply with the word 'mr0'", "--no-cache", timeout=60)
-    if r.returncode in (0, 1, 2) and r.elapsed < 60:
-        stats.pass_(f"L15 max-rounds=0 finished "
-                    f"(exit={r.returncode}, {r.elapsed:.1f}s)")
+    cm.set("harness", "auto")
+    cm.set("max-rounds", "1")
+    r = _run_query("reply with the word 'mr1'", "--no-cache", timeout=120)
+    if r.returncode in (0, 1) and r.elapsed < 120:
+        stats.pass_("L15 max-rounds=1 bounded query",
+                    detail=f"exit={r.returncode} elapsed={r.elapsed:.1f}s")
     else:
-        stats.fail("L15 max-rounds=0", f"exit={r.returncode}")
+        stats.fail("L15 max-rounds=1 bounded query",
+                   f"exit={r.returncode} elapsed={r.elapsed:.1f}s")
     cm.set("max-rounds", prev_mr)
-    cm.set("instance", "true")
+    cm.set("harness", "direct")
 
     # L.10 max-token very small (may truncate but should not crash)
     log_sub("L.9 max-token very small")
@@ -2000,20 +2116,28 @@ def section_missing_config(stats: Stats) -> None:
 def section_teardown(stats: Stats, cm: ConfigManager) -> None:
     stats.section = "Z"
     log_hdr("SECTION Z -- teardown / restore original configuration")
-    diffs = cm.restore()
-    if not diffs:
-        stats.pass_("Z01 original configuration fully restored")
-    else:
-        stats.fail("Z01 configuration differences after restore",
-                   "; ".join(diffs[:5]))
+    restored = False
+    try:
+        diffs = cm.restore()
+        if not diffs:
+            stats.pass_("Z01 original configuration fully restored")
+        else:
+            stats.fail("Z01 configuration differences after restore",
+                       "; ".join(diffs[:5]))
 
-    # Z.2 clear test key (cannot recover user's original, encrypted)
-    run_get("set", "key")
-    v = get_config_field("key")
-    if "not set" in v.lower() or "unset" in v.lower():
-        stats.pass_("Z02 test API key cleared from storage")
+        # Z.2 prove that the test key can be removed before restoration.
+        run_get("set", "key")
+        v = get_config_field("key")
+        if "not set" in v.lower() or "unset" in v.lower():
+            stats.pass_("Z02 test API key cleared from storage")
+        else:
+            stats.fail("Z02 clear key", f"shown={v!r}")
+    finally:
+        restored = cm.restore_key()
+    if restored:
+        stats.pass_("Z03 original key store restored")
     else:
-        stats.fail("Z02 clear key", f"shown={v!r}")
+        stats.fail("Z03 restore key store")
 
 
 # =============================================================================
@@ -2029,8 +2153,8 @@ SECTIONS = [
     ("F", "key_and_config",     section_key_and_config,    False),
     ("G", "invalid_inputs",     section_invalid_inputs,    False),
     ("H", "cache_log_mgmt",     section_cache_log_mgmt,    False),
-    ("I", "instance_queries",   section_instance_queries,  True),
-    ("J", "agent_queries",      section_agent_queries,     True),
+    ("I", "direct_queries",     section_direct_queries,     True),
+    ("J", "harness_queries",    section_harness_queries,    True),
     ("K", "cache_behaviour",    section_cache_behaviour,   True),
     ("L", "param_interactions", section_param_interactions, True),
     ("M", "missing_config",     section_missing_config,    True),
@@ -2051,19 +2175,26 @@ def summarize(stats: Stats) -> None:
         for sec, name, reason in stats.failures:
             print(f"  - [{sec}] {_c(C.BLD, name)}: {reason}")
     print()
-    print(_c(C.YEL,
-             "NOTE: your original encrypted API key could NOT be "
-             "recovered by this suite (the key store is write-only)."))
-    print(_c(C.YEL,
-             "      please re-apply it with:"))
-    print(_c(C.BLD, "          get set key <your-original-key>\n"))
+    if not ARGS.live_config:
+        print(_c(C.DIM,
+                 "Configuration and key tests used an isolated temporary "
+                 "directory.\n"))
+    else:
+        print(_c(C.DIM,
+                 "The active key-store file was backed up and restored "
+                 "byte-for-byte.\n"))
 
 
 def parse_args() -> Any:
     p = argparse.ArgumentParser(
         description="Comprehensive test suite for the `get` CLI.")
-    p.add_argument("--key", required=True,
-                   help="API key to use for LLM-backed tests")
+    environment_key = os.environ.get("GET_TEST_API_KEY", "")
+    p.add_argument(
+        "--key",
+        default=environment_key,
+        required=not bool(environment_key),
+        help="API key (prefer GET_TEST_API_KEY to avoid argv exposure)",
+    )
     p.add_argument("--url", default=None,
                    help="LLM endpoint URL (uses current config default)")
     p.add_argument("--model", default=None,
@@ -2075,6 +2206,9 @@ def parse_args() -> Any:
                         "to run (e.g. 'A,B,K')")
     p.add_argument("--stop-on-fail", action="store_true",
                    help="stop on first failure")
+    p.add_argument("--live-config", action="store_true",
+                   help="test active user configuration (key file is backed "
+                        "up and restored)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="echo every `get` invocation")
     return p.parse_args()
@@ -2086,6 +2220,13 @@ def main() -> None:
     VERBOSE = ARGS.verbose
     STOP_ON_FAIL = ARGS.stop_on_fail
 
+    if not ARGS.live_config:
+        config_home = tempfile.mkdtemp(prefix="get_test_config_")
+        atexit.register(shutil.rmtree, config_home, ignore_errors=True)
+        os.environ["XDG_CONFIG_HOME"] = config_home
+        if os.name == "nt":
+            os.environ["APPDATA"] = config_home
+
     only = {s.strip().upper() for s in ARGS.only.split(",")
             if s.strip()} if ARGS.only else None
 
@@ -2095,6 +2236,7 @@ def main() -> None:
     log_info(f"key         : ****")
     log_info(f"skip-llm    : {ARGS.skip_llm}")
     log_info(f"stop-on-fail: {ARGS.stop_on_fail}")
+    log_info(f"live-config : {ARGS.live_config}")
     log_info(f"only        : "
              f"{','.join(sorted(only)) if only else '(all sections)'}")
     log_info(f"host facts  : host={FACTS.short_host} "

@@ -6,6 +6,7 @@ update at: 2026-04-19
 ]#
 
 switch("define", "ssl")
+switch("threads", "on")
 
 when defined(release):
   switch("opt", "size")

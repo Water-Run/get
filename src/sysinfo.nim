@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-08-24
 ## :File: sysinfo.nim
 ## :License: AGPL-3.0
 ##
@@ -11,12 +11,12 @@
 ## hostname, and available command-line tools detected on PATH.
 ## The gathered snapshot is included in LLM prompts so the model
 ## can generate context-aware commands.  It also provides a
-## startup environment check that verifies Windows 10+ /
+## diagnostic environment check that verifies Windows 10+ /
 ## macOS 12+ / Linux 6.0+ on a 64-bit platform.
 
 {.experimental: "strictFuncs".}
 
-import std/[os, osproc, strformat, strutils]
+import std/[os, osproc, strformat, strutils, times]
 
 # ---------------------------------------------------------------------------
 # Compile-time architecture gate
@@ -39,6 +39,7 @@ type
     hostname*: string       ## Machine hostname.
     username*: string       ## Current username.
     cwd*: string            ## Current working directory.
+    localDate*: string      ## Local calendar date in YYYY-MM-DD form.
     shell*: string          ## Configured shell name.
     shellVersion*: string   ## Shell --version first line.
     availableTools*: seq[string]  ## Tools found on PATH.
@@ -69,7 +70,7 @@ const PROBE_TOOLS* = [
 const PROBE_TOOL_HINTS* = [
   ("git",     "version-control inspection (log, status, diff, show)"),
   ("curl",    "HTTP GET / file fetch — use -sS, never -o/-O"),
-  ("wget",    "HTTP downloader — read-only by default"),
+  ("wget",    "HTTP downloader that normally writes a file; prefer curl"),
   ("python3", "Python 3 interpreter for ad-hoc scripts"),
   ("python",  "Python 2/3 interpreter for ad-hoc scripts"),
   ("node",    "JavaScript runtime for ad-hoc scripts"),
@@ -133,6 +134,32 @@ proc implToolAvailable(tool: string): bool =
 # Public API
 # ---------------------------------------------------------------------------
 
+## Collects only environment data available without starting subprocesses.
+##
+## This is the v3 hot-path collector. Shell version and executable discovery
+## remain lazy, avoiding dozens of serial PATH probes before a model request.
+##
+## :param shell: Configured shell name.
+## :returns: A lightweight SysInfo snapshot.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     let info = collectFastSysInfo("bash")
+##     assert info.os.len > 0
+##     assert info.availableTools.len == 0
+proc collectFastSysInfo*(shell: string): SysInfo =
+  result = SysInfo(
+    os: hostOS,
+    arch: hostCPU,
+    hostname: getEnv("HOSTNAME", getEnv("COMPUTERNAME", "")),
+    username: getEnv("USER", getEnv("USERNAME", "")),
+    cwd: getCurrentDir(),
+    localDate: now().format("yyyy-MM-dd"),
+    shell: shell,
+    shellVersion: "",
+    availableTools: @[]
+  )
+
 ## Collects a snapshot of the current system environment.
 ##
 ## :param shell: The configured shell name.
@@ -149,6 +176,7 @@ proc collectSysInfo*(shell: string): SysInfo =
     hostname: "",
     username: "",
     cwd: getCurrentDir(),
+    localDate: now().format("yyyy-MM-dd"),
     shell: shell,
     shellVersion: "",
     availableTools: @[]
@@ -195,6 +223,8 @@ func formatSysInfo*(info: SysInfo): string =
   if info.username.len > 0:
     lines.add(fmt"Username: {info.username}")
   lines.add(fmt"Working directory: {info.cwd}")
+  if info.localDate.len > 0:
+    lines.add(fmt"Local date: {info.localDate}")
   lines.add(fmt"Shell: {info.shell}")
   if info.shellVersion.len > 0:
     lines.add(

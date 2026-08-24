@@ -4,13 +4,11 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-06-24" "get 2.1" "User Commands"
-.\"
-.\" ====================================================================
+.TH GET 1 "2026-08-24" "get 3.0.0" "User Commands"
+.
 .SH NAME
 get \- get anything from your computer
-.\"
-.\" ====================================================================
+.
 .SH SYNOPSIS
 .B get
 .RI \(dq query \(dq
@@ -30,972 +28,375 @@ get \- get anything from your computer
 .RI [ \-\-clean ]
 .br
 .B get get
-.RI [ \-\-name | \-\-intro | \-\-author | \-\-version | \-\-license | \-\-github ]
+.RI [ \-\-name | \-\-intro | \-\-version | \-\-author | \-\-license | \-\-github ]
 .br
 .B get version
+.br
+.B get \-\-version
+.br
+.B get \-V
 .br
 .B get isok
 .br
 .B get help
-.\"
-.\" ====================================================================
+.
 .SH DESCRIPTION
 .B get
-accepts a natural-language
-.I query,
-sends it to an OpenAI-API-compatible large language model (LLM),
-and executes the resulting shell command on the local device to
-retrieve the requested information.
-All generated commands are restricted to
-.B read-only
-operations and pass through multiple safety layers before execution.
+sends a natural-language query to an OpenAI-compatible model and performs
+read-only local inspection when a shell command is required.
+Version 3 uses one typed
+.I model/action/policy/tool/observation
+state machine instead of separate instance and marker-driven agent paths.
 .PP
-.B get
-v2.1 ships as a compact binary without helper tool payloads.
-Generated commands use standard system utilities and any third-party
-tools already available on the user's
-.BR PATH .
-On Windows, keep
-.BR get-windows-x64.exe ,
-.BR libcrypto-1_1-x64.dll ,
-and
-.B libssl-1_1-x64.dll
-in the same release directory when running
-.BR get_ready.py .
+Provider-native function tools are preferred.
+Structured JSON is used as a compatibility fallback, and v2 Markdown command
+responses remain accepted only inside the legacy decoder.
 .PP
-Two execution modes are supported:
+Every proposed, revised, or cached command passes through the same mandatory
+read-only policy, optional supplemental regex, optional model review, optional
+manual confirmation, and bounded executor.
+.
+.SH HARNESS STRATEGIES
 .TP
-.B Instance mode
-A single LLM call produces one command whose output is displayed
-directly.
-Enable with
-.B "get set instance true"
-or the
-.B \-\-instance
-per-query flag.
+.B auto
+Default. Starts direct and continues or batches only when the model requests
+more evidence. Routine commands normally use one model call.
 .TP
-.B Agent mode (default)
-A multi-round loop in which the LLM may execute intermediate commands
-to gather information before producing a final answer.
-Each response carries a protocol marker
-.RB ( "<!-- CONTINUE -->" ,
-.BR "<!-- FINAL -->" ,
-or
-.BR "<!-- INTERPRET -->" )
-that controls loop continuation.
-The loop is bounded by
-.B max\-rounds
-(default
-.IR 3 ).
-.\"
-.\" ====================================================================
+.B direct
+Exactly one model turn and at most one terminal tool call.
+.TP
+.B loop
+Feeds observations back serially for dependent multi-step work.
+.TP
+.B parallel
+Allows independent read-only calls to execute concurrently, up to
+.BR max\-parallel .
+.PP
+All strategies share the same state machine and hard budgets.
+.
 .SH COMMANDS
-.\"
 .SS "Query (default)"
 .BI "get \(dq" query "\(dq [" flags "]"
 .PP
-Sends
-.I query
-to the configured LLM.
-In agent mode the LLM may run intermediate commands before issuing a
-final answer; in instance mode a single command is generated and
-executed immediately.
-Every command passes through the full safety pipeline.
-See
-.B QUERY FLAGS
-for per-invocation overrides.
-.\"
+Runs the query using the configured harness.
+.
 .SS set
 .BI "get set " option " [" value ]
 .PP
-Sets a persistent configuration option.
-Omitting
-.I value
-resets boolean and integer options to their defaults and clears string
-options.
-.B command\-pattern
-has special three-way semantics; see
-.B SET OPTIONS.
-.\"
+Sets one persistent option. Omitting the value resets it to its default or
+clears a string value.
+.
 .SS config
 .B get config
 .PP
-Displays all current configuration values.
-The API key is displayed only as
-.I set
-or
-.IR "not set" ;
-the stored value is encrypted and cannot be retrieved.
-When
-.B command\-pattern
-is at its default, the full built-in regex is shown followed by
-.IR "(default: built-in)" .
+Displays settings. The API key is shown only as set or not set.
 .TP
 .B \-\-reset
-Resets all configuration to defaults and removes the stored API key.
+Restores defaults and removes the stored key.
 .TP
 .BI \-\- option
-Displays the current value of one option, where
-.I option
-is any name from the
-.B SET OPTIONS
-table (e.g.\&
-.BR \-\-model ,
-.BR \-\-timeout ,
-.BR \-\-command\-pattern ).
-.\"
+Displays one setting.
+.
 .SS cache
 .B get cache
 .PP
-Displays cache status: enabled/disabled, total and per-mode entry
-counts, configured limits, and file location.
+Displays cache counts, limits, and file location.
 .TP
 .B \-\-clean
-Removes all cached entries.
+Removes all entries.
 .TP
 .BI "\-\-unset \(dq" query \(dq
-Removes all entries whose query text matches
-.I query
-(case-insensitive).
-.\"
+Removes entries matching the query text.
+.
 .SS log
 .B get log
 .PP
-Displays log status: enabled/disabled, configured maximum, entry
-count, file location, and file size.
+Displays log status and location.
 .TP
 .B \-\-clean
 Removes all log entries.
-.\"
+.
 .SS get
 .B get get
 .PP
-Displays all application information (name, version, author,
-introduction, license, GitHub URL).
+Displays application metadata.
+.TP
+.B \-\-name
+Show the application name.
 .TP
 .B \-\-intro
-Displays the one-line introduction.
+Show the introduction.
 .TP
 .B \-\-version
-Displays the version string (equivalent to
-.BR "get version" ).
+Show version 3.0.0.
+.TP
+.B \-\-author
+Show the author.
 .TP
 .B \-\-license
-Displays the SPDX license identifier.
+Show the SPDX license identifier.
 .TP
 .B \-\-github
-Displays the GitHub repository URL.
-.\"
+Show the repository URL.
+.
 .SS version
 .B get version
 .PP
-Prints the version string and exits.
-.\"
+Displays version 3.0.0. The standard aliases
+.B \-\-version
+and
+.B \-V
+are equivalent and do not require provider configuration.
+.
 .SS isok
 .B get isok
 .PP
-Verifies configuration readiness.
-Checks that the API key, URL, and model are all set, then sends a
-minimal probe request
-.RI ( max_tokens =32)
-to the LLM endpoint and expects the single-word reply
-.IR ok .
-Exits 0 on success, 1 on failure.
-.\"
-.SS help
-.B get help
-.PP
-Displays comprehensive usage help.
-Also triggered by
-.B \-\-help
-and
-.BR \-h .
-.\"
-.\" ====================================================================
+Checks key, URL, and model, then sends a minimal provider request.
+.
 .SH QUERY FLAGS
-Per-invocation flags placed after the query string override the
-persisted configuration for that query only.
 .TP
 .B \-\-no\-cache
-Bypass the cache for this query.
+Bypass cache lookup and storage.
 .TP
 .B \-\-cache
-Force cache lookup and storage for this query.
+Force cache use and permit terminal text-result storage.
 .TP
 .B \-\-manual\-confirm
-Prompt for confirmation before executing each command.
+Prompt before every command.
 .TP
 .B \-\-no\-manual\-confirm
-Skip the confirmation prompt.
+Skip interactive confirmation.
 .TP
 .B \-\-double\-check
-Enable the second LLM safety review.
+Enable an additional model safety review.
 .TP
 .B \-\-no\-double\-check
-Skip the second LLM safety review.
+Skip the additional review. The mandatory deterministic policy still runs.
+.TP
+.BI \-\-harness " kind"
+Use auto, direct, loop, or parallel for this query.
+.TP
+.BI \-\-protocol " kind"
+Use auto, native, or legacy tool encoding for this query.
 .TP
 .B \-\-instance
-Single-call instance mode.
+Compatibility alias for direct.
 .TP
 .B \-\-no\-instance
-Multi-round agent mode.
+Compatibility alias for loop.
 .TP
 .B \-\-hide\-process
-Suppress intermediate output; show only the final result.
+Suppress progress and intermediate observations.
 .TP
 .B \-\-no\-hide\-process
-Show intermediate output.
+Show progress and observations.
 .TP
 .B \-\-system\-proxy
-Prefer OS system proxy settings.
+Prefer enabled Windows Internet Settings over terminal proxy variables.
 .TP
 .B \-\-no\-system\-proxy
-Use terminal proxy environment variables only.
+Use terminal proxy variables only.
 .TP
 .B \-\-vivid
-Enable vivid output mode.
+Enable ANSI styling.
 .TP
 .B \-\-no\-vivid
-Plain-text output mode.
+Use plain text.
 .TP
 .BI \-\-model " name"
-Override the LLM model for this query.
+Override the model.
 .TP
 .BI \-\-timeout " seconds"
-Override the request timeout for this query.
-.\"
-.\" ====================================================================
+Override the API request timeout.
+.
 .SH SET OPTIONS
-Integer options accept
-.B false
-to disable the feature entirely (equivalent to 0).
-Omitting
-.I value
-resets the option to its default; for string options it clears the
-stored value.
 .TP
 .BI "key " string
-LLM API key.
-Stored with platform-specific secure storage
-(Linux: file mode 0600; Windows: DPAPI).
-Omitting
-.I value
-removes the stored key.
-Default: empty.
+API key. Linux storage uses mode 0600; Windows uses DPAPI. Default: empty.
 .TP
 .BI "url " URL
-LLM API endpoint URL (OpenAI-compatible).
-Default:
-.IR https://api.minimaxi.com/v1 .
+API base URL. Default: https://api.minimaxi.com/v1.
 .TP
 .BI "model " string
-LLM model identifier.
-Default:
-.IR minimax\-m3 .
+Model identifier. Default: minimax-m3.
 .TP
 .BI "manual\-confirm " bool
-Require interactive y/N confirmation before executing each command,
-including intermediate agent-mode commands.
-Default:
-.IR false .
+Interactive command confirmation. Default: false.
 .TP
 .BI "double\-check " bool
-Submit every generated command to a second LLM safety review.
-The reviewer may revise or reject the command.
-Default:
-.IR true .
+Second model review. Default: false.
 .TP
-.BI "instance " bool
-Use single-call instance mode.
-.B false
-enables the multi-round agent loop.
-Default:
-.IR false .
+.BI "harness " kind
+auto, direct, loop, or parallel. Default: auto.
+.TP
+.BI "tool\-protocol " kind
+auto, native, or legacy. Default: auto.
 .TP
 .BI "timeout " "int | false"
-Timeout per API request, in seconds.
-.B false
-removes the limit.
-Default:
-.IR 300 .
+API timeout seconds. Default: 300.
 .TP
 .BI "max\-token " "int | false"
-Maximum token consumption per request.
-Default:
-.IR 20480 .
+Maximum response tokens. Default: 20480.
 .TP
-.BI "max\-rounds " "int | false"
-Maximum loop rounds in agent mode.
-When the cap is reached any pending
-.B "<!-- CONTINUE -->"
-is forced to
-.B "<!-- FINAL -->"
-so the run always terminates with a concrete answer.
-Ignored in instance mode.
-Default:
-.IR 3 .
+.BI "max\-rounds " int
+Hard model-turn limit. Default: 3.
+.TP
+.BI "max\-tool\-calls " int
+Hard tool-call limit per run. Default: 8.
+.TP
+.BI "max\-parallel " int
+Maximum concurrent tool calls. Default: 4.
+.TP
+.BI "command\-timeout " int
+Hard command deadline in seconds. Default: 30.
+.TP
+.BI "max\-output\-bytes " int
+Per-command capture cap. Default: 1048576.
 .TP
 .BI "command\-pattern " regex
-Forbidden-command regex.
-Three distinct invocation forms:
-.RS
-.TP
-.B "get set command\-pattern"
-(no value) — restore the built-in default blocklist.
-.TP
-.B "get set command\-pattern \(dq\(dq"
-Disable pattern filtering entirely.
-Emits a warning.
-.TP
-.BI "get set command\-pattern " pattern
-Use a custom regex.
-If the pattern does not cover the core dangerous command names a
-safety warning is emitted.
-.RE
-.IP
-Default: built-in blocklist (see
-.BR SAFETY ).
+Supplemental forbidden-command regex. Omitting the value restores the built-in
+pattern. An explicit empty string clears only this regex; the mandatory
+read-only policy remains active.
 .TP
 .BI "system\-prompt " string
-Custom system prompt appended to every LLM request.
-Default: empty.
+Additional model instruction. Default: empty.
 .TP
 .BI "shell " string
-Shell used to execute commands.
-Default:
-.I powershell
-(Windows),
-.I bash
-(Linux).
+Shell executable. Default: bash on Unix, powershell on Windows.
 .TP
 .BI "log " bool
-Append each query execution to the log file.
-Default:
-.IR true .
+Execution logging. Default: true.
 .TP
 .BI "hide\-process " bool
-Suppress intermediate output; display only the final result.
-When enabled,
-.B get
-also suppresses its own warning/progress text for the query path
-(for example model advisory warnings and cache-decision progress text).
-Default:
-.IR false .
+Suppress intermediate output. Default: false.
 .TP
 .BI "system\-proxy " bool
-Prefer OS system proxy settings. When disabled,
-.B get
-uses only terminal proxy environment variables such as
-.B HTTPS_PROXY
-or
-.BR HTTP_PROXY .
-Default:
-.IR false .
+Prefer Windows Internet Settings over terminal proxy variables. Default: false.
 .TP
 .BI "cache " bool
-Enable response caching.
-Default:
-.IR true .
+Deterministic caching. Default: true.
 .TP
 .BI "cache\-expiry " "int | false"
-Cache entry lifetime in days.
-.B false
-disables expiry.
-Default:
-.IR 30 .
+Cache lifetime in days. Default: 30.
 .TP
 .BI "cache\-max\-entries " "int | false"
-Maximum number of cache entries to retain.
-Oldest entries are removed when the cap is exceeded.
-Default:
-.IR 1000 .
-.TP
-.BI "cache\-trigger\-threshold " "int | false"
-Number of prior executions required before triggering cache strategy
-classification.
-.B false
-means classify immediately on first execution.
-Default:
-.IR 1 .
+Cache entry cap. Default: 1000.
 .TP
 .BI "log\-max\-entries " "int | false"
-Maximum number of log entries to retain.
-Oldest entries are removed when the cap is exceeded.
-Default:
-.IR 1000 .
+Log entry cap. Default: 1000.
 .TP
 .BI "vivid " bool
-Vivid output mode: semantic ANSI colours and animated Braille-dot
-spinners.
-Default:
-.IR true .
-.\"
-.\" ====================================================================
-.SH AGENT MODE
-In agent mode (default;
-.B instance
-=
-.IR false )
-.B get
-runs a multi-round conversation.
-Each LLM response must follow one of four formats:
+ANSI styling and animation. Default: true.
 .TP
-.B "CONTINUE — intermediate command"
-A command in a
-.B sh
-fenced code block, followed by
-.B "<!-- CONTINUE -->"
-on a new line after the closing fence.
-The command is executed; its output is fed back as the next user
-message.
-Requires further rounds.
-.TP
-.B "FINAL — terminal command, direct output"
-A command in a
-.B sh
-fenced code block, followed by
-.B "<!-- FINAL -->"
-or no marker.
-FINAL is the default when a code block is present without a
-recognised marker.
-The command is executed and its raw output is displayed to the user.
-Terminates the loop.
-.TP
-.B "INTERPRET — terminal command, summarised output"
-A command in a
-.B sh
-fenced code block, followed by
-.BR "<!-- INTERPRET -->" .
-The command is executed; its output is sent back to the LLM which
-produces a human-readable summary.
-Use sparingly; prefer FINAL.
-Terminates the loop.
-.TP
-.B "ANSWER — direct text"
-No fenced code block.
-The LLM's plain-text response is displayed directly.
-Used when no shell command can satisfy the query.
-Terminates the loop.
+.BI "instance " bool
+v2 compatibility alias. true selects direct; false selects auto when stored.
+.
+.SH TOOL PROTOCOL
+The native shell function is named
+.BR run_readonly_shell .
+Its arguments contain command, purpose, and result_mode.
+result_mode is either return_raw or continue.
 .PP
-The loop is hard-capped at
-.B max\-rounds
-(default 3).
-When the final round is reached any
-.B "<!-- CONTINUE -->"
-is forcibly converted to
-.B "<!-- FINAL -->"
-so execution always yields a concrete answer.
-Every command — intermediate or final — passes through the full
-safety pipeline.
-.\"
-.\" ====================================================================
+With tool-protocol auto, provider HTTP 400/404/422 errors that identify
+unsupported tool fields trigger one structured-JSON retry for that run.
+Native mode does not fall back. Legacy mode sends no native tool definition.
+.PP
+Transport failures before an HTTP response retry up to three times within the
+original request timeout. HTTP responses, request timeouts, and parsing errors
+are not retried. Provider response bodies are limited to 8 MiB, and requests
+carrying bearer credentials do not follow redirects.
+.
 .SH SAFETY
-Every generated command passes three validation layers in sequence.
-.TP
-.B "1. Forbidden-command pattern"
-A regex match against the active
-.B command\-pattern
-rejects the command before execution.
-.IP
-The built-in blocklist uses
-.B \eb\&...\eb
-word boundaries and covers:
-.BR rm ,
-.BR rmdir ,
-.BR del ,
-.BR erase ,
-.BR mv ,
-.BR move ,
-.BR cp ,
-.BR copy ,
-.BR mkdir ,
-.BR touch ,
-.BR chmod ,
-.BR chown ,
-.BR chgrp ,
-.BR mkfs ,
-.BR dd ,
-.BR fdisk ,
-.BR kill ,
-.BR killall ,
-.BR pkill ,
-.BR shutdown ,
-.BR reboot ,
-.BR halt ,
-.BR poweroff ,
-.BR passwd ,
-.BR useradd ,
-.BR userdel ,
-.BR usermod ,
-.BR groupadd ,
-.BR groupdel ,
-.BR Set\-Content ,
-.BR New\-Item ,
-.BR Remove\-Item ,
-.BR Move\-Item ,
-.BR Rename\-Item ,
-.BR Clear\-Content ,
-and
-.BR Add\-Content .
-.IP
-.BR md " and " rd
-are intentionally absent: the pattern
-.B \ebmd\eb
-would produce false positives on extensions such as
-.IR README.md .
-.IP
-The regex is matched against the command string before shell
-expansion. Blocking a specific filename is therefore bypassable via
-globbing (for example, ``cat *.txt``). For reliable enforcement,
-target command verbs (such as
-.BR cat ,
-.BR head ,
-.BR cp ,
-etc.) instead of literal filenames.
-.TP
-.B "2. Double-check (default: enabled)"
-A second LLM call reviews the command.
-The reviewer may revise the command (returning it in a
-.B sh
-code block) or reject it entirely by responding with the single word
-.BR UNSAFE ,
-which terminates execution with exit code 1.
-.TP
-.B "3. Manual confirmation (default: disabled)"
-An interactive y/N prompt before each command execution.
-Declining exits with code 0.
-.\"
-.\" ====================================================================
-.SH MODEL STRENGTH
-At startup
-.B get
-normalises the configured model name (lowercase; underscores and
-hyphens treated as equivalent) and checks it against a built-in
-whitelist of known high-performance models.
-An advisory warning is emitted when the model is unrecognised or
-belongs to a reduced-capability variant; execution is not blocked.
+The non-configurable baseline rejects known state-changing utilities,
+regular-file output redirection, in-place editing, mutating Git, container,
+cluster and package-manager operations, uploads and non-read-only curl options,
+and arbitrary inline interpreter code.
 .PP
-The built-in rule set is
-.BR mainstream_high_model_rules_2026_06_24 .
-For the CLI warning gate, pass, coding-only pass, and efficient pass
-all count as accepted. Explicit small-model families such as
-.B Phi
-and
-.B Gemma
-remain rejected as strict high-performance models.
+The command-pattern is supplemental. It cannot disable the baseline.
+If double-check revises a command, both deterministic layers run again before
+confirmation or execution. Cached commands use the identical gate.
 .PP
-Accepted examples include:
-.IR minimax\-m3 ,
-.IR gpt\-5.4 ,
-.IR gpt\-5\-codex ,
-.IR claude\-sonnet\-4.6 ,
-.IR gemini\-3.1\-pro ,
-.IR gemini\-3.5\-flash ,
-.IR grok\-4.3 ,
-.IR deepseek\-v4\-pro ,
-.IR qwen3.7\-plus ,
-.IR glm\-5.2 ,
-.IR mimo\-v2.5\-pro ,
-.IR kimi\-k2.6 ,
-.IR mistral\-large\-3 ,
-.IR llama\-4\-maverick ,
-.IR command\-a ,
-.IR ernie\-5.0 ,
-.IR doubao\-seed\-2.0\-pro ,
-.IR hy3\-preview ,
-.IR step\-3.5\-flash ,
-.IR nova\-pro ,
-and
-.IR jamba\-large .
+Commands execute with command-timeout and max-output-bytes. Exceeding the
+deadline returns 124. Exceeding the output cap truncates capture and stops the
+command. On POSIX the shell receives its own process group so cancellation
+stops descendants as well; Windows uses taskkill /T for the child tree.
 .PP
-Reduced, lite, mini, legacy, translation, or small-model variants are
-rejected according to their family-specific rules.
-.\"
-.\" ====================================================================
-.SH OUTPUT MODES
-.TP
-.B "plain (vivid = false)"
-Unformatted text; no colours and no animations.
-Progress spinners are replaced with dotted lines.
-.TP
-.B "vivid (vivid = true, default)"
-ANSI colours, animated Braille-dot spinners during API requests, bold
-section headers, and semantic configuration-value colouring.
-On Windows, virtual terminal processing is enabled automatically.
-.\"
-.\" ====================================================================
-.SH CACHING
-.B get
-uses a deferred-decision caching mechanism.
-By default, queries are
-.B not classified for caching on first execution.
-Classification starts only after the query has been seen at least
-.B cache\-trigger\-threshold
-times (default
-.IR 1 ),
-or when
-.B --cache
-is passed.
-The first run merely records the query in a lightweight "seen" set.
-In normal process mode, this step shows the progress text:
-.I checking whether to cache...
+No shell filter can formally prove arbitrary code harmless. Use manual
+confirmation in sensitive environments.
+.
+.SH CACHE
+The v3 cache performs no classifier model call.
+A successful terminal single-command run stores a context-specific command.
+A hit uses zero model calls, validates the command again, and re-executes it.
+This keeps dynamic information current.
 .PP
-Five caching strategies are supported:
-.TP
-.B GLOBAL_COMMAND
-The command works in any directory; the output changes over time.
-Only the command is cached globally.
-On a hit the command is re-executed through the full safety pipeline
-to produce fresh output.
-.TP
-.B GLOBAL_RESULT
-The answer is universally stable (e.g.& OS name, command syntax).
-The output is cached globally and returned directly on a hit.
-.TP
-.B CONTEXT_COMMAND
-The command depends on the current working directory; the output may
-change.
-Only the command is cached for this directory context.
-On a hit it is re-executed.
-.TP
-.B CONTEXT_RESULT
-The result is stable within the same working directory (e.g.&
-directory name, static config file content).
-The output is cached for this context and returned directly.
-.TP
-.B NOCACHE
-Neither command nor output is cached.
+Cache identities use SHA-256 over the provider, model, strategy, protocol,
+shell, policy, platform, and working-directory context. Writers serialize the
+complete read-modify-write operation with a cross-process lock. Snapshots are
+flushed, atomically replaced, and backed by a last-good copy used when the
+primary is damaged. Cache files and individual fields are size-bounded and
+schema-validated.
 .PP
-Three hash levels are used.
-A
-.I query hash
-(MD5 of the lowercased query text) tracks the "seen" set.
-A
-.I global hash
-(query + shell + model + flags + OS + arch, without the working
-directory) keys global entries.
-A
-.I context hash
-(global hash fields plus the working directory) keys context entries.
-.PP
-On a cache lookup the four possible hit types are checked in
-priority order:
-context result (most precise, fastest),
-global result,
-context command,
-global command.
-.PP
-When the configuration option
-.B cache
-is set to
-.IR false ,
-all caching logic is completely disabled, including seen tracking.
-When process output is not hidden, this condition emits:
-.I warning: cache is disabled in config; all cache logic is bypassed
-.PP
-Cache behaviour is controlled by
-.BR cache ,
-.BR cache-expiry ,
-and
-.BR cache-max-entries .
-Use
-.B --no-cache
-to bypass the cache for a single query.
-Use
-.B --cache
-to force the caching pipeline for a single query (triggers the LLM
-decision immediately, without waiting for a second execution).
-.\" ====================================================================
-.SH LOGGING
-Each query execution is appended to the log file in timestamped lines
-of the form:
-.PP
-.RS
-.I "[YYYY-MM-DD HH:MM:SS] field: value"
-.RE
-.PP
-Fields logged per entry: query, command, exit code, and up to 4096
-characters of output.
-In agent mode each intermediate round is logged separately; the query
-field carries a
-.RI ( "round N" )
-suffix.
-When the entry count exceeds
-.B log\-max\-entries
-the oldest entries are automatically removed.
-.\"
-.\" ====================================================================
-.SH BUNDLED TOOLS
-The following tools ship in the
-.I bin/
-directory and are prepended to PATH before every generated command
-runs.
-The LLM system prompt instructs the model to prefer these tools.
-Write-mode flags (e.g.\&
-.BR "pmc \-o" ,
-.BR "pmc \-c" ,
-.BR "tree \-o" ,
-.BR "treepp /O" ,
-.BR "fd \-x"
-with write commands) are explicitly forbidden in the prompt.
-.TP
-.B rg
-ripgrep — ultra-fast regex search in files.
-.TP
-.B fd
-Fast file and directory finder.
-.TP
-.B sg
-ast-grep — AST-level structural code search.
-.TP
-.B pmc
-pack-my-code — packages source files into a single text block for LLM
-context.
-.TP
-.BR tree " (Linux) / " treepp " (Windows)"
-Directory tree listing.
-.TP
-.B tokei
-Code statistics (lines of code by language).
-.TP
-.BR lua " (Linux only)"
-Lua 5.x interpreter for calculations and text processing.
-Read-only use only.
-.TP
-.B bat
-Syntax-highlighting cat replacement.
-Used by vivid mode to render help text.
-.TP
-.B mdcat
-Terminal Markdown renderer.
-Used by vivid mode to render interpreted LLM replies.
-.\"
-.\" ====================================================================
-.SH SYSTEM REQUIREMENTS
-.B get
-requires a 64-bit platform (amd64 or arm64); this is enforced at
-compile time.
-At runtime
-.B get
-checks for Windows 10+ or Linux kernel 6.0+ and emits an advisory
-warning if the requirement is not met.
-.\"
-.\" ====================================================================
-.SH STATIC BUILDS
-To produce a fully statically linked binary (requires static OpenSSL
-libraries):
-.PP
-.RS
-.B nim c \-d:release \-d:staticBuild src/get.nim
-.RE
-.\"
-.\" ====================================================================
-.SH ENVIRONMENT
-.TP
-.BR HTTPS_PROXY ", " HTTP_PROXY ", " ALL_PROXY
-Proxy URL applied to all outbound LLM API requests.
-Both upper- and lower-case forms are checked, in that order.
-On Windows, if none of these variables is set,
-.B get
-falls back to the user's Internet Settings registry proxy
-.RI ( ProxyServer ).
-.TP
-.B GET_TEST_KEY
-API key used by the test suite for live LLM connectivity tests.
-Not used during normal operation.
-.TP
-.B GET_TEST_URL
-API endpoint URL used by the test suite.
-.TP
-.B GET_TEST_MODEL
-Model name used by the test suite.
-.\"
-.\" ====================================================================
+The \-\-cache flag may store a terminal text answer when no reusable command
+exists. Multi-step results are not guessed into cache entries.
+Versioned keys include working directory, provider URL, model, harness,
+protocol, shell, custom prompt, policy configuration, OS, and architecture.
+.
+.SH NETWORK
+All model turns reuse one TLS-verifying HTTP client, including proxy traffic.
+Terminal proxy variables are respected by default. When system-proxy is true,
+enabled Windows Internet Settings take precedence. NO_PROXY/no_proxy bypasses
+either source. Credentials are redacted when a proxy URL is displayed.
+.
 .SH FILES
 .TP
 .I ~/.config/get/config.json
-Configuration file (Linux).
+Linux configuration file.
 .TP
 .I ~/.config/get/key
-API key storage (Linux, mode 0600).
-.TP
-.I ~/.config/get/get.log
-Append-only execution log (Linux).
+Linux API key file, mode 0600.
 .TP
 .I ~/.config/get/cache.json
-Response cache (Linux).
+Cache store.
 .TP
-.I %APPDATA%/get/config.json
-Configuration file (Windows).
-.TP
-.I %APPDATA%/get/key
-API key storage (Windows, DPAPI-encrypted).
-.TP
-.I %APPDATA%/get/get.log
-Append-only execution log (Windows).
-.TP
-.I %APPDATA%/get/cache.json
-Response cache (Windows).
-.TP
-.I ~/Library/Application Support/get/config.json
-Configuration file (macOS).
-.TP
-.I ~/Library/Application Support/get/key
-API key storage (macOS, mode 0600).
-.TP
-.I ~/Library/Application Support/get/get.log
-Append-only execution log (macOS).
-.TP
-.I ~/Library/Application Support/get/cache.json
-Response cache (macOS).
-.\"
-.\" ====================================================================
+.I ~/.config/get/get.log
+Execution log.
+.PP
+On Windows these files are under %APPDATA%\eget and the key is DPAPI-protected.
+The release installer also places the required OpenSSL runtime DLLs beside the
+Windows executable.
+.
 .SH EXIT STATUS
 .TP
 .B 0
-Successful completion, or manual confirmation declined.
+Success.
 .TP
 .B 1
-Configuration error, LLM communication failure, safety-check
-rejection, or general error.
+Configuration, provider, protocol, policy, refusal, budget, or general error.
+.TP
+.B 124
+Command deadline exceeded.
 .TP
 .B 130
-Interrupted by Ctrl+C (SIGINT).
+Interrupted by Ctrl+C.
 .TP
-.I N
-When a generated command exits with a non-zero code, that code is
-propagated as the exit code of
-.BR get .
-.\"
-.\" ====================================================================
+.B other
+Exit status of a terminal command.
+.
 .SH EXAMPLES
-Query the system version:
-.PP
-.RS
-.B get \(dqsystem version\(dq
-.RE
-.PP
-Bypass the cache for a single query:
-.PP
-.RS
-.B get \(dqdisk usage\(dq \-\-no\-cache
-.RE
-.PP
-Override the model and enable vivid output for one query:
-.PP
-.RS
-.B get \(dqlist files\(dq \-\-model minimax\-m3 \-\-vivid
-.RE
-.PP
-Force instance (single-call) mode:
-.PP
-.RS
-.B get \(dqsystem uptime\(dq \-\-instance
-.RE
-.PP
-Configure the API key, endpoint, and model:
-.PP
-.RS
-.B get set key sk\-your\-api\-key
-.br
-.B get set url https://api.openai.com/v1
-.br
-.B get set model minimax\-m3
-.RE
-.PP
-Remove the stored API key:
-.PP
-.RS
-.B get set key
-.RE
-.PP
-Disable the request timeout:
-.PP
-.RS
-.B get set timeout false
-.RE
-.PP
-Increase the agent-mode round budget:
-.PP
-.RS
-.B get set max\-rounds 5
-.RE
-.PP
-Restore the built-in forbidden-command pattern:
-.PP
-.RS
-.B get set command\-pattern
-.RE
-.PP
-Disable forbidden-command filtering entirely:
-.PP
-.RS
-.B get set command\-pattern \(dq\(dq
-.RE
-.PP
-Inspect a single configuration option:
-.PP
-.RS
-.B get config \-\-timeout
-.RE
-.PP
-Reset all configuration to defaults:
-.PP
-.RS
-.B get config \-\-reset
-.RE
-.PP
-Show cache status and clear entries matching a query:
-.PP
-.RS
-.B get cache
-.br
-.B get cache \-\-unset \(dqsystem version\(dq
-.RE
-.PP
-Clear all cache and log entries:
-.PP
-.RS
-.B get cache \-\-clean
-.br
-.B get log \-\-clean
-.RE
-.PP
-Verify the configuration is ready to use:
-.PP
-.RS
-.B get isok
-.RE
-.\"
-.\" ====================================================================
-.SH BUGS
-Report bugs at
-.UR https://github.com/Water\-Run/get/issues
-.UE .
-.\"
-.\" ====================================================================
-.SH AUTHOR
-Written by WaterRun.
-.\"
-.\" ====================================================================
-.SH LICENSE
-.B get
-is free software licensed under the GNU Affero General Public License
-version 3 or later
-.RB ( AGPL\-3.0\-or\-later ).
-See
-.UR https://www.gnu.org/licenses/agpl\-3.0.html
-.UE
-for the full licence text.
-.\"
-.\" ====================================================================
+.nf
+get \(dqcurrent directory\(dq
+get \(dqcompare disk and memory usage\(dq \-\-harness parallel
+get \(dqservice status\(dq \-\-double\-check
+get set tool\-protocol native
+get set max\-parallel 6
+get cache \-\-clean
+.fi
+.
 .SH SEE ALSO
-.BR bash (1),
-.BR powershell (1),
-.BR rg (1),
-.BR fd (1),
-.BR bat (1),
-.BR mdcat (1),
-.BR tokei (1),
-.BR tree (1),
-.BR lua (1)
+.UR https://github.com/Water-Run/get
+Project repository
+.UE
+.
+.SH LICENSE
+AGPL-3.0-or-later.

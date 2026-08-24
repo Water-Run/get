@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-08-24
 ## :File: config.nim
 ## :License: AGPL-3.0
 ##
@@ -20,6 +20,7 @@ import std/[json, options, os, strformat, strutils]
 when defined(windows):
   import std/base64
 
+import harness_types
 import style
 import utils
 
@@ -37,7 +38,7 @@ const DEFAULT_MODEL* = "minimax-m3"
 const DEFAULT_MANUAL_CONFIRM* = false
 
 ## Default for double-check.
-const DEFAULT_DOUBLE_CHECK* = true
+const DEFAULT_DOUBLE_CHECK* = false
 
 ## Default for instance mode.
 const DEFAULT_INSTANCE* = false
@@ -66,18 +67,50 @@ const DEFAULT_CACHE_EXPIRY* = 30
 ## Default maximum number of cached entries.
 const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 
-## Default number of prior executions required before running
-## cache-decision classification.
-const DEFAULT_CACHE_TRIGGER_THRESHOLD* = 1
-
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
 ## Default vivid mode flag.
 const DEFAULT_VIVID* = true
 
-## Default maximum number of agent loop rounds.
+## Default maximum number of model turns in one harness run.
 const DEFAULT_MAX_ROUNDS* = 3
+
+## Current on-disk configuration schema version.
+const DEFAULT_SCHEMA_VERSION* = 3
+
+## Default unified harness strategy.
+const DEFAULT_HARNESS* = "auto"
+
+## Default provider tool-call protocol.
+const DEFAULT_TOOL_PROTOCOL* = "auto"
+
+## Default maximum tool calls per harness run.
+const DEFAULT_MAX_TOOL_CALLS* = DEFAULT_TOOL_CALLS
+
+## Default maximum concurrent tool calls.
+const DEFAULT_MAX_PARALLEL* = DEFAULT_PARALLELISM
+
+## Default command execution deadline in seconds.
+const DEFAULT_COMMAND_TIMEOUT* = harness_types.DEFAULT_COMMAND_TIMEOUT
+
+## Default maximum captured bytes for one command.
+const DEFAULT_MAX_OUTPUT_BYTES* = harness_types.DEFAULT_MAX_OUTPUT_BYTES
+
+## Maximum accepted model turns per run.
+const MAX_HARNESS_ROUNDS = 32
+
+## Maximum accepted tool calls per run.
+const MAX_HARNESS_TOOL_CALLS = 256
+
+## Maximum accepted concurrent tool calls.
+const MAX_HARNESS_PARALLEL = 64
+
+## Maximum accepted command deadline in seconds.
+const MAX_COMMAND_TIMEOUT = 86_400
+
+## Maximum accepted per-command capture cap in bytes.
+const MAX_COMMAND_OUTPUT_BYTES = 100_000_000
 
 # ---------------------------------------------------------------------------
 # Types
@@ -89,11 +122,14 @@ const DEFAULT_MAX_ROUNDS* = 3
 ## represent the disabled condition.
 type
   Config* = object
+    schemaVersion*: int              ## On-disk configuration schema version.
     url*: string                     ## API endpoint URL.
     model*: string                   ## LLM model identifier.
     manualConfirm*: bool             ## Prompt before executing.
     doubleCheck*: bool               ## Second model review.
-    instance*: bool                  ## Single-call mode.
+    instance*: bool                  ## v2 alias for the direct harness.
+    harness*: string                 ## Unified v3 harness strategy.
+    toolProtocol*: string            ## Native, legacy, or automatic tools.
     timeout*: int                    ## Per-request timeout (s).
     maxToken*: int                   ## Max tokens per request.
     commandPattern*: Option[string]  ## Forbidden-cmd regex.
@@ -105,10 +141,13 @@ type
     cache*: bool                     ## Enable response cache.
     cacheExpiry*: int                ## Cache expiry in days.
     cacheMaxEntries*: int            ## Max cached entries.
-    cacheTriggerThreshold*: int      ## Prior-run threshold before decision.
     logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
-    maxRounds*: int                  ## Max agent loop rounds.
+    maxRounds*: int                  ## Max model turns per harness run.
+    maxToolCalls*: int               ## Max tool calls per harness run.
+    maxParallel*: int                ## Max concurrent tool calls.
+    commandTimeout*: int             ## Per-command deadline in seconds.
+    maxOutputBytes*: int             ## Per-command capture limit.
 
 # ---------------------------------------------------------------------------
 # Platform-specific DPAPI bindings (Windows only)
@@ -330,6 +369,32 @@ func implParseBool(
       fmt"invalid value '{value}' for " &
       fmt"'{optName}': expected 'true' or 'false'")
 
+## Validates and normalizes a harness configuration value.
+##
+## :param value: Raw harness name.
+## :param fallback: Value used when the input is empty or invalid.
+## :returns: Stable harness name.
+func implHarnessOrDefault(value: string, fallback: string): string =
+  if value.len == 0:
+    return fallback
+  try:
+    result = harnessName(parseHarnessKind(value))
+  except ValueError:
+    result = fallback
+
+## Validates and normalizes a tool-protocol configuration value.
+##
+## :param value: Raw protocol name.
+## :param fallback: Value used when the input is empty or invalid.
+## :returns: Stable protocol name.
+func implProtocolOrDefault(value: string, fallback: string): string =
+  if value.len == 0:
+    return fallback
+  try:
+    result = toolProtocolName(parseToolProtocolKind(value))
+  except ValueError:
+    result = fallback
+
 ## Parses a positive integer or "false" (mapping to 0).
 ## Empty input returns the default.
 ##
@@ -354,11 +419,41 @@ func implParseIntOrDisable(
       fmt"invalid value '{value}' for " &
       fmt"'{optName}': expected positive " &
       "integer or 'false'")
-  if result < 0:
+  if result <= 0:
     raise newException(GetError,
       fmt"invalid value '{value}' for " &
       fmt"'{optName}': expected positive " &
       "integer or 'false'")
+
+## Parses a strictly positive integer and rejects disabled hard limits.
+##
+## :param value: Raw CLI value; empty resets to the default.
+## :param optName: Option name for diagnostics.
+## :param default: Positive reset value.
+## :returns: Parsed positive integer.
+## :raises: GetError: If the value is not a positive integer.
+func implParsePositiveInt(
+  value: string,
+  optName: string,
+  default: int,
+  maximum: int
+): int =
+  if value.len == 0:
+    return default
+  try:
+    result = parseInt(value)
+  except ValueError:
+    raise newException(GetError,
+      fmt"invalid value '{value}' for '{optName}': " &
+      "expected positive integer")
+  if result <= 0:
+    raise newException(GetError,
+      fmt"invalid value '{value}' for '{optName}': " &
+      "expected positive integer")
+  if result > maximum:
+    raise newException(GetError,
+      fmt"invalid value '{value}' for '{optName}': " &
+      fmt"maximum is {maximum}")
 
 # ---------------------------------------------------------------------------
 # Private helpers — JSON serialisation
@@ -370,11 +465,14 @@ func implParseIntOrDisable(
 ## :returns: A JsonNode representing the configuration.
 proc implConfigToJson(cfg: Config): JsonNode =
   result = %*{
+    "schemaVersion":   cfg.schemaVersion,
     "url":             cfg.url,
     "model":           cfg.model,
     "manualConfirm":   cfg.manualConfirm,
     "doubleCheck":     cfg.doubleCheck,
     "instance":        cfg.instance,
+    "harness":         cfg.harness,
+    "toolProtocol":    cfg.toolProtocol,
     "timeout":         cfg.timeout,
     "maxToken":        cfg.maxToken,
     "shell":           cfg.shell,
@@ -384,10 +482,13 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cache":           cfg.cache,
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
-    "cacheTriggerThreshold": cfg.cacheTriggerThreshold,
     "logMaxEntries":   cfg.logMaxEntries,
     "vivid":           cfg.vivid,
-    "maxRounds":       cfg.maxRounds
+    "maxRounds":       cfg.maxRounds,
+    "maxToolCalls":    cfg.maxToolCalls,
+    "maxParallel":     cfg.maxParallel,
+    "commandTimeout":  cfg.commandTimeout,
+    "maxOutputBytes":  cfg.maxOutputBytes
   }
   if cfg.commandPattern.isSome:
     result["commandPattern"] =
@@ -405,20 +506,46 @@ proc implJsonToConfig(
   node: JsonNode,
   defaults: Config
 ): Config =
+  let legacyInstance = node{"instance"}.getBool(
+    defaults.instance)
+  let migratedHarness =
+    if not node{"harness"}.isNil:
+      implHarnessOrDefault(
+        node{"harness"}.getStr(""),
+        defaults.harness
+      )
+    elif legacyInstance:
+      "direct"
+    else:
+      defaults.harness
+  let storedMaxRounds = node{"maxRounds"}.getInt(
+    defaults.maxRounds)
+  let storedMaxToolCalls = node{"maxToolCalls"}.getInt(
+    defaults.maxToolCalls)
+  let storedMaxParallel = node{"maxParallel"}.getInt(
+    defaults.maxParallel)
+  let storedCommandTimeout = node{"commandTimeout"}.getInt(
+    defaults.commandTimeout)
+  let storedMaxOutputBytes = node{"maxOutputBytes"}.getInt(
+    defaults.maxOutputBytes)
   result = Config(
-    url: node{"url"}.getStr(""),
-    model: node{"model"}.getStr(""),
+    schemaVersion: defaults.schemaVersion,
+    url: node{"url"}.getStr(defaults.url),
+    model: node{"model"}.getStr(defaults.model),
     manualConfirm: node{"manualConfirm"}.getBool(
       defaults.manualConfirm),
     doubleCheck: node{"doubleCheck"}.getBool(
       defaults.doubleCheck),
-    instance: node{"instance"}.getBool(
-      defaults.instance),
+    instance: migratedHarness == "direct",
+    harness: migratedHarness,
+    toolProtocol: implProtocolOrDefault(
+      node{"toolProtocol"}.getStr(""),
+      defaults.toolProtocol),
     timeout: node{"timeout"}.getInt(
       defaults.timeout),
     maxToken: node{"maxToken"}.getInt(
       defaults.maxToken),
-    shell: node{"shell"}.getStr(""),
+    shell: node{"shell"}.getStr(defaults.shell),
     log: node{"log"}.getBool(defaults.log),
     hideProcess: node{"hideProcess"}.getBool(
       defaults.hideProcess),
@@ -430,14 +557,29 @@ proc implJsonToConfig(
     cacheMaxEntries:
       node{"cacheMaxEntries"}.getInt(
         defaults.cacheMaxEntries),
-    cacheTriggerThreshold:
-      node{"cacheTriggerThreshold"}.getInt(
-        defaults.cacheTriggerThreshold),
     logMaxEntries: node{"logMaxEntries"}.getInt(
       defaults.logMaxEntries),
     vivid: node{"vivid"}.getBool(defaults.vivid),
-    maxRounds: node{"maxRounds"}.getInt(
-      defaults.maxRounds)
+    maxRounds:
+      if storedMaxRounds in 1 .. MAX_HARNESS_ROUNDS:
+        storedMaxRounds
+      else: defaults.maxRounds,
+    maxToolCalls:
+      if storedMaxToolCalls in 1 .. MAX_HARNESS_TOOL_CALLS:
+        storedMaxToolCalls
+      else: defaults.maxToolCalls,
+    maxParallel:
+      if storedMaxParallel in 1 .. MAX_HARNESS_PARALLEL:
+        storedMaxParallel
+      else: defaults.maxParallel,
+    commandTimeout:
+      if storedCommandTimeout in 1 .. MAX_COMMAND_TIMEOUT:
+        storedCommandTimeout
+      else: defaults.commandTimeout,
+    maxOutputBytes:
+      if storedMaxOutputBytes in 1 .. MAX_COMMAND_OUTPUT_BYTES:
+        storedMaxOutputBytes
+      else: defaults.maxOutputBytes
   )
   let cmdNode = node{"commandPattern"}
   if not cmdNode.isNil and
@@ -467,11 +609,14 @@ proc implJsonToConfig(
 ##     assert cfg.timeout == 300
 func defaultConfig*(): Config =
   result = Config(
+    schemaVersion:    DEFAULT_SCHEMA_VERSION,
     url:             DEFAULT_URL,
     model:           DEFAULT_MODEL,
     manualConfirm:   DEFAULT_MANUAL_CONFIRM,
     doubleCheck:     DEFAULT_DOUBLE_CHECK,
     instance:        DEFAULT_INSTANCE,
+    harness:         DEFAULT_HARNESS,
+    toolProtocol:    DEFAULT_TOOL_PROTOCOL,
     timeout:         DEFAULT_TIMEOUT,
     maxToken:        DEFAULT_MAX_TOKEN,
     commandPattern:  none(string),
@@ -483,12 +628,30 @@ func defaultConfig*(): Config =
     cache:           DEFAULT_CACHE,
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
-    cacheTriggerThreshold:
-      DEFAULT_CACHE_TRIGGER_THRESHOLD,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
     vivid:           DEFAULT_VIVID,
-    maxRounds:       DEFAULT_MAX_ROUNDS
+    maxRounds:       DEFAULT_MAX_ROUNDS,
+    maxToolCalls:    DEFAULT_MAX_TOOL_CALLS,
+    maxParallel:     DEFAULT_MAX_PARALLEL,
+    commandTimeout:  DEFAULT_COMMAND_TIMEOUT,
+    maxOutputBytes:  DEFAULT_MAX_OUTPUT_BYTES
   )
+
+when defined(getTest):
+  ## Parses configuration JSON without filesystem access in test builds.
+  ##
+  ## :param content: Raw JSON object text.
+  ## :returns: Migrated and normalized Config value.
+  ## :raises: JsonParsingError: If the input is not valid JSON.
+  ##
+  ## .. code-block:: nim
+  ##   runnableExamples:
+  ##     discard
+  proc parseConfigForTest*(content: string): Config =
+    result = implJsonToConfig(
+      parseJson(content),
+      defaultConfig()
+    )
 
 # ---------------------------------------------------------------------------
 # Public API — key storage
@@ -632,6 +795,10 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     $cfg.doubleCheck, classifyBool(cfg.doubleCheck))
   styleConfigValue(sk, "instance", $cfg.instance,
     classifyBool(cfg.instance))
+  styleConfigValue(sk, "harness", cfg.harness,
+    vsGood)
+  styleConfigValue(sk, "tool-protocol",
+    cfg.toolProtocol, vsGood)
   styleConfigValue(sk, "timeout",
     formatIntOrDisable(cfg.timeout),
     classifyInt(cfg.timeout, 1, 3600))
@@ -641,6 +808,18 @@ proc displayConfig*(sk: StyleKind = skSimp) =
   styleConfigValue(sk, "max-rounds",
     formatIntOrDisable(cfg.maxRounds),
     classifyInt(cfg.maxRounds, 1, 10))
+  styleConfigValue(sk, "max-tool-calls",
+    formatIntOrDisable(cfg.maxToolCalls),
+    classifyInt(cfg.maxToolCalls, 1, 64))
+  styleConfigValue(sk, "max-parallel",
+    formatIntOrDisable(cfg.maxParallel),
+    classifyInt(cfg.maxParallel, 1, 16))
+  styleConfigValue(sk, "command-timeout",
+    formatIntOrDisable(cfg.commandTimeout),
+    classifyInt(cfg.commandTimeout, 1, 3600))
+  styleConfigValue(sk, "max-output-bytes",
+    formatIntOrDisable(cfg.maxOutputBytes),
+    classifyInt(cfg.maxOutputBytes, 1024, 100_000_000))
   let (cmdPat, cmdState, cmdTrailer) =
     classifyCommandPattern(cfg.commandPattern)
   styleConfigValue(sk, "command-pattern", cmdPat,
@@ -666,9 +845,6 @@ proc displayConfig*(sk: StyleKind = skSimp) =
   styleConfigValue(sk, "cache-max-entries",
     formatIntOrDisable(cfg.cacheMaxEntries),
     classifyInt(cfg.cacheMaxEntries, 1, 100_000))
-  styleConfigValue(sk, "cache-trigger-threshold",
-    formatIntOrDisable(cfg.cacheTriggerThreshold),
-    classifyInt(cfg.cacheTriggerThreshold, 0, 100))
   styleConfigValue(sk, "log-max-entries",
     formatIntOrDisable(cfg.logMaxEntries),
     classifyInt(cfg.logMaxEntries, 1, 100_000))
@@ -743,6 +919,24 @@ proc setConfigOption*(
   of "instance":
     cfg.instance = implParseBool(
       value, name, DEFAULT_INSTANCE)
+    cfg.harness =
+      if cfg.instance: "direct"
+      else: DEFAULT_HARNESS
+  of "harness":
+    try:
+      cfg.harness = harnessName(parseHarnessKind(
+        if value.len > 0: value else: DEFAULT_HARNESS))
+    except ValueError as error:
+      raise newException(GetError,
+        fmt"invalid value '{value}' for '{name}': {error.msg}")
+    cfg.instance = cfg.harness == "direct"
+  of "tool-protocol":
+    try:
+      cfg.toolProtocol = toolProtocolName(parseToolProtocolKind(
+        if value.len > 0: value else: DEFAULT_TOOL_PROTOCOL))
+    except ValueError as error:
+      raise newException(GetError,
+        fmt"invalid value '{value}' for '{name}': {error.msg}")
   of "timeout":
     cfg.timeout = implParseIntOrDisable(
       value, name, DEFAULT_TIMEOUT)
@@ -757,11 +951,12 @@ proc setConfigOption*(
         styleWarning(toStyleKind(cfg.vivid),
           safetyWarn)
     elif explicit:
-      # ``get set command-pattern ""`` - disable filtering.
+      # Disable only the supplemental user regex. The mandatory
+      # read-only policy remains active in the query dispatcher.
       cfg.commandPattern = some("")
       styleWarning(toStyleKind(cfg.vivid),
         "warning: command-pattern cleared - " &
-        "no forbidden command filtering is active")
+        "mandatory read-only policy remains active")
     else:
       # ``get set command-pattern`` (no value) - restore default.
       cfg.commandPattern = none(string)
@@ -790,10 +985,6 @@ proc setConfigOption*(
   of "cache-max-entries":
     cfg.cacheMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_CACHE_MAX_ENTRIES)
-  of "cache-trigger-threshold":
-    cfg.cacheTriggerThreshold =
-      implParseIntOrDisable(value, name,
-        DEFAULT_CACHE_TRIGGER_THRESHOLD)
   of "log-max-entries":
     cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)
@@ -801,8 +992,25 @@ proc setConfigOption*(
     cfg.vivid = implParseBool(
       value, name, DEFAULT_VIVID)
   of "max-rounds":
-    cfg.maxRounds = implParseIntOrDisable(
-      value, name, DEFAULT_MAX_ROUNDS)
+    cfg.maxRounds = implParsePositiveInt(
+      value, name, DEFAULT_MAX_ROUNDS,
+      MAX_HARNESS_ROUNDS)
+  of "max-tool-calls":
+    cfg.maxToolCalls = implParsePositiveInt(
+      value, name, DEFAULT_MAX_TOOL_CALLS,
+      MAX_HARNESS_TOOL_CALLS)
+  of "max-parallel":
+    cfg.maxParallel = implParsePositiveInt(
+      value, name, DEFAULT_MAX_PARALLEL,
+      MAX_HARNESS_PARALLEL)
+  of "command-timeout":
+    cfg.commandTimeout = implParsePositiveInt(
+      value, name, DEFAULT_COMMAND_TIMEOUT,
+      MAX_COMMAND_TIMEOUT)
+  of "max-output-bytes":
+    cfg.maxOutputBytes = implParsePositiveInt(
+      value, name, DEFAULT_MAX_OUTPUT_BYTES,
+      MAX_COMMAND_OUTPUT_BYTES)
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")

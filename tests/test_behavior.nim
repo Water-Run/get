@@ -2,16 +2,17 @@ import std/[json, options, strutils, unittest]
 
 import ../src/config
 import ../src/get
+import ../src/harness_prompt
+import ../src/harness_types
 import ../src/llm
-import ../src/prompt
 import ../src/sysinfo
 import ../src/utils
 
 suite "version metadata":
-  test "uses release version 2.1 consistently":
+  test "uses release version 3.0.0 consistently":
     const nimbleContent = staticRead("../get.nimble")
-    check APP_VERSION == "2.1"
-    check nimbleContent.contains("version       = \"2.1\"")
+    check APP_VERSION == "3.0.0"
+    check nimbleContent.contains("version       = \"3.0.0\"")
 
 suite "response parsing":
   test "strips provider think blocks from chat content":
@@ -25,7 +26,7 @@ suite "response parsing":
       ],
       "usage": {"total_tokens": 9}
     })
-    let resp = parseResponseForTest(body)
+    let resp = parseLlmResponseForTest(body)
     check resp.content == "ok"
     check resp.tokensUsed == 9
 
@@ -39,7 +40,7 @@ suite "response parsing":
         }
       ]
     })
-    let resp = parseResponseForTest(body)
+    let resp = parseLlmResponseForTest(body)
     check resp.content == "answer"
 
 suite "model classification":
@@ -141,16 +142,17 @@ suite "prompt guidance":
       hostname: "host",
       username: "user",
       cwd: "C:\\Work",
+      localDate: "2026-08-24",
       shell: "powershell",
       shellVersion: "5.1",
       availableTools: @["rg"]
     )
-    let msgs = buildInstanceMessages(
-      info, "list files", "powershell", none(string), none(string))
+    let msgs = buildHarnessMessages(
+      info, "list files", "powershell", hkAuto,
+      defaultRunBudget(hkAuto), none(string), none(string))
     let sys = msgs[0].content
     check sys.contains("Get-ChildItem")
-    check sys.contains("Do not use placeholders")
-    check sys.contains("Return only commands that can run as-is")
+    check sys.contains("without placeholders")
+    check sys.contains("return only commands that can run as-is")
     check sys.contains("Never answer dynamic or machine-local questions from memory")
     check sys.contains("[Environment]::GetFolderPath('UserProfile')")
-

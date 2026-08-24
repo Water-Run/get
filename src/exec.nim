@@ -2,7 +2,7 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-08-24
 ## :File: exec.nim
 ## :License: AGPL-3.0
 ##
@@ -27,11 +27,11 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[osproc, streams, strformat,
-            strutils]
+import std/[atomics, locks, monotimes, os, osproc, streams,
+            strformat, strutils, times]
 
-when defined(windows):
-  import std/os
+when defined(posix):
+  import std/posix
 
 import style
 import utils
@@ -69,12 +69,134 @@ const POWERSHELL_UTF8_PRELUDE =
 ## Encapsulates the result of a shell command execution.
 type
   ExecResult* = object
-    output*: string   ## Combined stdout and stderr output.
-    exitCode*: int    ## Process exit code (0 = success).
+    output*: string    ## Combined stdout and stderr output.
+    exitCode*: int     ## Process exit code (0 = success).
+    elapsedMs*: int64  ## Wall-clock execution duration in milliseconds.
+    timedOut*: bool    ## Whether the configured deadline stopped the process.
+    truncated*: bool   ## Whether the output byte cap stopped capture.
+
+## Shares deadline state with a command watchdog thread.
+type
+  WatchdogContext = object
+    process: Process           ## Process whose tree is being supervised.
+    completed: ptr Atomic[bool] ## Set when normal capture has completed.
+    timedOut: ptr Atomic[bool] ## Set when the deadline is reached.
+    timeoutMs: int             ## Positive watchdog deadline in milliseconds.
+
+# ---------------------------------------------------------------------------
+# Module state
+# ---------------------------------------------------------------------------
+
+## Maximum concurrently tracked command processes.
+const MAX_TRACKED_PROCESSES = 1024
+
+## Protects the active child-process registry across parallel workers.
+var activeProcessLock: Lock
+
+## Serializes process creation until new parent-side pipe handles are CLOEXEC.
+var processStartLock: Lock
+
+## Contains raw shell references that must be cancelled on Ctrl+C.
+## Workers retain ownership; raw pointers avoid cross-thread GC roots.
+var activeProcessSlots: array[MAX_TRACKED_PROCESSES, pointer]
+
+initLock(activeProcessLock)
+initLock(processStartLock)
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+## Adds one started shell to the interrupt-cancellation registry.
+##
+## :param process: Started shell process.
+proc implRegisterProcess(process: Process) {.gcsafe.} =
+  acquire(activeProcessLock)
+  for index in 0 ..< activeProcessSlots.len:
+    if activeProcessSlots[index].isNil:
+      activeProcessSlots[index] = cast[pointer](process)
+      break
+  release(activeProcessLock)
+
+## Removes one completed shell from the interrupt-cancellation registry.
+##
+## :param process: Completed shell process.
+proc implUnregisterProcess(process: Process) {.gcsafe.} =
+  acquire(activeProcessLock)
+  let target = cast[pointer](process)
+  for index in 0 ..< activeProcessSlots.len:
+    if activeProcessSlots[index] == target:
+      activeProcessSlots[index] = nil
+      break
+  release(activeProcessLock)
+
+## Prevents future child processes from inheriting parent-side process pipes.
+##
+## :param process: Newly started process whose pipe handles must be isolated.
+proc implPreventPipeInheritance(process: Process) {.gcsafe.} =
+  when declared(setInheritable):
+    discard setInheritable(process.inputHandle, false)
+    discard setInheritable(process.outputHandle, false)
+    discard setInheritable(process.errorHandle, false)
+
+## Stops a shell process and, on POSIX, every child in its process group.
+##
+## :param process: Running shell process to stop.
+proc implTerminateProcessTree(process: Process) {.gcsafe.} =
+  if process.isNil:
+    return
+  when defined(posix):
+    let groupId = Pid(-process.processID)
+    discard posix.kill(groupId, SIGTERM)
+    sleep(50)
+    try:
+      if process.running():
+        discard posix.kill(groupId, SIGKILL)
+    except OSError, ValueError:
+      discard
+  else:
+    try:
+      var killer: Process
+      acquire(processStartLock)
+      try:
+        killer = startProcess(
+          "taskkill",
+          args = @[
+            "/PID", $process.processID,
+            "/T", "/F"
+          ],
+          options = {poUsePath, poStdErrToStdOut}
+        )
+        implPreventPipeInheritance(killer)
+      finally:
+        release(processStartLock)
+      discard killer.outputStream.readAll()
+      discard killer.waitForExit(2000)
+      killer.close()
+    except OSError, IOError, ValueError:
+      try:
+        process.terminate()
+      except OSError, ValueError:
+        discard
+
+## Enforces one process deadline while its blocking pipe is drained elsewhere.
+##
+## Nim's portable process streams are blocking and expose no async handle.
+## A tiny watchdog thread is therefore required to interrupt a silent process;
+## model networking continues to use asyncdispatch independently.
+##
+## :param context: Process and atomic deadline state copied into the thread.
+proc implWatchCommand(context: WatchdogContext) {.thread, gcsafe.} =
+  var waitedMs = 0
+  while waitedMs < context.timeoutMs:
+    if context.completed[].load():
+      return
+    let interval = min(10, context.timeoutMs - waitedMs)
+    sleep(interval)
+    waitedMs += interval
+  if not context.completed[].load():
+    context.timedOut[].store(true)
+    implTerminateProcessTree(context.process)
 
 ## Builds the argument list for invoking a command through the
 ## given shell.  For PowerShell and pwsh shells, the UTF-8
@@ -539,6 +661,24 @@ when defined(windows):
 # Public API
 # ---------------------------------------------------------------------------
 
+## Stops every command currently owned by this process.
+##
+## The Ctrl+C handler calls this before exiting so detached POSIX process
+## groups and Windows child trees do not survive their parent CLI process.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard
+proc terminateActiveCommands*() =
+  acquire(activeProcessLock)
+  for index in 0 ..< activeProcessSlots.len:
+    let processPointer = activeProcessSlots[index]
+    if not processPointer.isNil:
+      implTerminateProcessTree(
+        cast[Process](processPointer))
+    activeProcessSlots[index] = nil
+  release(activeProcessLock)
+
 ## Displays the command and reads a y/N confirmation.  Returns
 ## true only when the user types "y" (case-insensitive).
 ##
@@ -580,19 +720,151 @@ proc confirmExecution*(
   let response = implReadTerminalLine()
   result = toLowerAscii(response.strip()) == "y"
 
-## Executes a command string through the specified shell and
-## returns the captured combined output together with the exit
-## code.  On Windows the captured byte stream is passed through
-## ``implNormalizeWindowsOutput`` so that the caller always
-## receives a valid UTF-8 string regardless of whether the
-## child process emitted UTF-8, UTF-16LE with or without a BOM,
-## OEM code-page text (e.g. CP936 from ``ipconfig``), or ANSI
-## code-page text.  On Linux the raw bytes — which are already
-## UTF-8 — are returned unchanged.
+## Executes a shell command with deadline and output-size enforcement.
 ##
-## :param command: The command to execute.
+## A dedicated watchdog interrupts silent processes because portable Nim
+## process streams block while awaiting bytes. POSIX shells are placed in a
+## separate process group so timeout and truncation stop their whole tree.
+## Windows uses ``taskkill /T`` to stop the corresponding process tree.
+## Captured Windows bytes retain the existing UTF normalization behavior.
+##
+## :param command: Validated command to execute.
 ## :param shell: Shell executable name or path.
-## :returns: An ExecResult with captured output and exit code.
+## :param timeoutSec: Deadline in seconds; zero disables it.
+## :param maxOutputBytes: Capture cap in bytes; zero disables it.
+## :returns: A bounded result with status and timing metadata.
+## :raises: GetError: If the shell process cannot be started.
+##
+## .. code-block:: nim
+##   runnableExamples:
+##     discard
+proc executeCommandBounded*(
+  command: string,
+  shell: string,
+  timeoutSec: int,
+  maxOutputBytes: int
+): ExecResult =
+  if timeoutSec < 0:
+    raise newException(GetError,
+      "command timeout must not be negative")
+  if maxOutputBytes < 0:
+    raise newException(GetError,
+      "command output limit must not be negative")
+  let started = getMonoTime()
+  let effectiveCommand = implApplyWindowsCompatCommand(
+    command, shell)
+  let args = implBuildShellArgs(
+    shell, effectiveCommand)
+  var p: Process
+  acquire(processStartLock)
+  try:
+    p = startProcess(
+      shell,
+      args = args,
+      options =
+        when defined(posix):
+          {poStdErrToStdOut, poUsePath, poDaemon}
+        else:
+          {poStdErrToStdOut, poUsePath})
+    implPreventPipeInheritance(p)
+  except OSError as e:
+    raise newException(GetError,
+      fmt"cannot start shell '{shell}': {e.msg}")
+  except IOError as e:
+    raise newException(GetError,
+      fmt"cannot start shell '{shell}': {e.msg}")
+  finally:
+    release(processStartLock)
+  implRegisterProcess(p)
+
+  var completed: Atomic[bool]
+  var timedOut: Atomic[bool]
+  completed.store(false)
+  timedOut.store(false)
+  var watchdog: Thread[WatchdogContext]
+  let usesWatchdog = timeoutSec > 0
+  if usesWatchdog:
+    let timeoutMs =
+      if timeoutSec > high(int) div 1000:
+        high(int)
+      else:
+        timeoutSec * 1000
+    createThread(watchdog, implWatchCommand, WatchdogContext(
+      process: p,
+      completed: addr completed,
+      timedOut: addr timedOut,
+      timeoutMs: timeoutMs
+    ))
+
+  var rawOutput = ""
+  var exitCode = -1
+  var truncated = false
+  let outp = p.outputStream
+  var buffer: array[8192, char]
+  try:
+    while true:
+      let count = outp.readData(addr buffer[0], buffer.len)
+      if count <= 0:
+        exitCode = p.peekExitCode()
+        if exitCode != -1:
+          break
+        continue
+      if maxOutputBytes <= 0 or rawOutput.len < maxOutputBytes:
+        let remaining =
+          if maxOutputBytes <= 0:
+            count
+          else:
+            min(count, maxOutputBytes - rawOutput.len)
+        if remaining > 0:
+          let previousLength = rawOutput.len
+          rawOutput.setLen(previousLength + remaining)
+          copyMem(
+            addr rawOutput[previousLength],
+            addr buffer[0],
+            remaining
+          )
+        if remaining < count and not truncated:
+          truncated = true
+          implTerminateProcessTree(p)
+      else:
+        if not truncated:
+          truncated = true
+          implTerminateProcessTree(p)
+  finally:
+    completed.store(true)
+    if usesWatchdog:
+      joinThread(watchdog)
+    if exitCode == -1:
+      try:
+        exitCode = p.waitForExit(1000)
+      except OSError, ValueError:
+        exitCode = -1
+    implUnregisterProcess(p)
+    p.close()
+
+  when defined(windows):
+    let output = implNormalizeWindowsOutput(
+      rawOutput)
+  else:
+    let output = rawOutput
+  result = ExecResult(
+    output: output,
+    exitCode:
+      if exitCode == -1: 1
+      else: exitCode,
+    elapsedMs: (getMonoTime() - started).inMilliseconds,
+    timedOut: timedOut.load(),
+    truncated: truncated
+  )
+
+## Executes a command with compatibility defaults and captures its output.
+##
+## This v2-compatible wrapper has no deadline or output cap. New harness code
+## uses ``executeCommandBounded`` with explicit budgets.
+##
+## :param command: Validated command to execute.
+## :param shell: Shell executable name or path.
+## :returns: An unbounded ExecResult.
 ## :raises: GetError: If the shell process cannot be started.
 ##
 ## .. code-block:: nim
@@ -602,42 +874,9 @@ proc executeCommand*(
   command: string,
   shell: string
 ): ExecResult =
-  let effectiveCommand = implApplyWindowsCompatCommand(
-    command, shell)
-  let args = implBuildShellArgs(
-    shell, effectiveCommand)
-  var p: Process
-  try:
-    p = startProcess(
-      shell,
-      args = args,
-      options = {poStdErrToStdOut, poUsePath})
-  except OSError as e:
-    raise newException(GetError,
-      fmt"cannot start shell '{shell}': {e.msg}")
-  # NOTE:
-  # On Windows, PowerShell child processes can produce truncated
-  # output when the pipe is drained via a single readAll call
-  # before process completion. Read line-by-line until the child
-  # actually exits (same pattern used by std/osproc.execCmdEx).
-  var rawOutput = ""
-  var exitCode = -1
-  let outp = p.outputStream
-  var line = newStringOfCap(256)
-  while true:
-    if outp.readLine(line):
-      rawOutput.add(line)
-      rawOutput.add("\n")
-    else:
-      exitCode = p.peekExitCode()
-      if exitCode != -1:
-        break
-  p.close()
-  when defined(windows):
-    let output = implNormalizeWindowsOutput(
-      rawOutput)
-  else:
-    let output = rawOutput
-  result = ExecResult(
-    output: output,
-    exitCode: exitCode)
+  result = executeCommandBounded(
+    command,
+    shell,
+    timeoutSec = 0,
+    maxOutputBytes = 0
+  )

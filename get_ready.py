@@ -2,7 +2,7 @@
 """
 get_ready.py -- installer for `get`.
 
-The v2.1 release package is intentionally flat:
+The v3.0 release package is intentionally flat:
 
     get_ready.py
     get-linux-x64
@@ -507,7 +507,7 @@ def configure_model(binary: Path) -> None:
 def configure_advanced(binary: Path) -> None:
     banner("Advanced configuration")
     for option, default in (
-        ("double-check", "y"),
+        ("double-check", "n"),
         ("manual-confirm", "n"),
         ("cache", "y"),
         ("vivid", "y"),

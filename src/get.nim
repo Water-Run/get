@@ -2,41 +2,31 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-08-24
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
 ## This module parses command-line arguments, routes execution to
 ## the appropriate subcommand handler, and manages top-level error
-## reporting.  The query flow supports two modes:
-##
-##   Instance — single LLM call, one command, direct output.
-##
-##   Agent    — multi-round loop where the LLM can execute
-##              intermediate commands to gather information before
-##              producing a final answer.  An urgency counter
-##              increases each round to encourage convergence, and
-##              a hard cap (max-rounds, default 3) prevents
-##              unbounded loops.
-##
-## Every command — whether intermediate or final — passes through
-## all safety layers before execution: forbidden-command pattern,
-## double-check LLM review, and optional manual confirmation.
-##
-## Caching uses a deferred-decision mechanism: the first execution
-## of a query merely marks it as "seen"; only on the second
-## execution (or when --cache is explicitly passed) does the tool
-## invoke the LLM to choose a caching strategy.  When the global
-## config option ``cache`` is false, all caching logic — including
-## seen tracking — is completely disabled.
+## reporting. The v3 query path uses one typed model/action/tool/observation
+## state machine with auto, direct, loop, and parallel strategy policies.
+## Provider-native tool calls are preferred, structured JSON is the fallback,
+## and the old Markdown markers are isolated in a compatibility decoder.
+## Every fresh or cached command passes through the same safety gate and a
+## bounded executor before it can run.
 
 {.experimental: "strictFuncs".}
 
 import std/[os, strformat, strutils, options, times]
 
 import cache
+import command_policy
 import config
 import exec
+import harness_executor
+import harness_prompt
+import harness_runtime
+import harness_types
 import llm
 import logger
 import prompt
@@ -48,12 +38,8 @@ import utils
 # Constants
 # ---------------------------------------------------------------------------
 
-## Maximum characters of output included in the cache-worthiness
-## check prompt to keep the token cost low.
-const CACHE_CHECK_PREVIEW_LEN = 200
-
 ## Maximum characters of intermediate output shown to the user
-## during agent loop rounds (when hideProcess is false).
+## during continuation turns (when hideProcess is false).
 const INTERMEDIATE_OUTPUT_PREVIEW_LEN = 500
 
 ## Comprehensive help text displayed by `get help`.
@@ -67,7 +53,7 @@ usage:
   get log [flags]              view or manage execution log
   get get [flags]              display application information
   get author                   display application author
-  get version                  display version
+  get version, --version, -V   display version
   get isok                     verify configuration readiness
   get help                     display this help message
 
@@ -79,11 +65,13 @@ query flags (per-invocation overrides):
   --double-check               enable safety review
   --no-double-check            skip safety review
   --instance                   fast single-call mode
-  --no-instance                multi-step agent mode
+  --no-instance                compatibility alias for loop
+  --harness <kind>             auto, direct, loop, or parallel
+  --protocol <kind>            auto, native, or legacy
   --hide-process               suppress intermediate output
   --no-hide-process            show intermediate output
   --system-proxy               prefer OS system proxy settings
-  --no-system-proxy            follow terminal proxy environment only
+  --no-system-proxy            use terminal proxy environment only
   --vivid                      enable vivid output mode
   --no-vivid                   plain text output mode
   --model <name>               override LLM model
@@ -98,19 +86,31 @@ set options:
   manual-confirm     prompt before executing
                        (true/false, default: false)
   double-check       second model safety review
-                       (true/false, default: true)
-  instance           faster model replies
                        (true/false, default: false)
+  instance           v2 compatibility alias for direct
+                       (true/false, default: false)
+  harness            orchestration strategy
+                       (auto/direct/loop/parallel, default: auto)
+  tool-protocol      model tool protocol
+                       (auto/native/legacy, default: auto)
   timeout            request timeout in seconds
                        (integer or false, default: 300)
   max-token          max tokens per request
                        (integer or false, default: 20480)
-  max-rounds         max agent loop rounds (non-instance)
-                       (integer or false, default: 3)
+  max-rounds         hard model-turn limit
+                       (positive integer, default: 3)
+  max-tool-calls     max tool calls per run
+                       (integer, default: 8)
+  max-parallel       max concurrent tool calls
+                       (integer, default: 4)
+  command-timeout    command deadline in seconds
+                       (positive integer, default: 30)
+  max-output-bytes   captured bytes per command
+                       (positive integer, default: 1048576)
   command-pattern    forbidden command regex; omit value to
                        restore the built-in default, use ""
-                       to disable filtering entirely
-                       (string, default: built-in blocklist)
+                       to disable only the supplemental regex
+                       (string, default: built-in supplemental blocklist)
   system-prompt      custom system prompt
                        (string, default: empty)
   shell              shell executable
@@ -120,7 +120,7 @@ set options:
   hide-process       hide intermediate output
                        (true/false, default: false)
   system-proxy       prefer OS system proxy settings; when false,
-                       only terminal proxy environment variables are used
+                       use terminal proxy environment only
                        (true/false, default: false)
   cache              enable response caching
                        (true/false, default: true)
@@ -128,16 +128,13 @@ set options:
                        (integer or false, default: 30)
   cache-max-entries  max cached entries
                        (integer or false, default: 1000)
-  cache-trigger-threshold
-                     number of prior executions required
-                       before triggering cache decision
-                       (integer or false, default: 1)
   log-max-entries    max log entries retained
                        (integer or false, default: 1000)
   vivid              vivid output mode with colours and animation
                        (true/false, default: true)
 
-  Integer options accept 'false' to disable the limit.
+  Request, cache, and log limits accept 'false'. Harness and command
+  safety limits require a positive integer.
 
 config flags:
   (none)             display all current settings
@@ -157,8 +154,8 @@ get flags:
   (none)             display all application info
   --name             display application name
   --intro            display introduction
-  --author           display author
   --version          display version
+  --author           display author
   --license          display license identifier
   --github           display GitHub URL
 
@@ -173,8 +170,6 @@ examples:
   get set max-rounds 5
   get set command-pattern
   get set command-pattern ""
-  get author
-  get get --author
   get config --model
   get config --command-pattern
   get cache --clean
@@ -192,6 +187,8 @@ type
     manualConfirm*: Option[bool] ## Override manual-confirm.
     doubleCheck*: Option[bool]   ## Override double-check.
     instance*: Option[bool]      ## Override instance mode.
+    harness*: Option[string]     ## Override v3 harness strategy.
+    toolProtocol*: Option[string] ## Override provider tool protocol.
     hideProcess*: Option[bool]   ## Override hide-process.
     systemProxy*: Option[bool]   ## Override system-proxy.
     vivid*: Option[bool]         ## Override vivid mode.
@@ -201,6 +198,36 @@ type
 # ---------------------------------------------------------------------------
 # Private helpers — usage errors
 # ---------------------------------------------------------------------------
+
+when defined(posix):
+  ## Exits with an unsaturated POSIX status.
+  ##
+  ## Nim's public ``quit(int)`` saturates values above int8 to 127 even though
+  ## POSIX process statuses use eight unsigned bits.
+  ##
+  ## :param errorCode: Raw process exit status in the range 0 through 255.
+  proc implPosixExit(errorCode: cint) {.
+    importc: "_exit", header: "<unistd.h>", noreturn.}
+
+## Exits while preserving a process-style status on every supported platform.
+##
+## :param errorCode: Command or signal-compatible exit status.
+proc implQuitWithCode(errorCode: int) {.noreturn.} =
+  when defined(posix):
+    try:
+      stdout.flushFile()
+    except IOError:
+      discard
+    try:
+      stderr.flushFile()
+    except IOError:
+      discard
+    let normalized =
+      if errorCode < 0: 1
+      else: errorCode mod 256
+    implPosixExit(normalized.cint)
+  else:
+    quit(errorCode)
 
 ## Raises a GetError whose message includes the standard help
 ## hint.
@@ -220,7 +247,7 @@ proc implUsageError(
 ##
 ## :param args: All CLI arguments (after subcommand routing).
 ## :returns: A tuple of (query string, QueryOverrides).
-## :raises: GetError: If a flag that requires a value is missing.
+## :raises: GetError: If a required value is missing or invalid.
 func implParseQueryArgs(
   args: seq[string]
 ): tuple[query: string, overrides: QueryOverrides] =
@@ -231,6 +258,8 @@ func implParseQueryArgs(
     manualConfirm: none(bool),
     doubleCheck: none(bool),
     instance: none(bool),
+    harness: none(string),
+    toolProtocol: none(string),
     hideProcess: none(bool),
     systemProxy: none(bool),
     vivid: none(bool),
@@ -257,6 +286,28 @@ func implParseQueryArgs(
       ov.instance = some(true)
     of "--no-instance":
       ov.instance = some(false)
+    of "--harness":
+      if i + 1 >= args.len:
+        raise newException(GetError,
+          "--harness requires a value")
+      i += 1
+      try:
+        ov.harness = some(harnessName(
+          parseHarnessKind(args[i])))
+      except ValueError as error:
+        raise newException(GetError,
+          fmt"invalid harness value: {error.msg}")
+    of "--protocol":
+      if i + 1 >= args.len:
+        raise newException(GetError,
+          "--protocol requires a value")
+      i += 1
+      try:
+        ov.toolProtocol = some(toolProtocolName(
+          parseToolProtocolKind(args[i])))
+      except ValueError as error:
+        raise newException(GetError,
+          fmt"invalid protocol value: {error.msg}")
     of "--hide-process":
       ov.hideProcess = some(true)
     of "--no-hide-process":
@@ -281,7 +332,11 @@ func implParseQueryArgs(
           "--timeout requires a value")
       i += 1
       try:
-        ov.timeout = some(parseInt(args[i]))
+        let timeout = parseInt(args[i])
+        if timeout <= 0:
+          raise newException(ValueError,
+            "timeout must be positive")
+        ov.timeout = some(timeout)
       except ValueError:
         raise newException(GetError,
           fmt"invalid timeout value: {args[i]}")
@@ -309,6 +364,14 @@ proc implApplyOverrides(
     cfg.doubleCheck = ov.doubleCheck.get
   if ov.instance.isSome:
     cfg.instance = ov.instance.get
+    cfg.harness =
+      if cfg.instance: "direct"
+      else: "loop"
+  if ov.harness.isSome:
+    cfg.harness = ov.harness.get
+    cfg.instance = cfg.harness == "direct"
+  if ov.toolProtocol.isSome:
+    cfg.toolProtocol = ov.toolProtocol.get
   if ov.hideProcess.isSome:
     cfg.hideProcess = ov.hideProcess.get
   if ov.systemProxy.isSome:
@@ -391,8 +454,8 @@ proc implEffectivePattern(
     if pat.len == 0:
       if not hideProcess:
         styleWarning(sk,
-          "warning: command-pattern is empty — " &
-          "no forbidden command filtering is active")
+          "warning: command-pattern is empty — only the " &
+          "mandatory read-only policy remains active")
       return ""
     return pat
   result = DEFAULT_COMMAND_PATTERN
@@ -400,6 +463,46 @@ proc implEffectivePattern(
 # ---------------------------------------------------------------------------
 # Private helpers — safety checks
 # ---------------------------------------------------------------------------
+
+## Enforces mandatory and user-configured command policy layers.
+##
+## :param command: Model-proposed, revised, or cached command.
+## :param query: Original query used for rejection logging.
+## :param cfg: Effective runtime configuration.
+## :param sk: Active terminal style.
+## :param effectivePattern: Optional supplemental forbidden regex.
+proc implEnforceCommandPolicy(
+  command: string,
+  query: string,
+  cfg: Config,
+  sk: StyleKind,
+  effectivePattern: string
+) =
+  let baseline = checkReadOnlyCommand(command)
+  if not baseline.allowed:
+    styleError(sk,
+      "error: read-only policy rejected command — " &
+      baseline.reason)
+    if cfg.log:
+      logExecution(
+        query,
+        command,
+        "rejected by mandatory read-only policy: " &
+          baseline.reason,
+        1,
+        cfg.logMaxEntries
+      )
+    quit(1)
+  if effectivePattern.len > 0 and
+      not validateCommandPattern(command, effectivePattern):
+    styleError(sk,
+      "error: command matches forbidden " &
+      "pattern — rejected")
+    if cfg.log:
+      logExecution(query, command,
+        "rejected by forbidden pattern", 1,
+        cfg.logMaxEntries)
+    quit(1)
 
 ## Performs the double-check safety review on a command.
 ##
@@ -424,7 +527,13 @@ proc implDoubleCheck(
     command, query, info)
   let resp = implLlmCall(msgs, cfg, key, sk)
   let stripped = resp.content.strip()
-  if toUpperAscii(stripped) == "UNSAFE":
+  let verdictWords = stripped.splitWhitespace(maxsplit = 1)
+  let verdict = if verdictWords.len > 0:
+      verdictWords[0].strip(
+        chars = {'`', '*', '_', '.', ',', ':', ';', '!', '?'})
+    else:
+      ""
+  if cmpIgnoreCase(verdict, "UNSAFE") == 0:
     styleError(sk,
       "error: command deemed unsafe by review")
     quit(1)
@@ -457,190 +566,22 @@ proc implSafetyCheck(
   sk: StyleKind,
   effectivePattern: string
 ): string =
-  if effectivePattern.len > 0:
-    if not validateCommandPattern(
-        command, effectivePattern):
-      styleError(sk,
-        "error: command matches forbidden " &
-        "pattern — rejected")
-      if cfg.log:
-        logExecution(query, command,
-          "rejected by forbidden pattern", 1,
-          cfg.logMaxEntries)
-      quit(1)
+  implEnforceCommandPolicy(
+    command, query, cfg, sk, effectivePattern)
   var checked = command
   if cfg.doubleCheck:
     checked = implDoubleCheck(
       command, query, info, cfg, key, sk)
     if checked != command and not cfg.hideProcess:
       styleCommand(sk, "revised command", checked)
+    implEnforceCommandPolicy(
+      checked, query, cfg, sk, effectivePattern)
   if cfg.manualConfirm:
     let showCmd = cfg.hideProcess
     if not confirmExecution(checked, sk, showCmd):
       styleProgress(sk, "aborted.")
       quit(0)
   result = checked
-
-# ---------------------------------------------------------------------------
-# Private helpers — cache decision
-# ---------------------------------------------------------------------------
-
-## Parses a raw cache decision string into a CacheDecision.
-##
-## The parser applies a three-tier strategy:
-##
-##   Tier 1 — Exact match after stripping all non-alphanumeric
-##            characters and uppercasing (handles backslash-
-##            escaped underscores, Markdown emphasis, quotation
-##            marks, and similar formatting noise).
-##   Tier 2 — Substring match for the compound token (handles
-##            verbose responses that embed the token in a
-##            sentence).
-##   Tier 3 — Keyword-pair fallback (GLOBAL/CONTEXT +
-##            COMMAND/RESULT), applied only to short responses
-##            (≤ 30 alphanumeric characters) to avoid false
-##            positives in lengthy explanations.
-##
-## Concrete cache modes are always checked before NOCACHE so
-## that a response containing both a mode name and the word
-## "nocache" resolves in favour of caching.
-##
-## :param raw: The raw model output.
-## :returns: A parsed CacheDecision value.
-func implParseCacheDecision(
-  raw: string
-): CacheDecision =
-  # Strip every non-alphanumeric character and
-  # uppercase, so "GLOBAL\_COMMAND", `GLOBAL_COMMAND`,
-  # **GLOBAL_COMMAND**, "global-command" all collapse
-  # to "GLOBALCOMMAND".
-  var clean = newStringOfCap(raw.len)
-  for ch in raw:
-    if ch in {'A' .. 'Z', 'a' .. 'z',
-              '0' .. '9'}:
-      clean.add(ch)
-  clean = toUpperAscii(clean)
-  if clean.len == 0:
-    return cdNoCache
-
-  # --- Tier 1: exact match on stripped token ---
-  case clean
-  of "GLOBALCOMMAND":
-    return cdGlobalCommand
-  of "GLOBALRESULT":
-    return cdGlobalResult
-  of "CONTEXTCOMMAND":
-    return cdContextCommand
-  of "CONTEXTRESULT":
-    return cdContextResult
-  of "NOCACHE", "NOCACHING":
-    return cdNoCache
-  else:
-    discard
-
-  # --- Tier 2: compound-token substring ---
-  # Check CONTEXT before GLOBAL (more specific).
-  if clean.contains("CONTEXTRESULT"):
-    return cdContextResult
-  if clean.contains("CONTEXTCOMMAND"):
-    return cdContextCommand
-  if clean.contains("GLOBALRESULT"):
-    return cdGlobalResult
-  if clean.contains("GLOBALCOMMAND"):
-    return cdGlobalCommand
-
-  # --- Tier 3: keyword-pair fallback ---
-  # Only for short responses to prevent false
-  # positives when the model writes a full sentence
-  # that coincidentally contains both "context" and
-  # "result".
-  if clean.len <= 30:
-    let hasGlobal = clean.contains("GLOBAL")
-    let hasContext = clean.contains("CONTEXT")
-    let hasCommand = clean.contains("COMMAND")
-    let hasResult = clean.contains("RESULT")
-    if hasContext and hasResult:
-      return cdContextResult
-    if hasContext and hasCommand:
-      return cdContextCommand
-    if hasGlobal and hasResult:
-      return cdGlobalResult
-    if hasGlobal and hasCommand:
-      return cdGlobalCommand
-
-  # NOCACHE as substring (verbose refusal).
-  if clean.contains("NOCACHE"):
-    return cdNoCache
-
-  result = cdNoCache
-
-when defined(getTest):
-  ## Exposes cache decision parsing for test builds.
-  ##
-  ## :param raw: The raw model output.
-  ## :returns: A parsed CacheDecision value.
-  func parseCacheDecisionForTest*(raw: string): CacheDecision =
-    result = implParseCacheDecision(raw)
-
-## Asks the LLM whether and how a query result should be
-## cached.  Returns none on any failure so that callers can
-## distinguish "decided NOCACHE" from "decision step failed".
-## A dedicated spinner label is passed to sendLlmRequest so
-## the progress indicator shows context-specific text.
-##
-## When the LLM call fails, a warning is emitted in normal
-## process mode so that the user can diagnose connectivity
-## or configuration issues affecting the cache pipeline.
-##
-## :param query: The original user query.
-## :param command: The final command, or empty for plain text.
-## :param output: The full output.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :returns: The cache decision, or none on failure.
-proc implCacheDecision(
-  query: string,
-  command: string,
-  output: string,
-  cfg: Config,
-  key: string,
-  sk: StyleKind
-): Option[CacheDecision] =
-  try:
-    let preview =
-      if output.len > CACHE_CHECK_PREVIEW_LEN:
-        output[0 ..< CACHE_CHECK_PREVIEW_LEN] &
-          "..."
-      else:
-        output
-    let msgs = buildCacheCheckMessages(
-      query, command, preview)
-    let req = LlmRequest(
-      model: cfg.model,
-      messages: msgs,
-      maxTokens: cfg.maxToken
-    )
-    let resp = sendLlmRequest(
-      req,
-      cfg.url,
-      key,
-      timeoutSec = (
-        if cfg.timeout > 0: min(cfg.timeout, 30)
-        else: 30),
-      hideProcess = cfg.hideProcess,
-      sk = sk,
-      spinnerLabel = "checking cache decision",
-      preferSystemProxy = cfg.systemProxy
-    )
-    result = some(implParseCacheDecision(
-      resp.content))
-  except CatchableError as e:
-    if not cfg.hideProcess:
-      styleWarning(sk,
-        fmt"warning: cache decision failed: " &
-        fmt"{e.msg}")
-    result = none(CacheDecision)
 
 # ---------------------------------------------------------------------------
 # Private helpers — model strength warning
@@ -659,137 +600,131 @@ proc implWarnIfWeakModel(
       not isKnownStrongModel(model):
     styleWarning(sk, MODEL_STRENGTH_WARNING)
 
-## Handles the entire post-execution cache pipeline:
+# ---------------------------------------------------------------------------
+# Private helpers — v3 unified harness flow
+# ---------------------------------------------------------------------------
+
+## Builds enforced run limits from v3 configuration.
 ##
-##   1. When caching is disabled or the context says so, do
-##      nothing.
-##   2. First-time query -> just mark as seen.
-##   3. Previously decided NOCACHE -> print remembered notice,
-##      mark seen, skip the LLM decision call entirely.
-##   4. Nothing to cache (empty command and output) -> mark seen.
-##   5. Run the cache-decision LLM call, print the result,
-##      then persist the entry (or the NOCACHE memory).
+## :param cfg: Effective runtime configuration.
+## :param kind: Selected harness strategy.
+## :returns: A positive turn/tool/parallel budget and command bounds.
+func implHarnessBudget(cfg: Config, kind: HarnessKind): RunBudget =
+  let defaults = defaultRunBudget(kind)
+  result = RunBudget(
+    maxTurns:
+      if kind == hkDirect: 1
+      elif cfg.maxRounds > 0: cfg.maxRounds
+      else: defaults.maxTurns,
+    maxToolCalls:
+      if kind == hkDirect: 1
+      elif cfg.maxToolCalls > 0: cfg.maxToolCalls
+      else: defaults.maxToolCalls,
+    maxParallel:
+      if kind in {hkDirect, hkLoop}: 1
+      elif cfg.maxParallel > 0: cfg.maxParallel
+      else: defaults.maxParallel,
+    commandTimeoutSec: max(cfg.commandTimeout, 0),
+    maxOutputBytes: max(cfg.maxOutputBytes, 0)
+  )
+
+## Detects provider errors that specifically indicate unsupported tool fields.
 ##
-## :param cc: The cache context with hash keys and seen flag.
-## :param query: The original user query.
-## :param command: The final command, or empty for plain text.
-## :param output: The final output text.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-proc implHandleCacheOutcome(
-  cc: CacheContext,
+## :param message: Sanitized LLM API error message.
+## :returns: True only for compatible client errors mentioning tool features.
+func implCanFallbackTools(message: string): bool =
+  let lower = toLowerAscii(message)
+  let isClientError =
+    lower.contains("http 400") or
+    lower.contains("http 404") or
+    lower.contains("http 422")
+  let namesToolField =
+    lower.contains("tool") or
+    lower.contains("function")
+  result = isClientError and namesToolField
+
+## Stores a deterministic v3 cache entry without another model request.
+##
+## Successful single-command raw results cache the context-specific command so
+## future hits re-run it through the safety gate. Explicit ``--cache`` also
+## permits a final text result to be stored. Multi-step runs are not guessed.
+##
+## :param context: Precomputed versioned cache hashes.
+## :param query: Original user query.
+## :param value: Completed harness result.
+## :param forceResult: Whether the user explicitly requested caching.
+## :param cfg: Effective cache limits.
+## :param sk: Active terminal style.
+proc implStoreHarnessCache(
+  context: CacheContext,
   query: string,
-  command: string,
-  output: string,
+  value: HarnessResult,
+  forceResult: bool,
   cfg: Config,
-  key: string,
   sk: StyleKind
 ) =
-  if not cc.useCache:
+  if not context.useCache or value.exitCode != 0:
     return
-  var store = loadCache()
-  # Case 1: first time seeing this query.
-  if not cc.wasSeen:
-    markSeen(store, cc.queryHash,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
+  var entry = CacheEntry()
+  var shouldStore = false
+  if value.termination == htRawToolResult and
+      value.observations.len == 1 and
+      not value.observations[0].timedOut and
+      not value.observations[0].truncated:
+    entry = CacheEntry(
+      hash: context.contextHash,
+      scope: csContext,
+      cacheMode: cmCommand,
+      query: query,
+      command: value.observations[0].command,
+      output: "",
+      timestamp: epochTime().int64
+    )
+    shouldStore = true
+  elif forceResult and value.output.len > 0:
+    entry = CacheEntry(
+      hash: context.contextHash,
+      scope: csContext,
+      cacheMode: cmResult,
+      query: query,
+      command: "",
+      output: value.output,
+      timestamp: epochTime().int64
+    )
+    shouldStore = true
+  if not shouldStore:
     return
-  # Case 2: query was already decided as NOCACHE.
-  if isNoCacheDecided(store, cc.queryHash,
-      cfg.cacheExpiry):
+  try:
+    putCacheEntry(
+      entry,
+      cfg.cacheMaxEntries,
+      cfg.cacheExpiry
+    )
+  except CacheError as error:
     if not cfg.hideProcess:
-      styleProgress(sk,
-        "cache decision: nocache (remembered)")
-    markSeen(store, cc.queryHash,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
+      styleWarning(sk,
+        "warning: cache write skipped — " & error.msg)
     return
-  # Case 3: nothing worth deciding on.
-  if command.len == 0 and output.len == 0:
-    markSeen(store, cc.queryHash,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
-    return
-  # Case 4: invoke the LLM decision.
-  let decisionOpt = implCacheDecision(
-    query, command, output, cfg, key, sk)
-  if decisionOpt.isNone:
-    if not cfg.hideProcess:
-      styleProgress(sk,
-        "cache decision: failed (skipped)")
-    markSeen(store, cc.queryHash,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-    saveCache(store)
-    return
-  let decision = decisionOpt.get
   if not cfg.hideProcess:
-    let label = case decision
-      of cdGlobalCommand:
-        "global-command (command cached)"
-      of cdGlobalResult:
-        "global-result (output cached)"
-      of cdContextCommand:
-        "context-command (command cached)"
-      of cdContextResult:
-        "context-result (output cached)"
-      of cdNoCache:
-        "nocache (remembered, will skip next time)"
-    styleProgress(sk, "cache decision: " & label)
-  let ts = getTime().toUnix()
-  case decision
-  of cdGlobalResult:
-    addCacheEntry(store, CacheEntry(
-      hash: cc.globalHash, scope: csGlobal,
-      cacheMode: cmResult, query: query,
-      command: command, output: output,
-      timestamp: ts),
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-  of cdGlobalCommand:
-    addCacheEntry(store, CacheEntry(
-      hash: cc.globalHash, scope: csGlobal,
-      cacheMode: cmCommand, query: query,
-      command: command, output: "",
-      timestamp: ts),
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-  of cdContextResult:
-    addCacheEntry(store, CacheEntry(
-      hash: cc.contextHash, scope: csContext,
-      cacheMode: cmResult, query: query,
-      command: command, output: output,
-      timestamp: ts),
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-  of cdContextCommand:
-    addCacheEntry(store, CacheEntry(
-      hash: cc.contextHash, scope: csContext,
-      cacheMode: cmCommand, query: query,
-      command: command, output: "",
-      timestamp: ts),
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-  of cdNoCache:
-    markNoCacheDecided(store, cc.queryHash,
-      cfg.cacheMaxEntries, cfg.cacheExpiry)
-  markSeen(store, cc.queryHash,
-    cfg.cacheMaxEntries, cfg.cacheExpiry)
-  saveCache(store)
+    let label =
+      if entry.cacheMode == cmCommand:
+        "cache: context command stored"
+      else:
+        "cache: context result stored"
+    styleProgress(sk, label)
 
-# ---------------------------------------------------------------------------
-# Private helpers — instance flow
-# ---------------------------------------------------------------------------
-
-## Handles a query in instance mode: a single LLM call that
-## produces one command (or text answer), executed and displayed
-## directly.
+## Runs one query through the unified v3 harness.
 ##
-## :param query: The user query.
-## :param cfg: The effective configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :param shell: The effective shell.
-## :param info: System information snapshot.
-## :param effectivePattern: Forbidden-command regex.
-## :param cc: Cache context with hashes and seen state.
-proc implInstanceFlow(
+## :param query: Original natural-language request.
+## :param cfg: Effective configuration after CLI overrides.
+## :param key: API bearer token.
+## :param sk: Active terminal style.
+## :param shell: Effective shell executable.
+## :param info: Fast local environment snapshot.
+## :param effectivePattern: Active forbidden-command regex.
+## :param cacheContext: Versioned cache state for deterministic storage.
+## :param forceCache: Whether the user explicitly requested result caching.
+proc implHarnessFlow(
   query: string,
   cfg: Config,
   key: string,
@@ -797,293 +732,160 @@ proc implInstanceFlow(
   shell: string,
   info: SysInfo,
   effectivePattern: string,
-  cc: CacheContext
+  cacheContext: CacheContext,
+  forceCache: bool
 ) =
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_THIN)
-  let patternOpt =
-    if effectivePattern.len > 0:
-      some(effectivePattern)
-    else:
-      none(string)
-  let msgs = buildInstanceMessages(
-    info, query, shell,
-    cfg.systemPrompt, patternOpt)
-  let resp = implLlmCall(msgs, cfg, key, sk)
+  let kind = parseHarnessKind(cfg.harness)
+  let protocol = parseToolProtocolKind(cfg.toolProtocol)
+  let budget = implHarnessBudget(cfg, kind)
+  let initialMessages = buildHarnessMessages(
+    info,
+    query,
+    shell,
+    kind,
+    budget,
+    cfg.systemPrompt,
+    cfg.commandPattern
+  )
+  let session = newLlmSession(
+    cfg.url,
+    key,
+    timeoutSec = cfg.timeout,
+    hideProcess = cfg.hideProcess,
+    sk = sk,
+    preferSystemProxy = cfg.systemProxy
+  )
+  defer:
+    closeLlmSession(session)
 
-  let cmd = extractCodeBlock(resp.content)
-  if cmd.isNone:
+  var nativeUnavailable = protocol == tpkLegacy
+  let modelTurn: ModelTurnProc = proc(
+    messages: seq[LlmMessage],
+    enableNativeTools: bool,
+    allowParallel: bool
+  ): LlmResponse =
+    let useNative =
+      enableNativeTools and not nativeUnavailable
+    var request = LlmRequest(
+      model: cfg.model,
+      messages: messages,
+      maxTokens: cfg.maxToken,
+      tools:
+        if useNative: @[shellToolDefinition()]
+        else: @[],
+      parallelToolCalls: useNative and allowParallel
+    )
+    try:
+      return sendLlmRequest(
+        session,
+        request,
+        spinnerLabel = "requesting"
+      )
+    except LlmApiError as error:
+      if protocol != tpkAuto or not useNative or
+          not implCanFallbackTools(error.msg):
+        raise
+      nativeUnavailable = true
+      if not cfg.hideProcess:
+        styleWarning(sk,
+          "warning: provider rejected native tools; " &
+          "using structured JSON compatibility")
+      request.tools = @[]
+      request.parallelToolCalls = false
+      result = sendLlmRequest(
+        session,
+        request,
+        spinnerLabel = "retrying without native tools"
+      )
+      result.providerRequests += 1
+
+  let runTools: ToolBatchProc = proc(
+    calls: seq[ToolCall],
+    maxParallel: int
+  ): seq[ToolObservation] =
+    var authorized = calls
+    for index in 0 ..< authorized.len:
+      if not cfg.hideProcess:
+        styleCommand(sk, "command", authorized[index].command)
+      authorized[index].command = implSafetyCheck(
+        authorized[index].command,
+        query,
+        info,
+        cfg,
+        key,
+        sk,
+        effectivePattern
+      )
     if not cfg.hideProcess:
-      styleSeparator(sk, DIV_SECTION)
-    styleResult(sk, resp.content)
-    implHandleCacheOutcome(cc, query, "",
-      resp.content, cfg, key, sk)
-    if cfg.log:
-      logExecution(query, "(none)",
-        resp.content, 0, cfg.logMaxEntries)
-    return
-
-  var command = cmd.get
-  if not cfg.hideProcess:
-    styleCommand(sk, "command", command)
-
-  command = implSafetyCheck(
-    command, query, info, cfg, key, sk,
-    effectivePattern)
-
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_WARN)
-    styleProgress(sk, "executing...")
-  let execRes = executeCommand(command, shell)
-
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_SECTION)
-  var finalOutput = execRes.output.strip()
-  if finalOutput.len > 0:
-    styleResult(sk, finalOutput)
-  elif execRes.exitCode != 0:
-    finalOutput =
-      fmt"command exited with code " &
-      fmt"{execRes.exitCode}"
-    styleError(sk, finalOutput)
-
-  implHandleCacheOutcome(cc, query, command,
-    finalOutput, cfg, key, sk)
-
-  if cfg.log:
-    logExecution(query, command,
-      execRes.output, execRes.exitCode,
-      cfg.logMaxEntries)
-
-  if execRes.exitCode != 0:
-    quit(execRes.exitCode)
-
-# ---------------------------------------------------------------------------
-# Private helpers — agent loop flow
-# ---------------------------------------------------------------------------
-
-## Handles a query in agent (non-instance) mode: a multi-round
-## loop where the LLM can execute intermediate commands before
-## producing a final answer.
-##
-## :param query: The user query.
-## :param cfg: The effective configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :param shell: The effective shell.
-## :param info: System information snapshot.
-## :param effectivePattern: Forbidden-command regex.
-## :param cc: Cache context with hashes and seen state.
-proc implAgentFlow(
-  query: string,
-  cfg: Config,
-  key: string,
-  sk: StyleKind,
-  shell: string,
-  info: SysInfo,
-  effectivePattern: string,
-  cc: CacheContext
-) =
-  let maxRounds =
-    if cfg.maxRounds > 0: cfg.maxRounds
-    else: high(int)
-
-  let patternOpt =
-    if effectivePattern.len > 0:
-      some(effectivePattern)
-    else:
-      none(string)
-
-  var messages = buildAgentInitMessages(
-    info, query, shell, cfg.systemPrompt,
-    patternOpt, cfg.maxRounds)
-
-  var finalOutput = ""
-  var lastCommand = ""
-  var lastExitCode = 0
-  var roundsUsed = 0
-  var terminated = false
-
-  for round in 1 .. maxRounds:
-    roundsUsed = round
-    if not cfg.hideProcess:
-      styleSeparator(sk, DIV_THIN)
-      styleRound(sk, round, cfg.maxRounds)
-
-    let resp = implLlmCall(
-      messages, cfg, key, sk)
-    var parsed = extractAgentAction(resp.content)
-
-    if parsed.action != aaAnswer and
-        parsed.command.isNone:
-      var repaired = messages
-      repaired.add(LlmMessage(
-        role: "assistant",
-        content: resp.content))
-      repaired.add(LlmMessage(
-        role: "user",
-        content:
-          "Your previous response used an agent protocol " &
-          "marker without a shell command. Reply again " &
-          "with either a valid ```sh code block plus a " &
-          "protocol marker, or a plain final answer with " &
-          "no marker. Do not output a bare marker."))
-      messages = repaired
-      continue
-
-    if parsed.action == aaContinue and
-        round >= maxRounds:
-      parsed = (action: aaFinal,
-                command: parsed.command)
-
-    case parsed.action
-    of aaContinue:
-      let rawCmd = parsed.command.get
-      if not cfg.hideProcess:
-        styleCommand(sk, "command", rawCmd)
-
-      let checkedCmd = implSafetyCheck(
-        rawCmd, query, info, cfg, key, sk,
-        effectivePattern)
-
-      if not cfg.hideProcess:
-        styleProgress(sk, "executing...")
-      let execRes = executeCommand(checkedCmd, shell)
-
-      if not cfg.hideProcess:
+      styleProgress(sk,
+        if authorized.len == 1:
+          "executing..."
+        else:
+          fmt"executing {authorized.len} calls " &
+            fmt"(parallelism {maxParallel})...")
+    result = executeToolBatch(
+      authorized,
+      shell,
+      budget,
+      maxParallel
+    )
+    for index, observation in result:
+      if cfg.log:
+        logExecution(
+          query,
+          observation.command,
+          observation.output,
+          observation.exitCode,
+          cfg.logMaxEntries
+        )
+      if not cfg.hideProcess and
+          authorized[index].resultMode == trmContinue:
         let preview =
-          if execRes.output.len >
-              INTERMEDIATE_OUTPUT_PREVIEW_LEN:
-            execRes.output[
-              0 ..< INTERMEDIATE_OUTPUT_PREVIEW_LEN
-            ] & "..."
+          if observation.output.len > INTERMEDIATE_OUTPUT_PREVIEW_LEN:
+            observation.output[0 ..< INTERMEDIATE_OUTPUT_PREVIEW_LEN] & "..."
           else:
-            execRes.output
+            observation.output
         if preview.strip().len > 0:
           styleProgress(sk, preview.strip())
 
-      if cfg.log:
-        logExecution(
-          fmt"{query} (round {round})",
-          checkedCmd, execRes.output,
-          execRes.exitCode, cfg.logMaxEntries)
-
-      messages = buildAgentContinueMessages(
-        messages, resp.content, checkedCmd,
-        execRes.output, execRes.exitCode,
-        round + 1, cfg.maxRounds)
-      lastCommand = checkedCmd
-      lastExitCode = execRes.exitCode
-
-    of aaFinal:
-      let rawCmd = parsed.command.get
-      if not cfg.hideProcess:
-        styleCommand(sk, "command", rawCmd)
-
-      let checkedCmd = implSafetyCheck(
-        rawCmd, query, info, cfg, key, sk,
-        effectivePattern)
-
-      if not cfg.hideProcess:
-        styleSeparator(sk, DIV_WARN)
-        styleProgress(sk, "executing...")
-      let execRes = executeCommand(checkedCmd, shell)
-
-      lastCommand = checkedCmd
-      lastExitCode = execRes.exitCode
-      finalOutput = execRes.output.strip()
-
-      if not cfg.hideProcess:
-        styleSeparator(sk, DIV_SECTION)
-      if finalOutput.len > 0:
-        styleResult(sk, finalOutput)
-      elif execRes.exitCode != 0:
-        finalOutput =
-          fmt"command exited with code " &
-          fmt"{execRes.exitCode}"
-        styleError(sk, finalOutput)
-
-      if cfg.log:
-        logExecution(query, checkedCmd,
-          execRes.output, execRes.exitCode,
-          cfg.logMaxEntries)
-
-      terminated = true
-      break
-
-    of aaInterpret:
-      let rawCmd = parsed.command.get
-      if not cfg.hideProcess:
-        styleCommand(sk, "command", rawCmd)
-
-      let checkedCmd = implSafetyCheck(
-        rawCmd, query, info, cfg, key, sk,
-        effectivePattern)
-
-      if not cfg.hideProcess:
-        styleSeparator(sk, DIV_WARN)
-        styleProgress(sk, "executing...")
-      let execRes = executeCommand(checkedCmd, shell)
-
-      lastCommand = checkedCmd
-      lastExitCode = execRes.exitCode
-
-      if execRes.exitCode != 0 and
-          execRes.output.strip().len == 0:
-        finalOutput =
-          fmt"command exited with code " &
-          fmt"{execRes.exitCode}"
-        if not cfg.hideProcess:
-          styleSeparator(sk, DIV_SECTION)
-        styleError(sk, finalOutput)
-      else:
-        if not cfg.hideProcess:
-          styleProgress(sk, "interpreting...")
-        let interpretMsgs = buildInterpretMessages(
-          query, checkedCmd, execRes.output)
-        let interpretResp = implLlmCall(
-          interpretMsgs, cfg, key, sk)
-        finalOutput = interpretResp.content
-        if not cfg.hideProcess:
-          styleSeparator(sk, DIV_SECTION)
-        styleResult(sk, finalOutput)
-
-      if cfg.log:
-        logExecution(query, checkedCmd,
-          execRes.output, execRes.exitCode,
-          cfg.logMaxEntries)
-
-      terminated = true
-      break
-
-    of aaAnswer:
-      finalOutput = resp.content.strip()
-      lastCommand = ""
-      lastExitCode = 0
-
-      if not cfg.hideProcess:
-        styleSeparator(sk, DIV_SECTION)
-      styleResult(sk, finalOutput)
-
-      if cfg.log:
-        logExecution(query, "(none)",
-          finalOutput, 0, cfg.logMaxEntries)
-
-      terminated = true
-      break
-
-  if not terminated:
-    if finalOutput.len == 0:
-      finalOutput = "(no result after " &
-        fmt"{roundsUsed} rounds)"
-      styleError(sk, finalOutput)
-
-  # Cache decision (deferred).
-  implHandleCacheOutcome(cc, query, lastCommand,
-    finalOutput, cfg, key, sk)
-
-  if lastExitCode != 0:
-    quit(lastExitCode)
+  if not cfg.hideProcess:
+    styleSeparator(sk, DIV_THIN)
+  let value = runHarness(
+    initialMessages,
+    HarnessRunOptions(
+      kind: kind,
+      protocol: protocol,
+      budget: budget,
+      eventSink: nil
+    ),
+    modelTurn,
+    runTools
+  )
+  if not cfg.hideProcess:
+    styleSeparator(sk, DIV_SECTION)
+  if value.output.len > 0:
+    if value.exitCode == 0:
+      styleResult(sk, value.output)
+    else:
+      styleError(sk, value.output)
+  if cfg.log and value.observations.len == 0:
+    logExecution(
+      query,
+      "(none)",
+      value.output,
+      value.exitCode,
+      cfg.logMaxEntries
+    )
+  implStoreHarnessCache(
+    cacheContext,
+    query,
+    value,
+    forceCache,
+    cfg,
+    sk
+  )
+  if value.exitCode != 0:
+    implQuitWithCode(value.exitCode)
 
 # ---------------------------------------------------------------------------
 # Private helpers — subcommand handlers
@@ -1150,6 +952,12 @@ proc implHandleConfig(args: seq[string]) =
     of "instance":
       styleConfigValue(sk, "instance",
         $cfg.instance, classifyBool(cfg.instance))
+    of "harness":
+      styleConfigValue(sk, "harness",
+        cfg.harness, vsGood)
+    of "tool-protocol":
+      styleConfigValue(sk, "tool-protocol",
+        cfg.toolProtocol, vsGood)
     of "timeout":
       styleConfigValue(sk, "timeout",
         formatIntOrDisable(cfg.timeout),
@@ -1162,6 +970,23 @@ proc implHandleConfig(args: seq[string]) =
       styleConfigValue(sk, "max-rounds",
         formatIntOrDisable(cfg.maxRounds),
         classifyInt(cfg.maxRounds, 1, 10))
+    of "max-tool-calls":
+      styleConfigValue(sk, "max-tool-calls",
+        formatIntOrDisable(cfg.maxToolCalls),
+        classifyInt(cfg.maxToolCalls, 1, 64))
+    of "max-parallel":
+      styleConfigValue(sk, "max-parallel",
+        formatIntOrDisable(cfg.maxParallel),
+        classifyInt(cfg.maxParallel, 1, 16))
+    of "command-timeout":
+      styleConfigValue(sk, "command-timeout",
+        formatIntOrDisable(cfg.commandTimeout),
+        classifyInt(cfg.commandTimeout, 1, 3600))
+    of "max-output-bytes":
+      styleConfigValue(sk, "max-output-bytes",
+        formatIntOrDisable(cfg.maxOutputBytes),
+        classifyInt(cfg.maxOutputBytes,
+          1024, 100_000_000))
     of "command-pattern":
       let (pat, state, trailer) =
         classifyCommandPattern(cfg.commandPattern)
@@ -1198,11 +1023,6 @@ proc implHandleConfig(args: seq[string]) =
       styleConfigValue(sk, "cache-max-entries",
         formatIntOrDisable(cfg.cacheMaxEntries),
         classifyInt(cfg.cacheMaxEntries, 1, 100_000))
-    of "cache-trigger-threshold":
-      styleConfigValue(sk,
-        "cache-trigger-threshold",
-        formatIntOrDisable(cfg.cacheTriggerThreshold),
-        classifyInt(cfg.cacheTriggerThreshold, 0, 100))
     of "log-max-entries":
       styleConfigValue(sk, "log-max-entries",
         formatIntOrDisable(cfg.logMaxEntries),
@@ -1293,10 +1113,10 @@ proc implHandleGet(args: seq[string]) =
     styleValue(sk, APP_NAME)
   of "--intro":
     styleValue(sk, APP_INTRO)
-  of "--author":
-    styleValue(sk, APP_AUTHOR)
   of "--version":
     styleValue(sk, APP_VERSION)
+  of "--author":
+    styleValue(sk, APP_AUTHOR)
   of "--license":
     styleValue(sk, APP_LICENSE)
   of "--github":
@@ -1310,6 +1130,9 @@ proc implHandleGet(args: seq[string]) =
 proc implHandleIsOk() =
   let cfg = loadConfig()
   let sk = implLoadStyle(cfg)
+  let envWarning = checkEnvironment()
+  if envWarning.len > 0 and not cfg.hideProcess:
+    styleWarning(sk, envWarning)
   let cfgReady = checkReady(sk)
   if not cfgReady:
     quit(1)
@@ -1355,8 +1178,7 @@ proc implHandleIsOk() =
 # Private helpers — query flow
 # ---------------------------------------------------------------------------
 
-## Handles a natural-language query by dispatching to instance
-## or agent flow based on configuration.
+## Handles a natural-language query through the configured unified harness.
 ##
 ## :param query: The user's natural-language query.
 ## :param ov: Per-invocation override flags.
@@ -1388,6 +1210,7 @@ proc implHandleQuery(
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
+  let info = collectFastSysInfo(shell)
   let effectivePattern = implEffectivePattern(
     cfg, sk, cfg.hideProcess)
 
@@ -1403,19 +1226,18 @@ proc implHandleQuery(
       "all cache logic is bypassed")
   var cc = CacheContext(
     useCache: useCache,
-    wasSeen: false,
-    queryHash: "",
     globalHash: "",
     contextHash: "")
 
   if useCache:
-    cc.queryHash = computeQueryHash(query)
-    cc.globalHash = computeGlobalHash(
-      query, shell, cfg.model, cfg.instance,
+    cc.globalHash = computeGlobalHashV3(
+      query, shell, cfg.model, cfg.url, cfg.harness,
+      cfg.toolProtocol,
       cfg.systemPrompt, cfg.commandPattern)
-    cc.contextHash = computeContextHash(
+    cc.contextHash = computeContextHashV3(
       query, cwd, shell, cfg.model,
-      cfg.instance, cfg.systemPrompt,
+      cfg.url, cfg.harness, cfg.toolProtocol,
+      cfg.systemPrompt,
       cfg.commandPattern)
 
     let store = loadCache()
@@ -1444,55 +1266,63 @@ proc implHandleQuery(
           styleProgress(sk, label)
           styleCommand(sk, "command",
             hit.get.command)
-        let execRes = executeCommand(
-          hit.get.command, shell)
+        let checkedCommand = implSafetyCheck(
+          hit.get.command,
+          query,
+          info,
+          cfg,
+          key.get,
+          sk,
+          effectivePattern
+        )
+        let execRes = executeCommandBounded(
+          checkedCommand,
+          shell,
+          max(cfg.commandTimeout, 0),
+          max(cfg.maxOutputBytes, 0)
+        )
         let output = execRes.output.strip()
         if output.len > 0:
           styleResult(sk, output)
+        if execRes.timedOut:
+          styleError(sk, "command timed out")
+        elif execRes.truncated:
+          styleError(sk,
+            "output truncated at configured limit")
         elif execRes.exitCode != 0:
           styleError(sk,
             fmt"command exited with code " &
             fmt"{execRes.exitCode}")
         if cfg.log:
-          logExecution(query, hit.get.command,
+          logExecution(query, checkedCommand,
             execRes.output, execRes.exitCode,
             cfg.logMaxEntries)
-        if execRes.exitCode != 0:
-          quit(execRes.exitCode)
+        if execRes.timedOut:
+          quit(124)
+        elif execRes.truncated:
+          quit(1)
+        elif execRes.exitCode != 0:
+          implQuitWithCode(execRes.exitCode)
         return
 
-    # Determine whether cache decision should trigger.
-    # Decision runs when:
-    #   - --cache is present, or
-    #   - threshold is disabled (<= 0), or
-    #   - seen count has reached the configured threshold.
-    let seenCount = getSeenCount(
-      store, cc.queryHash, cfg.cacheExpiry)
-    let threshold = cfg.cacheTriggerThreshold
-    cc.wasSeen =
-      forceCache or
-      threshold <= 0 or
-      seenCount >= threshold
-
-  # Collect system information.
-  if not cfg.hideProcess:
-    styleProgress(sk,
-      "collecting system info...")
-  let info = collectSysInfo(shell)
-
-  if cfg.instance:
-    implInstanceFlow(query, cfg, key.get, sk,
-      shell, info, effectivePattern, cc)
-  else:
-    implAgentFlow(query, cfg, key.get, sk,
-      shell, info, effectivePattern, cc)
+  implHarnessFlow(
+    query,
+    cfg,
+    key.get,
+    sk,
+    shell,
+    info,
+    effectivePattern,
+    cc,
+    forceCache
+  )
 
 # ---------------------------------------------------------------------------
 # Private helpers — top-level dispatcher
 # ---------------------------------------------------------------------------
 
-## Normalises shorthand application-info aliases so they share
-## the same implementation as `get get --<field>`.
+## Normalises shorthand application-info aliases so they share the same
+## implementation as ``get get --<field>``.
 func implNormaliseArgs(args: seq[string]): seq[string] =
   if args.len == 0:
     return args
@@ -1514,15 +1344,6 @@ when defined(getTest):
 ## Top-level CLI dispatcher.
 proc implMain() =
   initAnsi()
-
-  let cfgForWarn = loadConfig()
-
-  let envWarning = checkEnvironment()
-  if envWarning.len > 0 and
-      not cfgForWarn.hideProcess:
-    styleWarning(
-      toStyleKind(cfgForWarn.vivid), envWarning)
-
   let args = implNormaliseArgs(commandLineParams())
   if args.len == 0:
     implUsageError(
@@ -1538,7 +1359,7 @@ proc implMain() =
     implHandleLog(args[1 .. ^1])
   of "get":
     implHandleGet(args[1 .. ^1])
-  of "version":
+  of "version", "--version", "-V":
     let cfg = loadConfig()
     let sk = toStyleKind(cfg.vivid)
     styleValue(sk, APP_VERSION)
@@ -1563,13 +1384,14 @@ proc implMain() =
 ## Ctrl+C handler that exits gracefully.
 proc implCtrlCHandler() {.noconv.} =
   try:
+    terminateActiveCommands()
     let cfg = loadConfig()
     let sk = toStyleKind(cfg.vivid)
     stderr.write("\n")
     styleProgress(sk, "interrupted.")
   except CatchableError:
     stderr.write("\ninterrupted.\n")
-  quit(130)
+  implQuitWithCode(130)
 
 # ---------------------------------------------------------------------------
 # Main
