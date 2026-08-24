@@ -45,16 +45,21 @@ startup fell from 3.396 ms to 1.933 ms (-43.08%), a zero-provider cache hit
 from 3.381 ms to 2.056 ms (-39.20%), a routine command with simulated 40 ms
 provider latency from 2059.847 ms to 45.760 ms (-97.78%), and four 120 ms tools
 from 494.988 ms serial to 129.135 ms parallel (-73.91%, 3.833x). Median
-one-request RSS fell from 9208 KiB to 6794 KiB (-26.22%); the Linux binary grew
-27.85% for the new runtime, policy, cache, and transport functionality.
+one-request RSS fell from 9208 KiB to 6794 KiB (-26.22%). The benchmarked local
+Nim 2.2.6 Linux binary grew 27.85%; the canonical Nim 2.2.10 payload is
+1,803,360 bytes, 37.75% larger than v2.1, for the new runtime, policy, cache,
+and transport functionality.
 
 The deterministic policy corpus performs 2,639 allow/deny decisions with zero
 mismatches on Linux and the Windows build. Stress validation preserved 192/192
 concurrent cache writes, enforced 20/20 command deadlines and 50/50 output
-caps. The exact candidate passed 260/260 live scenarios with DeepSeek and in
-the latest full local-Qwen run. A separate Qwen run scored 259/260 because of
-one unrelated model answer; the report preserves that provider-variance
-evidence. See `VALIDATION-v3.0.0.md` for methods and boundaries.
+caps. The canonical Linux payload, SHA-256
+`cdba10d2e7d342222c8955cc5aa1248b040e0dd08e1752a5bec568d3f4e100b8`,
+passed 260/260 live scenarios with DeepSeek and 260/260 with local Qwen. A
+separate Qwen run scored 259/260 because of one unrelated model answer; the
+report preserves that provider-variance evidence. Release assembly rejects a
+Linux payload that differs from the provider-tested hash. See
+`VALIDATION-v3.0.0.md` for methods and boundaries.
 
 ## Install
 

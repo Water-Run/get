@@ -218,7 +218,7 @@
     "simulated_request_delay_ms": 40,
     "baseline_sha256": "a3ba3c3a48bbc58163a78275af795131681a08d7f7920946a5121519d8ae5ba9",
     "candidate_sha256": "2e03f467621ced8862dc3225eec0b3d1e9d14e61a3d7bde45f1dc166448c6d03",
-    "archive_size_note": "Exact archive size is populated and verified by native release CI; excluded from this pre-CI benchmark."
+    "archive_size_note": "Archive size is intentionally excluded from pre-CI performance data; native release CI verifies the final archive and emits an adjacent SHA-256 file."
   },
   "request_accounting": {
     "cache_hit_v2": {

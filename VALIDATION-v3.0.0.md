@@ -20,9 +20,10 @@ cross-platform gate for the exact pushed commit.
   and request accounting, not public-provider speed.
 - RSS: GNU `time -f %M`, 20 independent processes per version.
 
-The archive-size value in the raw pre-CI benchmark is provisional. It must be
-replaced with the exact native-CI archive size before publication; no archive
-size claim below relies on it.
+The archive-size value in the raw pre-CI evidence is provisional and is
+deliberately excluded from the publishable benchmark JSON. Native release CI
+independently verifies the final archive and emits its adjacent SHA-256 file;
+no archive-size claim below relies on the provisional value.
 
 ## Quantitative performance
 
@@ -48,10 +49,13 @@ Request accounting explains the large end-to-end changes:
 - Cached text: both versions used zero provider requests; the 39.20% change is
   local startup/cache-path improvement, not removed network latency.
 
-Median max RSS was 9208 KiB for v2.1 and 6794 KiB for v3.0 (-26.22%). The Linux
-binary changed from 1,309,192 to 1,673,832 bytes (+27.85%). The size tradeoff
-includes the typed Harness, cache v3, hardened policy, bounded executor, and TLS
-work.
+Median max RSS was 9208 KiB for v2.1 and 6794 KiB for v3.0 (-26.22%). The
+benchmarked local Nim 2.2.6 Linux binary changed from 1,309,192 to 1,673,832
+bytes (+27.85%). The canonical Nim 2.2.10 Linux payload is 1,803,360 bytes
+(+37.75%), SHA-256
+`cdba10d2e7d342222c8955cc5aa1248b040e0dd08e1752a5bec568d3f4e100b8`.
+The size tradeoff includes the typed Harness, cache v3, hardened policy,
+bounded executor, and TLS work.
 
 ## Correctness and stress
 
@@ -66,6 +70,11 @@ work.
 | 100-byte output cap | 50/50 truncated and stopped; no displayed result exceeded 100 bytes |
 | Concurrent cache writers | 192/192 entries preserved (8 waves × 24 writers) |
 | Cache durability after stress | Schema 3, SHA-256, valid backup, mode 0600, 0 stale locks, 0 temp files |
+
+After canonical assembly, the Nim 2.2.10 Linux payload identified above was
+replayed directly against both providers: DeepSeek and DGX Qwen each passed
+260/260 with 0 failures and 0 skips. Release CI pins that provider-validated
+SHA-256 and fails assembly if a later build is not byte-identical.
 
 The local Qwen campaign also sampled the model's stochastic command choices.
 One earlier full run on the same binary was 259/260 first-attempt: the lone

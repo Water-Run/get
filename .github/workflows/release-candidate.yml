@@ -13,6 +13,7 @@ concurrency:
 env:
   NIM_VERSION: 2.2.10
   RELEASE_VERSION: 3.0.0
+  PROVIDER_VALIDATED_LINUX_SHA256: cdba10d2e7d342222c8955cc5aa1248b040e0dd08e1752a5bec568d3f4e100b8
 
 jobs:
   linux-amd64:
@@ -369,11 +370,16 @@ jobs:
           install -m 0644 benchmark-results-v3.0.0.json \
             "$package_dir/benchmark-results.json"
 
+          printf '%s  %s\n' "$PROVIDER_VALIDATED_LINUX_SHA256" \
+            "$package_dir/get-linux-x64" | sha256sum --check -
+
           python3 - "$package_dir/VALIDATION.md" <<'PY'
+          import hashlib
           import os
           import sys
 
           output = sys.argv[1]
+          package_dir = os.path.dirname(output)
           run_url = (
               os.environ["GITHUB_SERVER_URL"]
               + "/"
@@ -381,6 +387,22 @@ jobs:
               + "/actions/runs/"
               + os.environ["GITHUB_RUN_ID"]
           )
+          payload_lines = []
+          for filename in [
+              "get-linux-x64",
+              "get-windows-x64.exe",
+              "get-macos-arm64",
+          ]:
+              path = os.path.join(package_dir, filename)
+              digest = hashlib.sha256()
+              with open(path, "rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              payload_lines.append(
+                  f"- `{filename}`: {os.path.getsize(path)} bytes, "
+                  f"SHA-256 `{digest.hexdigest()}`"
+              )
+          payload_details = "\n".join(payload_lines)
           attestation = f"""
 
           ## Native release-candidate attestation
@@ -393,6 +415,14 @@ jobs:
           comprehensive offline suite. The release-candidate artifact is
           uploaded only after package layout, architecture, version, installer
           syntax, per-file checksums, and archive checksum verification pass.
+
+          Native payload identities:
+
+          {payload_details}
+
+          The Linux payload hash is pinned to the byte-identical binary that
+          passed 260/260 scenarios with DeepSeek `deepseek-v4-flash` and
+          260/260 with DGX Qwen `qwen3.8-27b`; assembly fails on a mismatch.
           """
           with open(output, "a", encoding="utf-8", newline="\n") as handle:
               handle.write(attestation)
@@ -424,6 +454,23 @@ jobs:
               ),
               "toolchain": {"nim": os.environ["NIM_VERSION"]},
               "targets": ["linux-amd64", "windows-amd64", "macos-arm64"],
+              "provider_validation": {
+                  "linux_payload_sha256": os.environ[
+                      "PROVIDER_VALIDATED_LINUX_SHA256"
+                  ],
+                  "deepseek": {
+                      "model": "deepseek-v4-flash",
+                      "passed": 260,
+                      "failed": 0,
+                      "skipped": 0,
+                  },
+                  "qwen": {
+                      "model": "qwen3.8-27b",
+                      "passed": 260,
+                      "failed": 0,
+                      "skipped": 0,
+                  },
+              },
               "windows_runtime": {
                   "distribution": "Cygwin mingw64",
                   "openssl": {
