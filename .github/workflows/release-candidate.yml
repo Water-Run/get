@@ -369,6 +369,35 @@ jobs:
           install -m 0644 benchmark-results-v3.0.0.json \
             "$package_dir/benchmark-results.json"
 
+          python3 - "$package_dir/VALIDATION.md" <<'PY'
+          import os
+          import sys
+
+          output = sys.argv[1]
+          run_url = (
+              os.environ["GITHUB_SERVER_URL"]
+              + "/"
+              + os.environ["GITHUB_REPOSITORY"]
+              + "/actions/runs/"
+              + os.environ["GITHUB_RUN_ID"]
+          )
+          attestation = f"""
+
+          ## Native release-candidate attestation
+
+          This packaged commit `{os.environ['GITHUB_SHA']}` passed the native
+          Linux amd64, Windows amd64, and macOS arm64 release gates in
+          [GitHub Actions run {os.environ['GITHUB_RUN_ID']}]({run_url}). Those
+          gates cover the full Nim unit suite, platform release builds, HTTPS,
+          CLI end-to-end tests, installer smoke tests, and the applicable
+          comprehensive offline suite. The release-candidate artifact is
+          uploaded only after package layout, architecture, version, installer
+          syntax, per-file checksums, and archive checksum verification pass.
+          """
+          with open(output, "a", encoding="utf-8", newline="\n") as handle:
+              handle.write(attestation)
+          PY
+
           python3 - "$package_dir/BUILDINFO.json" <<'PY'
           import json
           import os
