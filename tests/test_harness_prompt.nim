@@ -14,6 +14,7 @@
 import std/[options, strutils, unittest]
 
 import harness_prompt
+import harness_protocol
 import harness_types
 import sysinfo
 
@@ -46,7 +47,7 @@ suite "compact v3 harness prompt":
     check messages[0].content.contains("complete requested answer")
     check messages[0].content.contains("summarize")
     check messages[0].content.contains("local_date=2026-08-24")
-    check messages[0].content.contains("never use inline interpreter")
+    check messages[0].content.contains("Never use scripts, wrappers, inline interpreter")
     check not messages[0].content.contains("Available tools:")
     check not messages[0].content.contains("<!-- CONTINUE -->")
 
@@ -70,3 +71,33 @@ suite "compact v3 harness prompt":
     check tool.name == "run_readonly_shell"
     check tool.parametersJson.contains("additionalProperties")
     check tool.parametersJson.contains("result_mode")
+
+  test "explicit no-tool intent is detected without quoted false positives":
+    check explicitlyDisablesTools(
+      "Without calling a tool, answer 17 plus 25")
+    check explicitlyDisablesTools(
+      "General knowledge. Don't use tools: answer yes or no")
+    check explicitlyDisablesTools(
+      "不要调用工具，直接回答")
+    check not explicitlyDisablesTools(
+      "Explain the phrase 'without calling a tool'")
+    check not explicitlyDisablesTools(
+      "Find files containing `不要调用工具`")
+
+  test "text-only prompt omits every tool protocol instruction":
+    let info = collectFastSysInfo("bash")
+    let messages = buildHarnessMessages(
+      info,
+      "Without tools, answer 42",
+      "bash",
+      hkAuto,
+      defaultRunBudget(hkAuto),
+      none(string),
+      none(string),
+      toolsDisabled = true
+    )
+    let system = messages[0].content
+    check system.contains("No tools are available")
+    check system.contains("text only")
+    check not system.contains(READ_ONLY_SHELL_TOOL)
+    check not system.contains("tool_calls")

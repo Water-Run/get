@@ -435,8 +435,12 @@ proc implLlmCall(
 ## :param cfg: The loaded configuration.
 ## :returns: A non-empty shell name.
 func implEffectiveShell(cfg: Config): string =
-  if cfg.shell.len > 0: cfg.shell
-  else: defaultShell()
+  result =
+    if cfg.shell.len > 0: cfg.shell
+    else: defaultShell()
+  if not isSupportedShell(result):
+    raise newException(GetError,
+      "configured shell is outside the supported trusted set")
 
 ## Resolves the effective forbidden-command pattern.
 ##
@@ -478,7 +482,8 @@ proc implEnforceCommandPolicy(
   sk: StyleKind,
   effectivePattern: string
 ) =
-  let baseline = checkReadOnlyCommand(command)
+  let baseline = checkReadOnlyCommand(
+    command, implEffectiveShell(cfg))
   if not baseline.allowed:
     styleError(sk,
       "error: read-only policy rejected command — " &
@@ -724,6 +729,7 @@ proc implStoreHarnessCache(
 ## :param effectivePattern: Active forbidden-command regex.
 ## :param cacheContext: Versioned cache state for deterministic storage.
 ## :param forceCache: Whether the user explicitly requested result caching.
+## :param toolsDisabled: Whether this request explicitly forbids tool use.
 proc implHarnessFlow(
   query: string,
   cfg: Config,
@@ -733,7 +739,8 @@ proc implHarnessFlow(
   info: SysInfo,
   effectivePattern: string,
   cacheContext: CacheContext,
-  forceCache: bool
+  forceCache: bool,
+  toolsDisabled: bool
 ) =
   let kind = parseHarnessKind(cfg.harness)
   let protocol = parseToolProtocolKind(cfg.toolProtocol)
@@ -745,7 +752,8 @@ proc implHarnessFlow(
     kind,
     budget,
     cfg.systemPrompt,
-    cfg.commandPattern
+    cfg.commandPattern,
+    toolsDisabled
   )
   let session = newLlmSession(
     cfg.url,
@@ -804,9 +812,52 @@ proc implHarnessFlow(
     maxParallel: int
   ): seq[ToolObservation] =
     var authorized = calls
+    var baselineReasons = newSeq[string](authorized.len)
+    var baselineRejected = false
     for index in 0 ..< authorized.len:
       if not cfg.hideProcess:
         styleCommand(sk, "command", authorized[index].command)
+      let baseline = checkReadOnlyCommand(
+        authorized[index].command, shell)
+      if not baseline.allowed:
+        baselineReasons[index] = baseline.reason
+        baselineRejected = true
+    if baselineRejected:
+      result = newSeq[ToolObservation](authorized.len)
+      for index, call in authorized:
+        let detail =
+          if baselineReasons[index].len > 0:
+            "read-only policy rejected this command before execution: " &
+              baselineReasons[index] &
+              ". Propose a simpler allowlisted read-only command."
+          else:
+            "command not executed because another call in this batch was " &
+              "rejected by the read-only policy. Propose a safe replacement."
+        result[index] = ToolObservation(
+          callId: call.id,
+          toolName: call.toolName,
+          command: call.command,
+          output: detail,
+          exitCode: 126,
+          elapsedMs: 0,
+          timedOut: false,
+          truncated: false,
+          policyRejected: true
+        )
+        if cfg.log:
+          logExecution(
+            query,
+            call.command,
+            detail,
+            126,
+            cfg.logMaxEntries
+          )
+      if not cfg.hideProcess:
+        styleWarning(sk,
+          "warning: read-only policy rejected the proposed tool batch; " &
+            "requesting a safe revision")
+      return
+    for index in 0 ..< authorized.len:
       authorized[index].command = implSafetyCheck(
         authorized[index].command,
         query,
@@ -856,6 +907,7 @@ proc implHarnessFlow(
       kind: kind,
       protocol: protocol,
       budget: budget,
+      toolsDisabled: toolsDisabled,
       eventSink: nil
     ),
     modelTurn,
@@ -1213,6 +1265,7 @@ proc implHandleQuery(
   let info = collectFastSysInfo(shell)
   let effectivePattern = implEffectivePattern(
     cfg, sk, cfg.hideProcess)
+  let toolsDisabled = explicitlyDisablesTools(query)
 
   # Build cache context.  When cache is disabled, all fields
   # remain at zero/false and no cache logic is executed.
@@ -1257,53 +1310,56 @@ proc implHandleQuery(
         styleResult(sk, hit.get.output)
         return
       of cmCommand:
-        if not cfg.hideProcess:
-          let label =
-            if hit.get.scope == csGlobal:
-              "(cached: global command)"
-            else:
-              "(cached: context command)"
-          styleProgress(sk, label)
-          styleCommand(sk, "command",
-            hit.get.command)
-        let checkedCommand = implSafetyCheck(
-          hit.get.command,
-          query,
-          info,
-          cfg,
-          key.get,
-          sk,
-          effectivePattern
-        )
-        let execRes = executeCommandBounded(
-          checkedCommand,
-          shell,
-          max(cfg.commandTimeout, 0),
-          max(cfg.maxOutputBytes, 0)
-        )
-        let output = execRes.output.strip()
-        if output.len > 0:
-          styleResult(sk, output)
-        if execRes.timedOut:
-          styleError(sk, "command timed out")
-        elif execRes.truncated:
-          styleError(sk,
-            "output truncated at configured limit")
-        elif execRes.exitCode != 0:
-          styleError(sk,
-            fmt"command exited with code " &
-            fmt"{execRes.exitCode}")
-        if cfg.log:
-          logExecution(query, checkedCommand,
-            execRes.output, execRes.exitCode,
-            cfg.logMaxEntries)
-        if execRes.timedOut:
-          quit(124)
-        elif execRes.truncated:
-          quit(1)
-        elif execRes.exitCode != 0:
-          implQuitWithCode(execRes.exitCode)
-        return
+        # Commands written by an older prompt cannot bypass an explicit
+        # text-only request. Ignore that hit and ask without tool access.
+        if not toolsDisabled:
+          if not cfg.hideProcess:
+            let label =
+              if hit.get.scope == csGlobal:
+                "(cached: global command)"
+              else:
+                "(cached: context command)"
+            styleProgress(sk, label)
+            styleCommand(sk, "command",
+              hit.get.command)
+          let checkedCommand = implSafetyCheck(
+            hit.get.command,
+            query,
+            info,
+            cfg,
+            key.get,
+            sk,
+            effectivePattern
+          )
+          let execRes = executeCommandBounded(
+            checkedCommand,
+            shell,
+            max(cfg.commandTimeout, 0),
+            max(cfg.maxOutputBytes, 0)
+          )
+          let output = execRes.output.strip()
+          if output.len > 0:
+            styleResult(sk, output)
+          if execRes.timedOut:
+            styleError(sk, "command timed out")
+          elif execRes.truncated:
+            styleError(sk,
+              "output truncated at configured limit")
+          elif execRes.exitCode != 0:
+            styleError(sk,
+              fmt"command exited with code " &
+              fmt"{execRes.exitCode}")
+          if cfg.log:
+            logExecution(query, checkedCommand,
+              execRes.output, execRes.exitCode,
+              cfg.logMaxEntries)
+          if execRes.timedOut:
+            quit(124)
+          elif execRes.truncated:
+            quit(1)
+          elif execRes.exitCode != 0:
+            implQuitWithCode(execRes.exitCode)
+          return
 
   implHarnessFlow(
     query,
@@ -1314,7 +1370,8 @@ proc implHandleQuery(
     info,
     effectivePattern,
     cc,
-    forceCache
+    forceCache,
+    toolsDisabled
   )
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,11 @@ required gates below pass on the exact candidate commit.
 - Native function tools with strict JSON fallback and an isolated v2 Markdown
   compatibility decoder.
 - Bounded parallel command execution with deterministic ordering, deadlines,
-  output limits, process-tree cancellation, and mandatory read-only policy.
+  output limits, process-tree cancellation, and an allowlist-based read-only
+  grammar with per-tool, per-shell, repository-filter, option-abbreviation,
+  glob-injection, and child-environment hardening.
+- Non-executing policy-denial observations let budgeted Harness strategies ask
+  for a fully revalidated safe replacement without widening the allowlist.
 - Reusable HTTP transport with transient pre-HTTP retries, response-size caps,
   redirect blocking for bearer requests, proxy controls, and robust DeepSeek /
   Qwen response normalization.
@@ -18,9 +22,12 @@ required gates below pass on the exact candidate commit.
   cross-process writer locking, atomic durable snapshots, and backup recovery.
 - Faster direct-first prompts and removal of router/cache-classifier model
   requests; cached answers require zero provider calls.
+- Explicit no-tool intent is enforced at prompt, request, runtime, and cache
+  boundaries; providers never receive a tool schema for those requests.
 - Windows production hardening: DPAPI key storage, PowerShell/cmd guidance,
   process-tree termination, output decoding, pinned OpenSSL 3.5.7 LTS runtime,
-  and native Windows CI coverage.
+  native ROOT-store import, DNS/IP hostname verification, and native Windows CI
+  coverage.
 
 ## Compatibility notes
 
@@ -31,6 +38,13 @@ required gates below pass on the exact candidate commit.
   working-directory contexts.
 - The mandatory read-only policy cannot be disabled. `command-pattern` remains
   an optional additional blocklist.
+- A single literal-file stdin redirect is accepted only for validated data
+  readers. Shell expansion, heredocs, descriptor forms, process substitution,
+  multiple input redirects, and `<>` remain rejected.
+- `git status` and worktree-content diff are intentionally rejected; documented
+  metadata-only and cached Git queries disable external diff and textconv
+  helpers. The policy is a mutation-resistance gate, not a confidentiality or
+  operating-system sandbox boundary.
 - Windows release builds use Nim `refc` while Nim 2.2's ARC/ORC Windows runtime
   remains unsafe for the async-HTTP-to-osproc-thread sequence. Linux and macOS
   retain ORC.
@@ -75,6 +89,8 @@ THIRD_PARTY_NOTICES.md
 RELEASE_NOTES.md
 BUILDINFO.json
 SHA256SUMS
+VALIDATION.md
+benchmark-results.json
 ```
 
 Build all binaries from the same commit with Nim 2.2.10. Windows binaries must

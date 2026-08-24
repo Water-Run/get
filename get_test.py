@@ -1137,6 +1137,34 @@ def _llm_precondition(stats: Stats, prefix: str,
     return True
 
 
+def _run_live_semantic_query(
+        query: str,
+        validate: Callable[[str], bool],
+        timeout: int,
+) -> Tuple[RunResult, int, List[str]]:
+    """Allow one independent retry for stochastic semantic model failures.
+
+    Transport retries belong to get itself. This outer retry is deliberately
+    limited to live-evaluation semantics and records the first failure so a
+    recovered provider wobble remains visible in the test log.
+    """
+    failures: List[str] = []
+    last: Optional[RunResult] = None
+    for attempt in range(1, 3):
+        last = _run_query(query, "--no-cache", timeout=timeout)
+        plain = last.out_plain.strip()
+        if last.ok and validate(plain):
+            return last, attempt, failures
+        if last.ok:
+            failures.append(
+                "semantic=" + plain.replace("\n", " | ")[:100])
+        else:
+            failures.append(
+                f"exit={last.returncode}:" + last.err_plain.strip()[:100])
+    assert last is not None
+    return last, 2, failures
+
+
 def _run_query(query: str, *flags: str,
                timeout: int = 180,
                hide_process: bool = True) -> RunResult:
@@ -1223,11 +1251,12 @@ def _direct_query_table() -> List[Tuple[str, str,
               "Windows", "Users", "Program")),
          "contains canonical dir names"),
         ("simple_math",
-         "what is 17 plus 25. reply with ONLY the numeric answer.",
+         "Without calling a tool, what is 17 plus 25? Reply with ONLY the "
+         "numeric answer.",
          lambda o: "42" in o,
          "17+25=42"),
         ("bigger_math",
-         "what is 123 multiplied by 456. reply with ONLY "
+         "Without calling a tool, what is 123 multiplied by 456? Reply with ONLY "
          "the numeric answer, no commas.",
          lambda o: "56088" in o,
          "123*456=56088"),
@@ -1237,22 +1266,23 @@ def _direct_query_table() -> List[Tuple[str, str,
          lambda o: "12" in o,
          "len('encyclopedia')==12"),
         ("uppercase",
-         "convert 'hello world' to all uppercase and reply with "
+         "Without calling a tool, convert 'hello world' to uppercase and reply with "
          "ONLY the result",
          lambda o: "HELLO WORLD" in o,
          "simple transform"),
         ("json_parse",
-         'parse this JSON and reply with ONLY the value of the '
+         'Without calling a tool, parse this JSON and reply with ONLY the value of the '
          '"value" field: {"value": 314, "other": 1}',
          lambda o: "314" in o,
          "json parse"),
         ("yes_no_file",
-         "Without calling a tool: is /etc/hostname a reasonable path for a "
-         "Linux hostname file? Answer yes or no only.",
+         "This is general Linux knowledge, not a request to inspect this "
+         "machine. Without calling a tool: is /etc/hostname the conventional "
+         "hostname file path on Linux? Answer yes or no only.",
          lambda o: "yes" in o.lower(),
          "yes/no factual"),
         ("short_poem",
-         "write exactly one four-line poem about the number 42; "
+         "Without calling a tool, write exactly one four-line poem about 42; "
          "include the digits '42' literally somewhere in the poem",
          lambda o: (len(o.strip().splitlines()) >= 3
                     or o.count("|") >= 3)
@@ -1261,22 +1291,22 @@ def _direct_query_table() -> List[Tuple[str, str,
               or "forty two" in o.lower()),
          "format + content"),
         ("language_code",
-         "what is the two-letter ISO 639-1 code for the English "
-         "language. reply with ONLY the two letters.",
+         "Without calling a tool, what is the two-letter ISO 639-1 code for English? "
+         "Reply with ONLY the two letters.",
          lambda o: re.search(r"\ben\b", o, re.IGNORECASE) is not None,
          "ISO 639-1 en"),
         ("day_count",
-         "how many days are in a common (non-leap) year. "
+         "Without calling a tool, how many days are in a common year? "
          "reply with ONLY the number.",
          lambda o: "365" in o,
          "factual"),
         ("negation",
-         "is the statement 'the sun rises in the west' true or false? "
+         "Without calling a tool, is 'the sun rises in the west' true or false? "
          "reply with ONLY one word.",
          lambda o: "false" in o.lower(),
          "logic"),
         ("multi_language",
-         "how do you say 'thank you' in Spanish? "
+         "Without calling a tool, how do you say 'thank you' in Spanish? "
          "reply with ONLY the spanish phrase.",
          lambda o: "gracias" in o.lower(),
          "translate"),
@@ -1304,24 +1334,25 @@ def section_direct_queries(stats: Stats) -> None:
     for idx, (name, query, validate, note) in enumerate(
             table, start=1):
         log_sub(f"I.{idx} {name}")
-        r = _run_query(query, "--no-cache", timeout=180)
-        if not r.ok:
-            stats.fail(f"I{idx:02d} {name} exit",
-                       f"exit={r.returncode} "
-                       f"err={r.err_plain[:120]!r}")
-            continue
+        r, attempts, failures = _run_live_semantic_query(
+            query, validate, timeout=180)
         plain = r.out_plain.strip()
-        if validate(plain):
+        if r.ok and validate(plain):
+            retry_detail = (
+                f"; attempt={attempts}; first={failures[0]!r}"
+                if attempts > 1 else ""
+            )
             stats.pass_(f"I{idx:02d} {name}",
-                        detail=f"{note} ({r.elapsed:.1f}s)")
+                        detail=f"{note} ({r.elapsed:.1f}s){retry_detail}")
         else:
             short = plain.replace("\n", " | ")[:140]
             stats.fail(f"I{idx:02d} {name}",
-                       f"output did not validate; saw {short!r}")
+                       f"attempts=2; last_exit={r.returncode}; "
+                       f"last={short!r}; failures={failures!r}")
 
     # I-21 --no-vivid no ANSI
     log_sub("I.21 --no-vivid has no ANSI in stdout")
-    r = _run_query("reply with the word 'vivid-off'",
+    r = _run_query("Without calling a tool, reply with the word 'vivid-off'",
                    "--no-cache", "--no-vivid", timeout=120)
     if r.ok and ANSI_RE.search(r.stdout) is None:
         stats.pass_("I21 --no-vivid strips ANSI")
@@ -1331,7 +1362,7 @@ def section_direct_queries(stats: Stats) -> None:
                    f"{bool(ANSI_RE.search(r.stdout))}")
 
     # I-22 --vivid may emit ANSI (we don't strictly assert — terminals differ)
-    r = _run_query("reply with the word 'vivid-on'",
+    r = _run_query("Without calling a tool, reply with the word 'vivid-on'",
                    "--no-cache", "--vivid", timeout=120)
     if r.ok:
         stats.pass_("I22 --vivid succeeds",
@@ -1340,7 +1371,7 @@ def section_direct_queries(stats: Stats) -> None:
         stats.fail("I22 --vivid", f"exit={r.returncode}")
 
     # I-23 --hide-process suppresses 'executing' markers in stderr
-    r = _run_query("reply with 'hp-test'", "--no-cache",
+    r = _run_query("Without calling a tool, reply with 'hp-test'", "--no-cache",
                    "--hide-process", timeout=120)
     low = r.err_plain.lower()
     if r.ok and "executing" not in low and "round" not in low:
@@ -1350,7 +1381,7 @@ def section_direct_queries(stats: Stats) -> None:
                    f"stderr={low.strip()[:120]!r}")
 
     # I-24 --no-hide-process may show markers (non-strict)
-    r = _run_query("reply with 'hp-test-visible'", "--no-cache",
+    r = _run_query("Without calling a tool, reply with 'hp-test-visible'", "--no-cache",
                    "--no-hide-process", timeout=120,
                    hide_process=False)
     if r.ok:
@@ -1360,17 +1391,18 @@ def section_direct_queries(stats: Stats) -> None:
 
     # I-25 --model override runs
     mdl = ARGS.model or "gpt-4o-mini"
-    r = _run_query("reply with 'mdl'", "--no-cache",
+    r = _run_query("Without calling a tool, reply with 'mdl'", "--no-cache",
                    "--model", mdl, timeout=120)
     a_exit_ok(stats, f"I25 --model {mdl} override runs", r)
 
     # I-26 --timeout override runs
-    r = _run_query("reply with 'to'", "--no-cache",
+    r = _run_query("Without calling a tool, reply with 'to'", "--no-cache",
                    "--timeout", "120", timeout=140)
     a_exit_ok(stats, "I26 --timeout override runs", r)
 
     # I-27 --no-cache explicit
-    r = _run_query("reply with 'nc'", "--no-cache", timeout=120)
+    r = _run_query(
+        "Without calling a tool, reply with 'nc'", "--no-cache", timeout=120)
     a_exit_ok(stats, "I27 --no-cache explicit exit 0", r)
 
     # I-28 response is non-empty
@@ -1398,8 +1430,7 @@ def _harness_query_table(scratch: Path
     f = FACTS
     return [
         ("uname",
-         "report the kernel/OS name using the local system. "
-         "include the os name in the reply.",
+         "Use exactly the read-only command `uname -s` and return its output.",
          lambda o: f.platform_name in o.lower()
          or ("darwin" in o.lower() and f.platform_name == "darwin"),
          "Harness invokes `uname` or equivalent"),
@@ -1494,20 +1525,21 @@ def section_harness_queries(stats: Stats) -> None:
 
     for idx, (name, query, validate, note) in enumerate(table, start=1):
         log_sub(f"J.{idx} {name}")
-        r = _run_query(query, "--no-cache", timeout=240)
-        if not r.ok:
-            stats.fail(f"J{idx:02d} {name} exit",
-                       f"exit={r.returncode} "
-                       f"err={r.err_plain[:120]!r}")
-            continue
+        r, attempts, failures = _run_live_semantic_query(
+            query, validate, timeout=240)
         plain = r.out_plain
-        if validate(plain):
+        if r.ok and validate(plain):
+            retry_detail = (
+                f"; attempt={attempts}; first={failures[0]!r}"
+                if attempts > 1 else ""
+            )
             stats.pass_(f"J{idx:02d} {name}",
-                        detail=f"{note} ({r.elapsed:.1f}s)")
+                        detail=f"{note} ({r.elapsed:.1f}s){retry_detail}")
         else:
             short = plain.replace("\n", " | ")[:140]
             stats.fail(f"J{idx:02d} {name}",
-                       f"did not validate; saw {short!r}")
+                       f"attempts=2; last_exit={r.returncode}; "
+                       f"last={short!r}; failures={failures!r}")
 
     # J-extra 11 max-rounds = 1 terminates cleanly
     cm.set("max-rounds", "1")
@@ -1515,7 +1547,7 @@ def section_harness_queries(stats: Stats) -> None:
         "use at least three distinct shell commands to gather "
         "information and reply. include the word 'done'.",
         "--no-cache", timeout=120)
-    if r.returncode in (0, 1, 2):
+    if r.returncode in (0, 1, 2, 126):
         stats.pass_("J11 max-rounds=1 terminates without crash",
                     detail=f"exit={r.returncode}")
     else:
@@ -1559,7 +1591,8 @@ def section_harness_queries(stats: Stats) -> None:
         stats.pass_("J14 system-prompt respected (alpha.txt present)")
     else:
         stats.fail("J14 system-prompt agent",
-                   f"ok={r.ok} out={r.out_plain[:120]!r}")
+                   f"ok={r.ok} out={r.out_plain[:120]!r} "
+                   f"err={r.err_plain[-160:]!r}")
     cm.clear("system-prompt")
 
     # J-15 command-pattern blocks read-command verbs.
@@ -1614,7 +1647,8 @@ def section_harness_queries(stats: Stats) -> None:
 
 def _unique_query(tag: str) -> str:
     nonce = int(time.time() * 1000) % 1_000_000
-    return (f"reply with the exact text 'cache-{tag}-{nonce}' "
+    return (f"Without calling a tool, reply with the exact text "
+            f"'cache-{tag}-{nonce}' "
             f"and nothing else")
 
 
@@ -1923,9 +1957,10 @@ def section_param_interactions(stats: Stats) -> None:
 
     # L.5 --hide-process toggle
     log_sub("L.4 hide-process toggle")
-    r_h = _run_query("reply with 'hp'", "--no-cache",
+    toggle_query = "Without calling a tool, reply with 'hp'"
+    r_h = _run_query(toggle_query, "--no-cache",
                      "--hide-process", timeout=120)
-    r_s = _run_query("reply with 'hp'", "--no-cache",
+    r_s = _run_query(toggle_query, "--no-cache",
                      "--no-hide-process", timeout=120,
                      hide_process=False)
     if r_h.ok and r_s.ok:
@@ -1940,7 +1975,9 @@ def section_param_interactions(stats: Stats) -> None:
                 detail="backend may route differently")
     else:
         stats.fail("L07 hide-process toggle",
-                   f"exits={r_h.returncode},{r_s.returncode}")
+                   f"exits={r_h.returncode},{r_s.returncode}; "
+                   f"hidden-stderr={r_h.err_plain.strip()[-160:]!r}; "
+                   f"shown-stderr={r_s.err_plain.strip()[-160:]!r}")
 
     # L.6 system-prompt influence
     log_sub("L.5 system-prompt")

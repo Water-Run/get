@@ -48,6 +48,7 @@ type
     kind*: HarnessKind             ## Strategy policy layered on the loop.
     protocol*: ToolProtocolKind    ## Native or structured-text protocol.
     budget*: RunBudget             ## Hard turn, tool, timeout, and size limits.
+    toolsDisabled*: bool           ## Deny native and textual tool actions.
     eventSink*: HarnessEventSink   ## Optional structured event receiver.
 
 # ---------------------------------------------------------------------------
@@ -108,11 +109,13 @@ func implFormatRawOutput(observations: seq[ToolObservation]): string =
       if observation.truncated:
         return clean & "\n[output truncated at configured limit]"
       return clean
+    if observation.truncated:
+      return "[output truncated at configured limit]"
     if observation.timedOut:
       return "command timed out"
     if observation.exitCode != 0:
       return fmt"command exited with code {observation.exitCode}"
-    return ""
+    return "(command completed with no output)"
   var sections: seq[string] = @[]
   for observation in observations:
     var output = observation.output.strip()
@@ -256,7 +259,8 @@ proc runHarness*(
       message: "model turn started",
       elapsedMs: implElapsedMs(started)
     ))
-    let enableNative = options.protocol != tpkLegacy
+    let enableNative =
+      not options.toolsDisabled and options.protocol != tpkLegacy
     let allowParallel = options.kind in {hkAuto, hkParallel}
     let response = modelTurn(messages, enableNative, allowParallel)
     metrics.modelTurns += 1
@@ -316,6 +320,9 @@ proc runHarness*(
       ))
       return implFinish(value, started)
     of hakToolCalls:
+      if options.toolsDisabled:
+        raise newException(HarnessProtocolError,
+          "tool calls are disabled for this request")
       if action.calls.len == 0:
         raise newException(HarnessProtocolError,
           "tool action contains no calls")
@@ -382,6 +389,13 @@ proc runHarness*(
       for call in action.calls:
         if call.resultMode == trmContinue:
           needsContinuation = true
+      # Auto/loop/parallel strategies may recover from a policy false positive
+      # or an over-capable model proposal. The denied command was never run,
+      # and every replacement still passes through the same policy callback.
+      if options.kind != hkDirect:
+        for observation in batch:
+          if observation.policyRejected:
+            needsContinuation = true
       if options.kind == hkDirect:
         needsContinuation = false
       if not needsContinuation:

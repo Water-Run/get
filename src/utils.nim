@@ -616,7 +616,8 @@ func isKnownStrongModel*(model: string): bool =
       return false
     if implContainsAny(m, [
         "qwen3-max-thinking", "qwen3.6-plus",
-        "qwen3.6-35b-a3b", "qwen3-235b-a22b"]):
+        "qwen3.6-35b-a3b", "qwen3-235b-a22b",
+        "qwen3.8-27b"]):
       return true
     let v = implExtractVersion(m, "qwen")
     return v >= 3.7 and

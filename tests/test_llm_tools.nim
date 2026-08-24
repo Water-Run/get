@@ -11,7 +11,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[json, os, unittest]
+import std/[json, os, strutils, unittest]
 
 import llm
 import utils
@@ -136,6 +136,52 @@ suite "LLM native tools":
     let value = parseLlmResponseForTest(raw)
     check value.content == "answer"
     check value.tokensUsed == 5
+
+  test "strips orphan Qwen template closing tags":
+    let raw = $(%*{
+      "choices": [{
+        "message": {
+          "content": "{\"type\":\"answer\",\"text\":\"ok\"}" &
+            "\n</parameter>\n</THINK>"
+        }
+      }]
+    })
+    let value = parseLlmResponseForTest(raw)
+    check value.content ==
+      "{\"type\":\"answer\",\"text\":\"ok\"}"
+
+  test "strips Qwen tool-template closures from a bare answer":
+    let raw = $(%*{
+      "choices": [{
+        "message": {
+          "content": "{\"text\":\"56088\"}\n</invoke>\n" &
+            "</parameter>\n</function>\n</tool_call>"
+        }
+      }]
+    })
+    let value = parseLlmResponseForTest(raw)
+    check value.content == "{\"text\":\"56088\"}"
+
+  test "removes embedded orphan template tags without dropping text":
+    let raw = $(%*{
+      "choices": [{
+        "message": {
+          "content": "before\n</final_comment>\n</thinking>\nafter"
+        }
+      }]
+    })
+    let value = parseLlmResponseForTest(raw)
+    check value.content.contains("before")
+    check value.content.contains("after")
+    check not value.content.contains("</")
+
+  test "normalizes many provider template tags without quadratic rebuilding":
+    let content = repeat("x</parameter></THINK>", 4096) & "done"
+    let raw = $(%*{
+      "choices": [{"message": {"content": content}}]
+    })
+    let value = parseLlmResponseForTest(raw)
+    check value.content == repeat("x", 4096) & "done"
 
   test "rejects malformed provider envelopes":
     for raw in [

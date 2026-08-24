@@ -63,8 +63,7 @@ func implShellInstruction(shell: string): string =
   if lower.contains("powershell") or lower.contains("pwsh"):
     result = "PowerShell: use native executable cmdlets, not POSIX aliases; " &
       "prefer Get-Location, Get-ChildItem, Get-Content, Get-Process, " &
-      "Select-String, Get-Command, and " &
-      "[Environment]::GetFolderPath('UserProfile')."
+      "Select-String, Get-Command, and Resolve-Path ~."
   elif lower.contains("cmd"):
     result = "cmd.exe: use native dir, type, where, set, ver, and whoami syntax."
   elif lower.contains("fish"):
@@ -85,7 +84,8 @@ func implSystemPrompt(
   kind: HarnessKind,
   budget: RunBudget,
   customPrompt: Option[string],
-  commandPattern: Option[string]
+  commandPattern: Option[string],
+  toolsDisabled: bool
 ): string =
   let dateContext =
     if info.localDate.len > 0:
@@ -95,39 +95,106 @@ func implSystemPrompt(
   var lines = @[
     "You are get v3, a fast read-only command-line assistant.",
     fmt"Environment: OS={info.os}; arch={info.arch}; cwd={info.cwd}; " &
-      fmt"shell={shell}{dateContext}.",
-    "Answer directly when no local inspection is needed. Otherwise use " &
-      READ_ONLY_SHELL_TOOL & ".",
-    "Never answer dynamic or machine-local questions from memory. Inspect " &
-      "first, and return only commands that can run as-is without placeholders.",
-    "Commands must only inspect or retrieve information. Never write, delete, " &
-      "install, configure, signal, or otherwise mutate state.",
-    "Prefer standard inspection commands; never use inline interpreter code.",
-    "Use return_raw only when command output is the complete requested answer. " &
-      "Use continue to explain, compare, summarize, or transform observations.",
-    implStrategyInstruction(kind),
-    fmt"Hard limits: {budget.maxTurns} model turn(s), {budget.maxToolCalls} tool " &
-      fmt"call(s), {budget.maxParallel} concurrent call(s).",
-    "If native tools are unavailable, emit only one JSON action: " &
-      "{\"type\":\"answer\",\"text\":\"...\"} or " &
-      "{\"type\":\"tool_calls\",\"calls\":[{" &
-      "\"command\":\"...\",\"purpose\":\"...\"," &
-      "\"result_mode\":\"return_raw|continue\"}]}.",
-    "Do not wrap JSON in prose. Keep final answers concise."
+      fmt"shell={shell}{dateContext}."
   ]
-  let shellInstruction = implShellInstruction(shell)
-  if shellInstruction.len > 0:
-    lines.add(shellInstruction)
+  if toolsDisabled:
+    lines.add(
+      "No tools are available for this request. Answer directly from reasoning " &
+      "and follow the user's requested format; never emit a command or tool call.")
+  else:
+    lines.add(@[
+      "Answer directly unless local inspection is needed; then use " &
+        READ_ONLY_SHELL_TOOL & ".",
+      "Answer arithmetic, knowledge, translation, creative, yes/no, and " &
+        "'reply with' requests directly; never run true/false.",
+      "Never answer dynamic or machine-local questions from memory. Inspect " &
+        "first; return only commands that can run as-is without placeholders.",
+      "Commands may only inspect or retrieve. Never write, delete, install, " &
+        "configure, signal, or mutate state.",
+      "Use one allowlisted command or reader pipeline. Prefer pwd, ls, safe " &
+        "find, rg/grep, head, wc, stat, uname, whoami, date, and version queries.",
+      "Inspect only the requested fact; do not bundle extra probes.",
+      "Never use scripts, wrappers, inline interpreter code, unapproved shell " &
+        "variables, substitution, chaining, loops, PowerShell splatting, input " &
+        "redirection, or output files. " &
+        "Only $HOME, $USER, $LOGNAME, and $PWD are approved variables.",
+      "Prefix unquoted globs with ./, or place -- before them.",
+      "For web reads, begin curl with -q; wget requires --no-config, --no-hsts, " &
+        "and -O-.",
+      "Git: never use status. diff-files --name-only, diff --cached, show, and " &
+        "patch log require --no-ext-diff --no-textconv.",
+      "Use return_raw only when output is the complete requested answer; use " &
+        "continue to explain, compare, summarize, or transform it.",
+      implStrategyInstruction(kind),
+      fmt"Hard limits: {budget.maxTurns} model turn(s), " &
+        fmt"{budget.maxToolCalls} tool call(s), " &
+        fmt"{budget.maxParallel} concurrent call(s).",
+      "Without native tools, emit one JSON action only: " &
+        "{\"type\":\"answer\",\"text\":\"...\"} or " &
+        "{\"type\":\"tool_calls\",\"calls\":[{" &
+        "\"command\":\"...\",\"purpose\":\"...\"," &
+        "\"result_mode\":\"return_raw|continue\"}]}.",
+      "Do not wrap JSON in prose. Keep final answers concise."
+    ])
+    let shellInstruction = implShellInstruction(shell)
+    if shellInstruction.len > 0:
+      lines.add(shellInstruction)
   if customPrompt.isSome and customPrompt.get.strip().len > 0:
     lines.add("Additional user configuration: " & customPrompt.get.strip())
   if commandPattern.isSome and commandPattern.get.strip().len > 0:
     lines.add("Also avoid commands matching this supplemental regex: " &
       commandPattern.get.strip())
+  if toolsDisabled:
+    lines.add("This request explicitly disables all tools; answer with text only.")
   result = lines.join("\n")
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+## Detects an explicit user instruction that disables all tool use.
+##
+## Quoted examples are ignored so a request to explain the phrase itself does
+## not accidentally disable local inspection. Runtime enforcement remains the
+## authority: when this returns true, native and textual tool calls are denied.
+func explicitlyDisablesTools*(query: string): bool =
+  let normalized = toLowerAscii(query)
+    .replace("don’t", "do not")
+    .replace("don't", "do not")
+    .replace("“", "\"")
+    .replace("”", "\"")
+    .replace("‘", "'")
+    .replace("’", "'")
+  const directives = [
+    "without calling a tool", "without calling tools",
+    "without using a tool", "without using tools",
+    "without any tool", "without any tools", "without tools",
+    "do not call a tool", "do not call tools",
+    "do not use a tool", "do not use tools",
+    "never call a tool", "never call tools",
+    "never use a tool", "never use tools",
+    "不要调用工具", "不调用任何工具", "不调用工具", "请勿调用工具",
+    "别调用工具", "不要使用工具", "不使用任何工具", "不使用工具",
+    "无需调用工具", "不用任何工具", "不用工具"
+  ]
+  var quote = '\0'
+  var index = 0
+  while index < normalized.len:
+    let character = normalized[index]
+    if quote == '\0' and character in {'\'', '\"', '`'}:
+      quote = character
+      inc(index)
+      continue
+    if quote != '\0' and character == quote:
+      quote = '\0'
+      inc(index)
+      continue
+    if quote == '\0':
+      for directive in directives:
+        if normalized.continuesWith(directive, index):
+          return true
+    inc(index)
+  result = false
 
 ## Returns the native function definition for read-only shell inspection.
 ##
@@ -171,14 +238,15 @@ func buildHarnessMessages*(
   kind: HarnessKind,
   budget: RunBudget,
   customPrompt: Option[string],
-  commandPattern: Option[string]
+  commandPattern: Option[string],
+  toolsDisabled = false
 ): seq[LlmMessage] =
   result = @[
     LlmMessage(
       role: "system",
       content: implSystemPrompt(
         info, shell, kind, budget,
-        customPrompt, commandPattern),
+        customPrompt, commandPattern, toolsDisabled),
       toolCallId: "",
       toolCallsJson: ""
     ),

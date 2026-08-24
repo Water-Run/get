@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import json
 import shlex
 import shutil
@@ -16,7 +17,11 @@ import time
 import unittest
 from pathlib import Path
 
-from mock_openai_provider import Handler, ProxyHandler
+from mock_openai_provider import (
+    ADVERSARIAL_COMMANDS,
+    Handler,
+    ProxyHandler,
+)
 from http.server import ThreadingHTTPServer
 
 
@@ -123,6 +128,14 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "continued-ok")
 
+    def test_02b_explicit_no_tools_is_enforced_in_the_request(self) -> None:
+        result = self.run_get(
+            "Explicit no tools: without calling a tool, answer directly",
+            "--no-cache",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "no-tools-ok")
+
     def test_03_automatic_protocol_fallback(self) -> None:
         result = self.run_get("fallback cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -135,10 +148,45 @@ class GetV3CliTests(unittest.TestCase):
         self.assertIn("parallel-a", result.stdout)
         self.assertIn("parallel-b", result.stdout)
 
+    def test_04b_qwen_textual_tool_call(self) -> None:
+        result = self.run_get("qwen textual cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "qwen-text-ok")
+
     def test_05_mandatory_policy_blocks_redirection(self) -> None:
         result = self.run_get("unsafe policy cli", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("read-only policy", result.stderr.lower())
+        self.assertFalse((self.work / "never-run").exists())
+
+    def test_05b_textual_tool_call_cannot_bypass_policy(self) -> None:
+        result = self.run_get("qwen textual unsafe cli", "--no-cache")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("read-only policy", result.stderr.lower())
+        self.assertFalse((self.work / "never-run").exists())
+
+    def test_05c_adversarial_commands_fail_closed(self) -> None:
+        for case_name in ADVERSARIAL_COMMANDS:
+            with self.subTest(case_name=case_name):
+                result = self.run_get(
+                    f"adversarial policy {case_name}", "--no-cache")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("read-only policy", result.stderr.lower())
+                self.assertFalse((self.work / "never-run").exists())
+
+    def test_05d_untrusted_shell_configuration_is_rejected(self) -> None:
+        untrusted = (
+            r"C:\Temp\powershell.exe"
+            if self.target_os == "windows" else "/tmp/bash"
+        )
+        result = self.run_get("set", "shell", untrusted)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported shell", result.stderr.lower())
+
+    def test_05e_auto_harness_recovers_from_policy_rejection(self) -> None:
+        result = self.run_get("policy recovery cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "policy-recovered")
         self.assertFalse((self.work / "never-run").exists())
 
     def test_06_reviewer_revision_is_rechecked(self) -> None:
@@ -270,6 +318,79 @@ class GetV3CliTests(unittest.TestCase):
                 break
             time.sleep(0.02)
         self.assertFalse(Path(f"/proc/{child_pid}").exists())
+
+    def test_12_text_only_request_ignores_a_cached_command(self) -> None:
+        reference_query = "cache hash reference"
+        reference = self.run_get(reference_query)
+        self.assertEqual(reference.returncode, 0, reference.stderr)
+
+        cache_path = self.config_root / "get" / "cache.json"
+        config_path = self.config_root / "get" / "config.json"
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        reference_entry = next(
+            entry for entry in payload["entries"]
+            if entry["query"] == reference_query
+        )
+        self.assertEqual(reference_entry["cacheMode"], "command")
+
+        pattern_result = self.run_get("config", "--command-pattern")
+        self.assertEqual(pattern_result.returncode, 0, pattern_result.stderr)
+        pattern_line = pattern_result.stdout.strip()
+        prefix = "command-pattern = "
+        suffix = " (default: built-in)"
+        self.assertTrue(pattern_line.startswith(prefix), pattern_line)
+        self.assertTrue(pattern_line.endswith(suffix), pattern_line)
+        pattern = pattern_line[len(prefix):-len(suffix)]
+
+        def nim_json_hash(values: list[str]) -> str:
+            encoded = json.dumps(
+                values,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return hashlib.sha256(encoded).hexdigest()
+
+        host_os = {
+            "linux": "linux",
+            "windows": "windows",
+            "macos": "macosx",
+        }[self.target_os]
+        host_cpu = "arm64" if self.target_os == "macos" else "amd64"
+        query = (
+            "Explicit no tools cached: without calling a tool, "
+            "answer directly"
+        )
+        global_hash = nim_json_hash([
+            "get-v3",
+            query,
+            config["shell"],
+            config["model"],
+            config["url"],
+            config["harness"],
+            config["toolProtocol"],
+            "",
+            "built-in:" + pattern,
+            host_os,
+            host_cpu,
+        ])
+        context_hash = nim_json_hash([
+            "get-v3-context",
+            global_hash,
+            str(self.work),
+        ])
+        forged = dict(reference_entry)
+        forged.update({"hash": context_hash, "query": query})
+        payload["entries"].append(forged)
+        cache_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_get(query)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "no-tools-ok")
+        self.assertNotEqual(result.stdout, reference.stdout)
 
     def test_15_cache_hit_needs_no_provider(self) -> None:
         first = self.run_get("cache zero model")

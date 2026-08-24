@@ -52,6 +52,10 @@ Provider-native function tools are preferred.
 Structured JSON is used as a compatibility fallback, and v2 Markdown command
 responses remain accepted only inside the legacy decoder.
 .PP
+Queries that explicitly request no tool use are routed as text-only: no tool
+definition is sent, textual tool actions are rejected, and cached commands are
+ignored.
+.PP
 Every proposed, revised, or cached command passes through the same mandatory
 read-only policy, optional supplemental regex, optional model review, optional
 manual confirmation, and bounded executor.
@@ -60,7 +64,9 @@ manual confirmation, and bounded executor.
 .TP
 .B auto
 Default. Starts direct and continues or batches only when the model requests
-more evidence. Routine commands normally use one model call.
+more evidence. A mandatory-policy denial is not executed and may be returned
+as an observation for one budgeted safe revision. Routine commands normally
+use one model call.
 .TP
 .B direct
 Exactly one model turn and at most one terminal tool call.
@@ -307,28 +313,64 @@ are not retried. Provider response bodies are limited to 8 MiB, and requests
 carrying bearer credentials do not follow redirects.
 .
 .SH SAFETY
-The non-configurable baseline rejects known state-changing utilities,
-regular-file output redirection, in-place editing, mutating Git, container,
-cluster and package-manager operations, uploads and non-read-only curl options,
-and arbitrary inline interpreter code.
+The non-configurable baseline accepts only a small grammar of simple commands
+and reader pipelines, then validates every executable and its state-changing
+options. Unknown syntax and executables fail closed. It rejects substitution,
+chaining, scripts and wrappers, regular-file output redirection,
+inline interpreters, helper or config injection, mutating Git, container,
+cluster and package-manager operations, uploads, PowerShell splatting and
+script conversion, option abbreviations, glob-to-option injection, and unsafe
+short options.
+.PP
+A single literal-file input redirect is accepted only for validated data
+readers. Here-documents, here-strings, process substitution, descriptor
+duplication, expansion, multiple input redirects, and read/write redirection
+remain rejected.
+.PP
+Shell aliases and null devices are checked per platform. Only supported shells
+from trusted executable paths can be configured. Shell profiles are disabled,
+and child environments remove loader, runtime, Git, pager, tracing, and
+tool-config injection variables. curl reads require leading -q; wget reads
+require --no-config, --no-hsts, and -O-.
+.PP
+git status and worktree-content git diff are rejected because repository-owned
+clean, textconv, and filter configuration can execute helpers. Use git branch
+--show-current; git diff-files --name-only --no-ext-diff --no-textconv for
+modified tracked names; git ls-files --others --exclude-standard for untracked
+names; and git diff --cached --no-ext-diff --no-textconv for staged content.
+git show and patch-rendering git log also require both disabling options.
 .PP
 The command-pattern is supplemental. It cannot disable the baseline.
 If double-check revises a command, both deterministic layers run again before
 confirmation or execution. Cached commands use the identical gate.
+.PP
+In auto, loop, and parallel modes, a baseline-policy denial is represented as
+a typed, non-executed observation so the model can propose a safer command
+within the existing budgets. Every replacement is revalidated. Direct mode
+returns the denial without another model turn.
 .PP
 Commands execute with command-timeout and max-output-bytes. Exceeding the
 deadline returns 124. Exceeding the output cap truncates capture and stops the
 command. On POSIX the shell receives its own process group so cancellation
 stops descendants as well; Windows uses taskkill /T for the child tree.
 .PP
-No shell filter can formally prove arbitrary code harmless. Use manual
-confirmation in sensitive environments.
+This deterministic command gate provides fail-closed mutation resistance under
+the documented semantics of trusted reader binaries; it is not a
+confidentiality boundary or an operating-system sandbox. Allowed readers can
+expose requested data to the configured model provider when the harness
+continues. The gate trusts resolved executables, absolute PATH entries, the
+kernel, operator-controlled tool configuration, and the remote semantics of
+allowed GET/HEAD requests. Reads may update access metadata or incidental
+caches. Use manual confirmation or an external sandbox in sensitive
+environments.
 .
 .SH CACHE
 The v3 cache performs no classifier model call.
 A successful terminal single-command run stores a context-specific command.
 A hit uses zero model calls, validates the command again, and re-executes it.
 This keeps dynamic information current.
+An explicit text-only request never executes a cached command, though a cached
+final text result may still be returned without a model or tool call.
 .PP
 Cache identities use SHA-256 over the provider, model, strategy, protocol,
 shell, policy, platform, and working-directory context. Writers serialize the
@@ -344,6 +386,9 @@ protocol, shell, custom prompt, policy configuration, OS, and architecture.
 .
 .SH NETWORK
 All model turns reuse one TLS-verifying HTTP client, including proxy traffic.
+Certificate chains and DNS/IP host names are verified. On Windows, get imports
+the native Windows ROOT certificate store into OpenSSL; no separate CA bundle
+is required for ordinary HTTPS.
 Terminal proxy variables are respected by default. When system-proxy is true,
 enabled Windows Internet Settings take precedence. NO_PROXY/no_proxy bypasses
 either source. Credentials are redacted when a proxy URL is displayed.
@@ -376,6 +421,9 @@ Configuration, provider, protocol, policy, refusal, budget, or general error.
 .TP
 .B 124
 Command deadline exceeded.
+.TP
+.B 126
+Tool proposal rejected before execution with no safe revision inside budget.
 .TP
 .B 130
 Interrupted by Ctrl+C.

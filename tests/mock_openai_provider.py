@@ -10,6 +10,26 @@ from typing import Any, Dict
 from urllib.parse import urlsplit
 
 
+ADVERSARIAL_COMMANDS = {
+    "quoted-name": "r''m -f never-run",
+    "redirection": "printf unsafe > never-run",
+    "shell-wrapper": "sh -c 'touch never-run'",
+    "interpreter": "python3 -c 'open(\"never-run\",\"w\").write(\"x\")'",
+    "find-exec": "find . -exec touch never-run +",
+    "rg-pre": "rg --pre 'touch never-run' value .",
+    "sort-output": "sort -o never-run README.md",
+    "git-alias": "git -c alias.x='!touch never-run' x",
+    "curl-output": "curl -o never-run https://example.com",
+    "tar-create": "tar -cf never-run README.md",
+    "powershell-pipe": "Get-Content README.md | Set-Content never-run",
+    "powershell-dotnet": "[IO.File]::WriteAllText('never-run','x')",
+    "cmd-expansion": "%ComSpec% /c echo x > never-run",
+    "cmd-caret": "to^uch never-run",
+    "relative-script": "./read-looking-script",
+    "network-state": "ip link set lo down",
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     """Serve deterministic chat-completions responses over persistent HTTP."""
 
@@ -95,9 +115,49 @@ class Handler(BaseHTTPRequestHandler):
         if "answer-only" in user_text:
             self._completion(content="answer-only-ok")
             return
+        if "explicit no tools" in user_text:
+            if has_tools or "no tools are available" not in system_text:
+                self._write(400, {
+                    "error": {"message": "text-only routing was bypassed"},
+                })
+            else:
+                self._completion(content="no-tools-ok")
+            return
+        if "adversarial policy" in user_text and has_tools:
+            for case_name, command in ADVERSARIAL_COMMANDS.items():
+                if case_name in user_text:
+                    self._tool_completion([
+                        ("attack-1", command, "return_raw"),
+                    ])
+                    return
+        if "qwen textual unsafe" in user_text and has_tools:
+            self._completion(content=(
+                "[Tool call] run_readonly_shell "
+                "{command: echo unsafe > never-run, "
+                "purpose: integration safety test, "
+                "result_mode: return_raw}"
+            ))
+            return
+        if "qwen textual" in user_text and has_tools:
+            self._completion(content=(
+                "[Tool call] run_readonly_shell "
+                f"{{command: {output('qwen-text-ok')}, "
+                "purpose: integration compatibility test, "
+                "result_mode: return_raw}"
+            ))
+            return
         if "continue" in user_text and any(
                 message.get("role") == "tool" for message in messages):
             self._completion(content="continued-ok")
+            return
+        if "policy recovery" in user_text and any(
+                message.get("role") == "tool"
+                and '"policy_rejected":true' in
+                str(message.get("content", "")).replace(" ", "").lower()
+                for message in messages):
+            self._tool_completion([
+                ("recovered-2", output("policy-recovered"), "return_raw"),
+            ])
             return
         if "parallel" in user_text and has_tools:
             self._tool_completion([
@@ -115,6 +175,11 @@ class Handler(BaseHTTPRequestHandler):
                 ("unsafe-1", "printf unsafe > ./never-run", "return_raw"),
             ])
             return
+        if "policy recovery" in user_text and has_tools:
+            self._tool_completion([
+                ("rejected-1", "printf unsafe > ./never-run", "return_raw"),
+            ])
+            return
         if "slow command" in user_text and has_tools:
             slow_command = (
                 "ping -n 11 127.0.0.1 >NUL" if is_cmd else
@@ -128,8 +193,8 @@ class Handler(BaseHTTPRequestHandler):
         if "large output" in user_text and has_tools:
             self._tool_completion([
                 ("large-1",
-                 "for /L %i in (1,1,1000) do @echo xxxxx" if is_cmd else
-                 "1..1000 | ForEach-Object { 'xxxxx' }" if is_windows else
+                 "systeminfo" if is_cmd else
+                 "Get-Process | Format-List *" if is_windows else
                  "yes x | head -c 5000",
                  "return_raw"),
             ])

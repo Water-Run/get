@@ -99,6 +99,199 @@ func implValidateCommand(command: string): string =
     raise newException(ValueError,
       fmt"tool command exceeds {MAX_COMMAND_CHARS} characters")
 
+## Enforces the provider-advertised `additionalProperties: false` schema even
+## when a provider returns hand-written or textual JSON.
+func implValidateArgumentFields(node: JsonNode) =
+  for fieldName, unused in node:
+    discard unused
+    if fieldName notin ["command", "purpose", "result_mode"]:
+      raise newException(ValueError,
+        fmt"unsupported tool argument '{fieldName}'")
+
+## Returns whether a character can appear in a relaxed tool-call field name.
+func implIsFieldChar(value: char): bool =
+  result = value in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', '-'}
+
+## Decodes one string value from a narrowly scoped relaxed object.
+##
+## Qwen-compatible servers can occasionally render a provider tool call as
+## assistant text with unquoted keys and values.  Quoted values still use JSON
+## escaping; single-quoted values are accepted without escape interpretation.
+proc implDecodeRelaxedValue(
+  rawValue: string,
+  fieldName: string
+): string =
+  let value = rawValue.strip()
+  if value.len == 0:
+    raise newException(ValueError,
+      fmt"empty relaxed tool-call field '{fieldName}'")
+  if value[0] == '"':
+    var decoded: JsonNode
+    try:
+      decoded = parseJson(value)
+    except JsonParsingError:
+      raise newException(ValueError,
+        fmt"invalid quoted value for relaxed tool-call field '{fieldName}'")
+    if decoded.kind != JString:
+      raise newException(ValueError,
+        fmt"relaxed tool-call field '{fieldName}' must be a string")
+    return decoded.getStr()
+  if value[0] == '\'':
+    if value.len < 2 or value[^1] != '\'':
+      raise newException(ValueError,
+        fmt"unterminated value for relaxed tool-call field '{fieldName}'")
+    return value[1 ..< value.len - 1]
+  result = value
+
+## Parses the object payload used by Qwen's textual ``[Tool call]`` rendering.
+##
+## Field boundaries are recognised only at top-level commas followed by another
+## ``name:`` pair.  This preserves ordinary commas in shell commands while
+## keeping the accepted compatibility grammar deliberately small.
+proc implParseRelaxedCallObject(payload: string): JsonNode =
+  if payload.len < 2 or payload[0] != '{' or payload[^1] != '}':
+    raise newException(ValueError,
+      "relaxed tool call must contain one braced object")
+  let body = payload[1 ..< payload.len - 1]
+  result = newJObject()
+  var cursor = 0
+  while cursor < body.len:
+    while cursor < body.len and body[cursor].isSpaceAscii:
+      inc cursor
+    if cursor >= body.len:
+      break
+
+    let keyStart = cursor
+    while cursor < body.len and implIsFieldChar(body[cursor]):
+      inc cursor
+    if cursor == keyStart:
+      raise newException(ValueError,
+        "relaxed tool-call field name is invalid")
+    let fieldName = body[keyStart ..< cursor]
+    while cursor < body.len and body[cursor].isSpaceAscii:
+      inc cursor
+    if cursor >= body.len or body[cursor] != ':':
+      raise newException(ValueError,
+        fmt"relaxed tool-call field '{fieldName}' is missing ':'")
+    inc cursor
+
+    let valueStart = cursor
+    var valueEnd = body.len
+    var quote = '\0'
+    var escaped = false
+    var nesting = 0
+    while cursor < body.len:
+      let current = body[cursor]
+      if quote != '\0':
+        if escaped:
+          escaped = false
+        elif current == '\\':
+          escaped = true
+        elif current == quote:
+          quote = '\0'
+        inc cursor
+        continue
+      if current in {'"', '\''}:
+        quote = current
+      elif current in {'(', '[', '{'}:
+        inc nesting
+      elif current in {')', ']', '}'}:
+        if nesting == 0:
+          raise newException(ValueError,
+            "unbalanced relaxed tool-call value")
+        dec nesting
+      elif current == ',' and nesting == 0:
+        var lookahead = cursor + 1
+        while lookahead < body.len and body[lookahead].isSpaceAscii:
+          inc lookahead
+        let nextKeyStart = lookahead
+        while lookahead < body.len and implIsFieldChar(body[lookahead]):
+          inc lookahead
+        let hasNextKey = lookahead > nextKeyStart
+        while lookahead < body.len and body[lookahead].isSpaceAscii:
+          inc lookahead
+        if hasNextKey and lookahead < body.len and body[lookahead] == ':':
+          valueEnd = cursor
+          break
+      inc cursor
+
+    if quote != '\0' or nesting != 0:
+      raise newException(ValueError,
+        "unterminated relaxed tool-call value")
+    if fieldName notin ["command", "purpose", "result_mode"]:
+      raise newException(ValueError,
+        fmt"unsupported relaxed tool-call field '{fieldName}'")
+    if result.hasKey(fieldName):
+      raise newException(ValueError,
+        fmt"duplicate relaxed tool-call field '{fieldName}'")
+    result[fieldName] = %implDecodeRelaxedValue(
+      body[valueStart ..< valueEnd], fieldName)
+
+    if valueEnd < body.len:
+      cursor = valueEnd + 1
+    else:
+      cursor = body.len
+
+func implParseCallNode(
+  node: JsonNode,
+  index: int,
+  defaultMode: ToolResultMode
+): ToolCall
+
+## Decodes a Qwen-style textual tool call when it occupies the whole response.
+##
+## The compatibility path is intentionally constrained to the built-in
+## read-only shell tool.  All decoded commands still pass through the mandatory
+## command policy before execution.
+proc implParseBracketToolAction(
+  content: string
+): Option[HarnessAction] =
+  const Marker = "[tool call]"
+  let candidate = content.strip()
+  if not candidate.toLowerAscii().startsWith(Marker):
+    return none(HarnessAction)
+
+  let remainder = candidate[Marker.len .. ^1].strip()
+  var nameEnd = 0
+  while nameEnd < remainder.len and
+      implIsFieldChar(remainder[nameEnd]):
+    inc nameEnd
+  if nameEnd == 0:
+    raise newException(ValueError,
+      "textual tool call is missing a tool name")
+  let toolName = remainder[0 ..< nameEnd]
+  if toolName != READ_ONLY_SHELL_TOOL:
+    raise newException(ValueError,
+      fmt"unsupported tool '{toolName}'")
+  let payload = remainder[nameEnd .. ^1].strip()
+  if payload.len < 2 or payload[0] != '{' or payload[^1] != '}':
+    raise newException(ValueError,
+      "textual tool call must end with one braced object")
+
+  var arguments: JsonNode
+  try:
+    arguments = parseJson(payload)
+  except JsonParsingError:
+    arguments = implParseRelaxedCallObject(payload)
+  if arguments.kind != JObject:
+    raise newException(ValueError,
+      "textual tool-call arguments must be an object")
+
+  let call = implParseCallNode(
+    %*{
+      "id": "text-tool-1",
+      "tool": toolName,
+      "arguments": arguments
+    },
+    0,
+    trmReturnRaw
+  )
+  result = some(HarnessAction(
+    kind: hakToolCalls,
+    text: "",
+    calls: @[call]
+  ))
+
 ## Decodes one tool-call object from the structured action format.
 ##
 ## :param node: JSON object describing the call.
@@ -123,6 +316,8 @@ func implParseCallNode(
   if not argsNode.isNil and argsNode.kind != JObject:
     raise newException(ValueError,
       "field 'arguments' must be a JSON object")
+  if not argsNode.isNil:
+    implValidateArgumentFields(argsNode)
   let source =
     if not argsNode.isNil: argsNode
     else: node
@@ -225,6 +420,17 @@ proc parseStructuredAction*(
   if node.kind != JObject:
     raise newException(ValueError,
       "structured action must be a JSON object")
+  # Some Qwen-compatible templates omit the discriminator for a direct
+  # answer and emit only {"text":"..."}.  Accept that single-field shape as
+  # an answer; keeping the object exact prevents an omitted `type` from
+  # weakening validation of tool-like payloads.
+  if node{"type"}.isNil and node.len == 1 and
+      not node{"text"}.isNil:
+    return some(HarnessAction(
+      kind: hakAnswer,
+      text: implRequiredString(node, "text"),
+      calls: @[]
+    ))
   let actionType = toLowerAscii(
     implRequiredString(node, "type"))
   case actionType
@@ -294,6 +500,9 @@ proc decodeTextAction*(content: string): HarnessAction =
   let structured = parseStructuredAction(content)
   if structured.isSome:
     return structured.get
+  let bracketCall = implParseBracketToolAction(content)
+  if bracketCall.isSome:
+    return bracketCall.get
   let legacy = extractAgentAction(content)
   case legacy.action
   of aaAnswer:
@@ -335,7 +544,8 @@ proc decodeTextAction*(content: string): HarnessAction =
 ##     let value = observationJson(ToolObservation(
 ##       callId: "c", toolName: "run_readonly_shell",
 ##       command: "pwd", output: "/tmp", exitCode: 0,
-##       elapsedMs: 1, timedOut: false, truncated: false))
+##       elapsedMs: 1, timedOut: false, truncated: false,
+##       policyRejected: false))
 ##     assert value.contains("\"exit_code\":0")
 func observationJson*(observation: ToolObservation): string =
   result = $(%*{
@@ -346,5 +556,6 @@ func observationJson*(observation: ToolObservation): string =
     "exit_code": observation.exitCode,
     "elapsed_ms": observation.elapsedMs,
     "timed_out": observation.timedOut,
-    "truncated": observation.truncated
+    "truncated": observation.truncated,
+    "policy_rejected": observation.policyRejected
   })

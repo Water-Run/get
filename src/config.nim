@@ -262,6 +262,35 @@ const KNOWN_SHELLS = [
   "bash", "zsh", "fish", "sh",
   "powershell", "pwsh", "cmd"]
 
+## Accepts only supported shell basenames or absolute paths rooted in standard
+## administrator-controlled executable directories. This prevents the shell
+## setting itself from becoming a policy bypass.
+func isSupportedShell*(shell: string): bool =
+  var path = toLowerAscii(shell.strip()).replace('\\', '/')
+  if path.len == 0:
+    return false
+  if path.contains('/'):
+    if path.endsWith('/'):
+      return false
+    for segment in path.split('/'):
+      if segment in [".", ".."]:
+        return false
+    let trustedPosix =
+      path.startsWith("/bin/") or path.startsWith("/usr/bin/") or
+      path.startsWith("/usr/local/bin/") or
+      path.startsWith("/opt/homebrew/bin/")
+    let trustedWindows = path.len > 3 and path[0] in {'a' .. 'z'} and
+      path[1] == ':' and (
+        path[2 .. ^1].startsWith("/windows/system32/") or
+        path[2 .. ^1].startsWith("/program files/powershell/")
+      )
+    if not trustedPosix and not trustedWindows:
+      return false
+    path = path[path.rfind('/') + 1 .. ^1]
+  if path.endsWith(".exe"):
+    path.setLen(path.len - 4)
+  result = path in KNOWN_SHELLS
+
 # ---------------------------------------------------------------------------
 # Private helpers — semantic value classification (vivid mode)
 # ---------------------------------------------------------------------------
@@ -296,11 +325,7 @@ func classifyInt*(value: int, lo: int, hi: int): ValueState =
 ## :param shell: The configured shell name.
 ## :returns: vsGood when recognised, vsWarn otherwise.
 func classifyShell*(shell: string): ValueState =
-  let lower = toLowerAscii(shell)
-  for known in KNOWN_SHELLS:
-    if lower == known or lower.contains(known):
-      return vsGood
-  result = vsWarn
+  if isSupportedShell(shell): vsGood else: vsWarn
 
 ## Classifies a model name using the strong-model heuristic so
 ## that recognised high-performance models appear green and
@@ -528,6 +553,10 @@ proc implJsonToConfig(
     defaults.commandTimeout)
   let storedMaxOutputBytes = node{"maxOutputBytes"}.getInt(
     defaults.maxOutputBytes)
+  let rawShell = node{"shell"}.getStr(defaults.shell)
+  let storedShell =
+    if isSupportedShell(rawShell): rawShell
+    else: defaults.shell
   result = Config(
     schemaVersion: defaults.schemaVersion,
     url: node{"url"}.getStr(defaults.url),
@@ -545,7 +574,7 @@ proc implJsonToConfig(
       defaults.timeout),
     maxToken: node{"maxToken"}.getInt(
       defaults.maxToken),
-    shell: node{"shell"}.getStr(defaults.shell),
+    shell: storedShell,
     log: node{"log"}.getBool(defaults.log),
     hideProcess: node{"hideProcess"}.getBool(
       defaults.hideProcess),
@@ -966,7 +995,11 @@ proc setConfigOption*(
     else:
       cfg.systemPrompt = none(string)
   of "shell":
-    cfg.shell = value
+    let candidate = if value.len > 0: value else: implDefaultShell()
+    if not isSupportedShell(candidate):
+      raise newException(GetError,
+        fmt"invalid value '{value}' for '{name}': unsupported shell")
+    cfg.shell = candidate
   of "log":
     cfg.log = implParseBool(
       value, name, DEFAULT_LOG)

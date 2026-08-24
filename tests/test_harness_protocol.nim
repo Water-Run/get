@@ -32,6 +32,15 @@ suite "harness action protocol":
     check parsed.isSome
     check parsed.get.text == "ok"
 
+  test "parses an exact Qwen bare-text answer object":
+    let action = decodeTextAction("{\"text\":\"56088\"}")
+    check action.kind == hakAnswer
+    check action.text == "56088"
+
+    expect ValueError:
+      discard decodeTextAction(
+        "{\"text\":\"pwd\",\"command\":\"pwd\"}")
+
   test "parses independent parallel calls":
     let action = parseStructuredAction("""
       {
@@ -40,7 +49,7 @@ suite "harness action protocol":
         "calls": [
           {"arguments": {"command": "uname -a"}},
           {"arguments": {
-            "command": "git status --short",
+            "command": "git branch --show-current",
             "result_mode": "return_raw"
           }}
         ]
@@ -75,8 +84,57 @@ suite "harness action protocol":
 
   test "converts legacy continuation":
     let action = decodeTextAction(
-      "```sh\ngit status --short\n```\n<!-- CONTINUE -->")
+      "```sh\ngit branch --show-current\n```\n<!-- CONTINUE -->")
     check action.calls[0].resultMode == trmContinue
+
+  test "parses a Qwen textual tool call":
+    let action = decodeTextAction(
+      "[Tool call] run_readonly_shell " &
+      "{command: date +%Y, purpose: get current year, " &
+      "result_mode: return_raw}")
+    check action.kind == hakToolCalls
+    check action.calls.len == 1
+    check action.calls[0].id == "text-tool-1"
+    check action.calls[0].command == "date +%Y"
+    check action.calls[0].purpose == "get current year"
+    check action.calls[0].resultMode == trmReturnRaw
+
+  test "parses quoted Qwen textual arguments and command commas":
+    let quoted = decodeTextAction(
+      "[tool CALL] run_readonly_shell " &
+      "{command: \"printf '%s,%s' a b\", " &
+      "result_mode: \"continue\"}")
+    check quoted.calls[0].command == "printf '%s,%s' a b"
+    check quoted.calls[0].resultMode == trmContinue
+
+    let unquoted = decodeTextAction(
+      "[Tool call] run_readonly_shell " &
+      "{command: printf %s,%s a b, result_mode: return_raw}")
+    check unquoted.calls[0].command == "printf %s,%s a b"
+
+  test "rejects unsafe textual tool-call ambiguity":
+    expect ValueError:
+      discard decodeTextAction(
+        "[Tool call] write_file {command: touch x}")
+    expect ValueError:
+      discard decodeTextAction(
+        "[Tool call] run_readonly_shell {purpose: no command}")
+    expect ValueError:
+      discard decodeTextAction(
+        "[Tool call] run_readonly_shell " &
+        "{command: pwd, unknown: value}")
+    expect ValueError:
+      discard decodeTextAction(
+        "[Tool call] run_readonly_shell " &
+        "{\"command\":\"pwd\",\"unknown\":\"value\"}")
+    expect ValueError:
+      discard decodeTextAction(
+        "[Tool call] run_readonly_shell {command: pwd} trailing")
+
+  test "embedded textual marker remains an answer":
+    let action = decodeTextAction(
+      "The provider may print [Tool call] in documentation.")
+    check action.kind == hakAnswer
 
   test "plain text becomes an answer":
     let action = decodeTextAction("No command is required.")

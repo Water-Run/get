@@ -63,7 +63,8 @@ func implObservation(call: ToolCall, value: ExecResult): ToolObservation =
     exitCode: value.exitCode,
     elapsedMs: value.elapsedMs,
     timedOut: value.timedOut,
-    truncated: value.truncated
+    truncated: value.truncated,
+    policyRejected: false
   )
 
 ## Executes one authorized tool call synchronously.

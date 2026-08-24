@@ -27,7 +27,9 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[locks, monotimes, os, osproc, strformat, strutils, times]
+import std/[
+  envvars, locks, monotimes, os, osproc, strformat, strtabs, strutils, times
+]
 
 when defined(windows):
   import std/[atomics, streams]
@@ -251,9 +253,126 @@ func implBuildShellArgs(
       "-NoProfile", "-NonInteractive",
       "-Command", wrapped]
   elif lower.contains("cmd"):
-    result = @["/C", command]
+    # /D disables per-user and machine AutoRun command injection.
+    # /V:OFF makes delayed !VAR! expansion deterministic and unavailable.
+    result = @["/D", "/Q", "/V:OFF", "/C", command]
+  elif lower.contains("fish"):
+    result = @["--no-config", "-c", command]
+  elif lower.contains("zsh"):
+    result = @["-f", "-c", command]
+  elif lower.contains("bash"):
+    result = @["--noprofile", "--norc", "-c", command]
   else:
     result = @["-c", command]
+
+## Builds a child environment without executable startup hooks.
+##
+## The command policy treats the parent environment as untrusted input: shell
+## startup hooks, exported Bash functions, dynamic-loader injection, language
+## startup options, Git helper injection, and TLS key-log output are removed.
+## Pagers are forced into non-interactive stdout mode and Git optional locks are
+## disabled so read commands do not refresh repository metadata.
+proc implSanitizedEnvironment(): StringTableRef =
+  result = newStringTable(
+    when defined(windows): modeCaseInsensitive
+    else: modeCaseSensitive)
+  for key, value in envPairs():
+    let upper = toUpperAscii(key)
+    let blocked = upper in [
+      "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "CDPATH", "IFS",
+      "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD",
+      "PYTHONSTARTUP", "PYTHONINSPECT", "PYTHONPATH", "PYTHONHOME",
+      "PYTHONWARNINGS", "NODE_OPTIONS", "NODE_PATH", "RUBYOPT", "RUBYLIB",
+      "PERL5OPT", "PERL5LIB", "PERLLIB", "PHPRC", "PHP_INI_SCAN_DIR",
+      "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS",
+      "GOENV", "GOTOOLCHAIN", "GOFLAGS", "GOWORK", "GOMODCACHE",
+      "GOCACHE", "GOPATH", "GOROOT", "GOPROXY", "GONOSUMDB",
+      "GONOPROXY", "GOPRIVATE", "GOSUMDB", "GOINSECURE",
+      "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS",
+      "DOTNET_SHARED_STORE", "COREHOST_TRACEFILE", "OPENSSL_CONF",
+      "OPENSSL_ENGINES", "OPENSSL_MODULES", "MAKEFLAGS", "MFLAGS",
+      "MAKEFILES", "PSMODULEPATH", "KUBECONFIG", "KUBECACHEDIR",
+      "KUBE_EDITOR", "KUBE_EXTERNAL_DIFF", "KUBERNETES_EXEC_INFO",
+      "APT_CONFIG", "PIP_CONFIG_FILE", "CARGO_HOME", "RUSTUP_HOME",
+      "NIM_CONFIG_DIR", "NIMBLE_DIR", "NIMBLE_PATH",
+      "FISH_FUNCTION_PATH", "FISH_COMPLETE_PATH", "FISH_USER_PATHS",
+      "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CLI_PLUGIN_EXTRA_DIRS",
+      "PODMAN_COMPOSE_PROVIDER", "CONTAINERS_CONF",
+      "CONTAINERS_STORAGE_CONF", "REGISTRY_AUTH_FILE",
+      "NPM_CONFIG_USERCONFIG", "YARN_RC_FILENAME", "YARN_IGNORE_PATH",
+      "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RIPGREP_CONFIG_PATH",
+      "TAR_OPTIONS", "TAR_RSH", "RSH", "GZIP", "BZIP2", "XZ_OPT",
+      "XZ_DEFAULTS", "UNZIP", "UNZIPOPT", "ZIPINFO", "ZIPINFOOPT",
+      "WGETRC", "CURL_HOME", "LESSOPEN", "LESSCLOSE", "MANOPT",
+      "SYSTEMD_EDITOR", "SYSTEMD_SSH", "SSLKEYLOGFILE", "MALLOC_TRACE",
+      "RANDFILE", "RUSTUP_TOOLCHAIN",
+      "LLVM_PROFILE_FILE", "GCOV_PREFIX", "GCOV_PREFIX_STRIP",
+      "ASAN_OPTIONS", "LSAN_OPTIONS", "MSAN_OPTIONS", "TSAN_OPTIONS",
+      "UBSAN_OPTIONS"
+    ] or upper.startsWith("BASH_FUNC_") or upper.startsWith("GIT_") or
+      upper.startsWith("LD_") or upper.startsWith("DYLD_") or
+      upper.startsWith("CORECLR_") or upper.startsWith("COR_") or
+      upper.startsWith("COMPLUS_") or upper.startsWith("DOTNET_") or
+      upper.startsWith("NUGET_") or upper.startsWith("NPM_CONFIG_") or
+      upper.startsWith("PNPM_CONFIG_") or upper.startsWith("YARN_") or
+      upper.startsWith("PIP_") or upper.startsWith("CARGO_") or
+      upper.startsWith("RUSTUP_") or upper.startsWith("NIMBLE_") or
+      upper.startsWith("HOMEBREW_")
+    if not blocked:
+      when defined(posix):
+        if upper == "PATH":
+          var absoluteEntries: seq[string] = @[]
+          for entry in value.split(PathSep):
+            if entry.len > 0 and entry[0] == DirSep:
+              absoluteEntries.add(entry)
+          result[key] = absoluteEntries.join($PathSep)
+        else:
+          result[key] = value
+      else:
+        result[key] = value
+  result["PAGER"] = "cat"
+  result["GIT_PAGER"] = "cat"
+  result["MANPAGER"] = "cat"
+  result["SYSTEMD_PAGER"] = "cat"
+  result["LESS"] = "-FRX"
+  result["LESSSECURE"] = "1"
+  result["SYSTEMD_PAGERSECURE"] = "1"
+  result["NoDefaultCurrentDirectoryInExePath"] = "1"
+  result["GIT_OPTIONAL_LOCKS"] = "0"
+  result["GIT_TERMINAL_PROMPT"] = "0"
+  result["GIT_CONFIG_COUNT"] = "3"
+  result["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
+  result["GIT_CONFIG_VALUE_0"] = "false"
+  result["GIT_CONFIG_KEY_1"] = "diff.external"
+  result["GIT_CONFIG_VALUE_1"] = ""
+  result["GIT_CONFIG_KEY_2"] = "log.showSignature"
+  result["GIT_CONFIG_VALUE_2"] = "false"
+  result["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+  result["PIP_NO_INPUT"] = "1"
+  result["NPM_CONFIG_IGNORE_SCRIPTS"] = "true"
+  result["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+  result["NPM_CONFIG_AUDIT"] = "false"
+  result["NPM_CONFIG_FUND"] = "false"
+  result["YARN_ENABLE_SCRIPTS"] = "false"
+  result["PNPM_CONFIG_IGNORE_SCRIPTS"] = "true"
+  result["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1"
+  result["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1"
+  result["DOTNET_NOLOGO"] = "1"
+  result["RUSTUP_AUTO_INSTALL"] = "0"
+  result["RUSTUP_NO_UPDATE_CHECK"] = "1"
+  result["GOENV"] = "off"
+  result["GOTOOLCHAIN"] = "local"
+  result["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+  result["HOMEBREW_NO_ANALYTICS"] = "1"
+
+when defined(getTest):
+  ## Exposes shell startup hardening to native cross-platform tests.
+  func shellArgsForTest*(shell: string, command: string): seq[string] =
+    result = implBuildShellArgs(shell, command)
+
+  ## Returns one value from the environment passed to command children.
+  proc childEnvironmentValueForTest*(name: string): string =
+    result = implSanitizedEnvironment().getOrDefault(name, "")
 
 ## Applies small Windows-specific command compatibility rewrites
 ## before execution.
@@ -784,12 +903,14 @@ proc executeCommandBounded*(
     command, shell)
   let args = implBuildShellArgs(
     shell, effectiveCommand)
+  let childEnvironment = implSanitizedEnvironment()
   var p: Process
   acquire(processStartLock)
   try:
     p = startProcess(
       shell,
       args = args,
+      env = childEnvironment,
       options =
         when defined(posix):
           {poStdErrToStdOut, poUsePath, poDaemon}

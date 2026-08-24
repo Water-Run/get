@@ -27,6 +27,7 @@ when defined(windows):
   import std/osproc
 
 import style
+import tls_context
 import utils
 
 # ---------------------------------------------------------------------------
@@ -565,33 +566,48 @@ proc implAwaitWithProgress(
 
 ## Removes complete provider-visible reasoning tags from message content.
 func implStripOneXmlBlock(text: string, tag: string): string =
-  result = text
   let openTag = "<" & tag & ">"
   let closeTag = "</" & tag & ">"
+  let lower = toLowerAscii(text)
+  var cursor = 0
   while true:
-    let lower = toLowerAscii(result)
-    let start = lower.find(openTag)
+    let start = lower.find(openTag, cursor)
     if start < 0:
+      if cursor < text.len:
+        result.add(text[cursor .. ^1])
       break
+    if start > cursor:
+      result.add(text[cursor ..< start])
     let close = lower.find(closeTag, start + openTag.len)
     if close < 0:
       # An unterminated reasoning suffix is never user-facing output.
-      result =
-        if start == 0: ""
-        else: result[0 ..< start]
       break
-    let afterClose = close + closeTag.len
-    let before =
-      if start > 0: result[0 ..< start]
-      else: ""
-    let after =
-      if afterClose < result.len: result[afterClose .. ^1]
-      else: ""
-    result = before & after
+    cursor = close + closeTag.len
+
+## Removes orphan provider-template closing tags from message content.
+func implStripOneXmlClosingTag(text: string, tag: string): string =
+  let closeTag = "</" & tag & ">"
+  let lower = toLowerAscii(text)
+  var cursor = 0
+  while true:
+    let position = lower.find(closeTag, cursor)
+    if position < 0:
+      if cursor < text.len:
+        result.add(text[cursor .. ^1])
+      break
+    if position > cursor:
+      result.add(text[cursor ..< position])
+    cursor = position + closeTag.len
 
 func implStripThinkBlocks(content: string): string =
   result = implStripOneXmlBlock(content, "think")
-  result = implStripOneXmlBlock(result, "thinking").strip()
+  result = implStripOneXmlBlock(result, "thinking")
+  for tag in [
+    "think", "thinking", "parameter", "final_comment",
+    "invoke", "function", "tool_call"
+  ]:
+    result = implStripOneXmlClosingTag(result, tag)
+  result = result.strip()
 
 ## Parses the raw JSON body into an LlmResponse.
 ##
@@ -753,13 +769,17 @@ proc newLlmSession*(
   if proxy.url.len > 0 and not hideProcess:
     styleProgress(sk,
       fmt"using {proxy.source} proxy: {implRedactProxy(proxy.url)}")
+  let sslContext = newTransportSslContext(url)
   let client =
     if proxy.url.len > 0:
       newAsyncHttpClient(
         maxRedirects = 0,
+        sslContext = sslContext,
         proxy = newProxy(proxy.url))
     else:
-      newAsyncHttpClient(maxRedirects = 0)
+      newAsyncHttpClient(
+        maxRedirects = 0,
+        sslContext = sslContext)
   client.headers = newHttpHeaders({
     "Authorization": fmt"Bearer {apiKey}",
     "Content-Type": "application/json"

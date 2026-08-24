@@ -11,16 +11,217 @@
 
 {.experimental: "strictFuncs".}
 
-import std/unittest
-
-when defined(windows):
-  import std/strutils
+import std/[envvars, os, strutils, unittest]
 
 import exec
+import command_policy
 
 ## Verifies bounded process execution and metadata.
 suite "bounded command execution":
+  test "uses startup-hook-free shell arguments":
+    check shellArgsForTest("bash", "pwd") ==
+      @["--noprofile", "--norc", "-c", "pwd"]
+    check shellArgsForTest("fish", "pwd") ==
+      @["--no-config", "-c", "pwd"]
+    check shellArgsForTest("zsh", "pwd") == @["-f", "-c", "pwd"]
+    check shellArgsForTest("cmd", "ver") ==
+      @["/D", "/Q", "/V:OFF", "/C", "ver"]
+    check shellArgsForTest("powershell", "Get-Location")[0 .. 1] ==
+      @["-NoProfile", "-NonInteractive"]
+
+  test "sanitizes executable child environment":
+    let blockedNames = [
+      "BASH_ENV", "SHELLOPTS", "PS4", "LD_LIBRARY_PATH",
+      "RIPGREP_CONFIG_PATH", "TAR_OPTIONS", "JAVA_TOOL_OPTIONS",
+      "OPENSSL_CONF", "GIT_TRACE", "PSMODULEPATH", "KUBECONFIG",
+      "KUBE_EXTERNAL_DIFF", "DOCKER_CONFIG", "CORECLR_ENABLE_PROFILING",
+      "MAKEFILES", "PIP_CONFIG_FILE", "NPM_CONFIG_SCRIPT_SHELL",
+      "CARGO_HOME", "RUSTUP_HOME", "NIM_CONFIG_DIR", "NIMBLE_DIR",
+      "GOFLAGS", "HOMEBREW_CACHE", "IFS", "UNZIPOPT"
+    ]
+    var previous: seq[tuple[name: string, existed: bool, value: string]] = @[]
+    for name in blockedNames:
+      previous.add((name, existsEnv(name), getEnv(name, "")))
+      putEnv(name, "/tmp/untrusted-get-hook")
+    try:
+      for name in blockedNames:
+        check childEnvironmentValueForTest(name) == ""
+      check childEnvironmentValueForTest("PAGER") == "cat"
+      check childEnvironmentValueForTest("GIT_OPTIONAL_LOCKS") == "0"
+      check childEnvironmentValueForTest("GIT_CONFIG_COUNT") == "3"
+      check childEnvironmentValueForTest("GIT_CONFIG_KEY_0") ==
+        "core.fsmonitor"
+      check childEnvironmentValueForTest("GIT_CONFIG_KEY_2") ==
+        "log.showSignature"
+      check childEnvironmentValueForTest("GOENV") == "off"
+      check childEnvironmentValueForTest("GOTOOLCHAIN") == "local"
+      check childEnvironmentValueForTest(
+        "NoDefaultCurrentDirectoryInExePath") == "1"
+      when defined(posix):
+        let pathExisted = existsEnv("PATH")
+        let oldPath = getEnv("PATH", "")
+        putEnv("PATH", ".::relative:/usr/bin:/tmp/tools")
+        try:
+          check childEnvironmentValueForTest("PATH") ==
+            "/usr/bin" & $PathSep & "/tmp/tools"
+        finally:
+          if pathExisted:
+            putEnv("PATH", oldPath)
+          else:
+            delEnv("PATH")
+    finally:
+      for item in previous:
+        if item.existed:
+          putEnv(item.name, item.value)
+        else:
+          delEnv(item.name)
+
   when defined(posix):
+    test "does not execute a BASH_ENV startup payload":
+      let root = getTempDir() /
+        ("get-v3-bash-env-" & $getCurrentProcessId())
+      createDir(root)
+      let startup = root / "startup.sh"
+      let marker = root / "executed"
+      if fileExists(marker):
+        removeFile(marker)
+      writeFile(startup, "printf injected > '" & marker & "'\n")
+      let previous = getEnv("BASH_ENV", "")
+      putEnv("BASH_ENV", startup)
+      try:
+        let value = executeCommandBounded(
+          "printf 'ready'", "bash", 2, 1024)
+        check value.output == "ready"
+        check value.exitCode == 0
+        check not fileExists(marker)
+      finally:
+        if previous.len > 0:
+          putEnv("BASH_ENV", previous)
+        else:
+          delEnv("BASH_ENV")
+        if fileExists(startup):
+          removeFile(startup)
+        if fileExists(marker):
+          removeFile(marker)
+        if dirExists(root):
+          removeDir(root)
+
+    test "git no-ext-diff suppresses repository-defined helpers":
+      let root = getTempDir() /
+        ("get-v3-git-diff-" & $getCurrentProcessId())
+      createDir(root)
+      let content = root / "probe.txt"
+      let attributes = root / ".gitattributes"
+      let helper = root / "external-diff.sh"
+      let marker = root / "executed"
+      writeFile(content, "before\n")
+      writeFile(attributes, "probe.txt diff=untrusted\n")
+      writeFile(helper,
+        "#!/bin/sh\nprintf executed > '" & marker & "'\ncat \"$2\"\n")
+      setFilePermissions(helper, {
+        fpUserRead, fpUserWrite, fpUserExec
+      })
+      try:
+        for command in [
+          "git -C '" & root & "' init -q",
+          "git -C '" & root & "' config user.name probe",
+          "git -C '" & root & "' config user.email probe@example.invalid",
+          "git -C '" & root & "' config diff.untrusted.command '" & helper & "'",
+          "git -C '" & root & "' add probe.txt .gitattributes external-diff.sh",
+          "git -C '" & root & "' commit -qm baseline"
+        ]:
+          let setup = executeCommandBounded(command, "bash", 5, 16_384)
+          check setup.exitCode == 0
+        writeFile(content, "after\n")
+        let value = executeCommandBounded(
+          "git -C '" & root & "' diff --no-ext-diff",
+          "bash", 5, 16_384)
+        check value.exitCode == 0
+        check not fileExists(marker)
+      finally:
+        if dirExists(root):
+          removeDir(root)
+
+    test "safe git queries cannot invoke repository filter helpers":
+      let root = getTempDir() /
+        ("get-v3-git-filters-" & $getCurrentProcessId())
+      createDir(root)
+      let content = root / "probe.txt"
+      let attributes = root / ".gitattributes"
+      let cleanHelper = root / "clean-filter.sh"
+      let textHelper = root / "textconv-filter.sh"
+      let fsmonitorHelper = root / "fsmonitor-hook.sh"
+      let cleanMarker = root / "clean-executed"
+      let textMarker = root / "textconv-executed"
+      let fsmonitorMarker = root / "fsmonitor-executed"
+      writeFile(content, "before\n")
+      writeFile(attributes,
+        "probe.txt filter=untrusted diff=untrusted\n")
+      writeFile(cleanHelper,
+        "#!/bin/sh\nprintf executed > '" & cleanMarker & "'\ncat\n")
+      writeFile(textHelper,
+        "#!/bin/sh\nprintf executed > '" & textMarker & "'\ncat \"$1\"\n")
+      writeFile(fsmonitorHelper,
+        "#!/bin/sh\nprintf executed > '" & fsmonitorMarker & "'\nprintf '\\n'\n")
+      for helper in [cleanHelper, textHelper, fsmonitorHelper]:
+        setFilePermissions(helper, {
+          fpUserRead, fpUserWrite, fpUserExec
+        })
+      try:
+        for command in [
+          "git -C '" & root & "' init -q",
+          "git -C '" & root & "' config user.name probe",
+          "git -C '" & root & "' config user.email probe@example.invalid",
+          "git -C '" & root & "' config filter.untrusted.clean '" &
+            cleanHelper & "'",
+          "git -C '" & root & "' config diff.untrusted.textconv '" &
+            textHelper & "'",
+          "git -C '" & root & "' config core.fsmonitor '" &
+            fsmonitorHelper & "'",
+          "git -C '" & root & "' add probe.txt .gitattributes",
+          "git -C '" & root & "' commit -qm baseline"
+        ]:
+          let setup = executeCommandBounded(command, "bash", 5, 16_384)
+          check setup.exitCode == 0
+        writeFile(content, "after!\n")
+        let stage = executeCommandBounded(
+          "git -C '" & root & "' add probe.txt", "bash", 5, 16_384)
+        check stage.exitCode == 0
+        if fileExists(cleanMarker):
+          removeFile(cleanMarker)
+        if fileExists(textMarker):
+          removeFile(textMarker)
+        if fileExists(fsmonitorMarker):
+          removeFile(fsmonitorMarker)
+
+        let command = "git -C '" & root &
+          "' diff --cached --no-ext-diff --no-textconv"
+        check checkReadOnlyCommand(command, "bash").allowed
+        let value = executeCommandBounded(command, "bash", 5, 16_384)
+        check value.exitCode == 0
+        check value.output.contains("after!")
+        check not fileExists(cleanMarker)
+        check not fileExists(textMarker)
+        check not fileExists(fsmonitorMarker)
+        writeFile(content, "worktree!\n")
+        let metadataCommand = "git -C '" & root &
+          "' diff-files --name-only --no-ext-diff --no-textconv"
+        check checkReadOnlyCommand(metadataCommand, "bash").allowed
+        let metadata = executeCommandBounded(
+          metadataCommand, "bash", 5, 16_384)
+        check metadata.exitCode == 0
+        check metadata.output.contains("probe.txt")
+        check not fileExists(cleanMarker)
+        check not fileExists(textMarker)
+        check not fileExists(fsmonitorMarker)
+        check not checkReadOnlyCommand(
+          "git status --short", "bash").allowed
+        check not checkReadOnlyCommand(
+          "git diff --no-ext-diff --no-textconv", "bash").allowed
+      finally:
+        if dirExists(root):
+          removeDir(root)
+
     test "captures normal command output":
       let value = executeCommandBounded(
         "printf 'ready'", "bash", 2, 1024)

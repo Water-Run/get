@@ -33,7 +33,8 @@ func fakeObservation(call: ToolCall): ToolObservation =
     exitCode: 0,
     elapsedMs: 1,
     timedOut: false,
-    truncated: false
+    truncated: false,
+    policyRejected: false
   )
 
 ## Returns minimal initial messages for state-machine tests.
@@ -100,6 +101,62 @@ suite "unified harness runtime":
     check value.metrics.inputOutputTokens == 11
     check value.termination == htRawToolResult
 
+  test "successful empty terminal output is explicit":
+    let model: ModelTurnProc = proc(
+      messages: seq[LlmMessage],
+      enableNativeTools: bool,
+      allowParallel: bool
+    ): LlmResponse =
+      discard messages
+      discard enableNativeTools
+      discard allowParallel
+      result = LlmResponse(
+        content: "",
+        tokensUsed: 1,
+        toolCalls: @[
+          LlmToolCall(
+            id: "empty",
+            name: READ_ONLY_SHELL_TOOL,
+            arguments: "{\"command\":\"printf ''\"," &
+              "\"result_mode\":\"return_raw\"}"
+          )
+        ],
+        toolCallsJson: "[]",
+        finishReason: "tool_calls"
+      )
+    let tools: ToolBatchProc = proc(
+      calls: seq[ToolCall],
+      maxParallel: int
+    ): seq[ToolObservation] =
+      discard maxParallel
+      result = @[
+        ToolObservation(
+          callId: calls[0].id,
+          toolName: calls[0].toolName,
+          command: calls[0].command,
+          output: "",
+          exitCode: 0,
+          elapsedMs: 1,
+          timedOut: false,
+          truncated: false,
+          policyRejected: false
+        )
+      ]
+    let value = runHarness(
+      initialMessages(),
+      HarnessRunOptions(
+        kind: hkDirect,
+        protocol: tpkNative,
+        budget: defaultRunBudget(hkDirect),
+        eventSink: nil
+      ),
+      model,
+      tools
+    )
+    check value.exitCode == 0
+    check value.output == "(command completed with no output)"
+    check value.termination == htRawToolResult
+
   test "continuation feeds native observations into a second turn":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
@@ -155,6 +212,79 @@ suite "unified harness runtime":
     check value.output == "Linux"
     check value.observations.len == 1
     check value.metrics.inputOutputTokens == 8
+    check value.termination == htAnswer
+
+  test "auto strategy requests a safe revision after policy rejection":
+    var modelCalls = 0
+    let model: ModelTurnProc = proc(
+      messages: seq[LlmMessage],
+      enableNativeTools: bool,
+      allowParallel: bool
+    ): LlmResponse =
+      discard enableNativeTools
+      discard allowParallel
+      modelCalls += 1
+      if modelCalls == 1:
+        return LlmResponse(
+          content: "",
+          tokensUsed: 2,
+          toolCalls: @[
+            LlmToolCall(
+              id: "denied",
+              name: READ_ONLY_SHELL_TOOL,
+              arguments: "{\"command\":\"find . -exec sh -c bad {} \\\\;\"," &
+                "\"result_mode\":\"return_raw\"}"
+            )
+          ],
+          toolCallsJson: "[{\"id\":\"denied\",\"type\":\"function\"," &
+            "\"function\":{\"name\":\"run_readonly_shell\"," &
+            "\"arguments\":\"{}\"}}]",
+          finishReason: "tool_calls"
+        )
+      check messages[^1].role == "tool"
+      check messages[^1].content.contains("\"policy_rejected\":true")
+      check messages[^1].content.contains("before execution")
+      result = LlmResponse(
+        content: "safe revision completed",
+        tokensUsed: 3,
+        toolCalls: @[],
+        toolCallsJson: "",
+        finishReason: "stop"
+      )
+    let tools: ToolBatchProc = proc(
+      calls: seq[ToolCall],
+      maxParallel: int
+    ): seq[ToolObservation] =
+      discard maxParallel
+      result = @[
+        ToolObservation(
+          callId: calls[0].id,
+          toolName: calls[0].toolName,
+          command: calls[0].command,
+          output: "read-only policy rejected this command before execution",
+          exitCode: 126,
+          elapsedMs: 0,
+          timedOut: false,
+          truncated: false,
+          policyRejected: true
+        )
+      ]
+    let value = runHarness(
+      initialMessages(),
+      HarnessRunOptions(
+        kind: hkAuto,
+        protocol: tpkNative,
+        budget: defaultRunBudget(hkAuto),
+        eventSink: nil
+      ),
+      model,
+      tools
+    )
+    check modelCalls == 2
+    check value.output == "safe revision completed"
+    check value.exitCode == 0
+    check value.observations.len == 1
+    check value.observations[0].policyRejected
     check value.termination == htAnswer
 
   test "direct strategy forces a continuation request to return raw":
@@ -315,3 +445,81 @@ suite "unified harness runtime":
     check value.refused
     check value.exitCode == 1
     check value.termination == htRefused
+
+  test "text-only requests do not expose native tools":
+    var toolRan = false
+    let model: ModelTurnProc = proc(
+      messages: seq[LlmMessage],
+      enableNativeTools: bool,
+      allowParallel: bool
+    ): LlmResponse =
+      discard messages
+      discard allowParallel
+      check not enableNativeTools
+      result = LlmResponse(
+        content: "42",
+        tokensUsed: 1,
+        toolCalls: @[],
+        toolCallsJson: "",
+        finishReason: "stop"
+      )
+    let tools: ToolBatchProc = proc(
+      calls: seq[ToolCall],
+      maxParallel: int
+    ): seq[ToolObservation] =
+      discard calls
+      discard maxParallel
+      toolRan = true
+      result = @[]
+    let value = runHarness(
+      initialMessages(),
+      HarnessRunOptions(
+        kind: hkAuto,
+        protocol: tpkNative,
+        budget: defaultRunBudget(hkAuto),
+        toolsDisabled: true,
+        eventSink: nil
+      ),
+      model,
+      tools
+    )
+    check value.output == "42"
+    check not toolRan
+
+  test "text-only requests reject textual tool actions":
+    let model: ModelTurnProc = proc(
+      messages: seq[LlmMessage],
+      enableNativeTools: bool,
+      allowParallel: bool
+    ): LlmResponse =
+      discard messages
+      discard enableNativeTools
+      discard allowParallel
+      result = LlmResponse(
+        content: "{\"type\":\"tool_calls\",\"calls\":[{" &
+          "\"command\":\"pwd\",\"result_mode\":\"return_raw\"}]}",
+        tokensUsed: 1,
+        toolCalls: @[],
+        toolCallsJson: "",
+        finishReason: "stop"
+      )
+    let tools: ToolBatchProc = proc(
+      calls: seq[ToolCall],
+      maxParallel: int
+    ): seq[ToolObservation] =
+      discard calls
+      discard maxParallel
+      result = @[]
+    expect HarnessProtocolError:
+      discard runHarness(
+        initialMessages(),
+        HarnessRunOptions(
+          kind: hkAuto,
+          protocol: tpkLegacy,
+          budget: defaultRunBudget(hkAuto),
+          toolsDisabled: true,
+          eventSink: nil
+        ),
+        model,
+        tools
+      )

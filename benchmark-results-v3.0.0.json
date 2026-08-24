@@ -1,0 +1,360 @@
+{
+  "benchmarks": {
+    "cached_text_result_zero_provider": {
+      "a": {
+        "max_ms": 3.899,
+        "mean_ms": 3.355,
+        "median_ms": 3.381,
+        "min_ms": 2.768,
+        "n": 120,
+        "p95_ms": 3.69,
+        "stdev_ms": 0.233
+      },
+      "b": {
+        "max_ms": 2.454,
+        "mean_ms": 2.005,
+        "median_ms": 2.056,
+        "min_ms": 1.423,
+        "n": 120,
+        "p95_ms": 2.331,
+        "stdev_ms": 0.231
+      },
+      "b_latency_reduction_pct": 39.2,
+      "b_speedup_vs_a": 1.645
+    },
+    "forced_command_cache_population": {
+      "a": {
+        "max_ms": 3118.895,
+        "mean_ms": 3065.459,
+        "median_ms": 3061.818,
+        "min_ms": 3056.844,
+        "n": 30,
+        "p95_ms": 3076.662,
+        "stdev_ms": 11.029
+      },
+      "b": {
+        "max_ms": 52.73,
+        "mean_ms": 46.644,
+        "median_ms": 46.442,
+        "min_ms": 44.901,
+        "n": 30,
+        "p95_ms": 51.542,
+        "stdev_ms": 1.601
+      },
+      "b_latency_reduction_pct": 98.48,
+      "b_speedup_vs_a": 65.928
+    },
+    "four_tool_serial_vs_parallel": {
+      "parallel": {
+        "max_ms": 130.18,
+        "mean_ms": 128.863,
+        "median_ms": 129.135,
+        "min_ms": 127.308,
+        "n": 18,
+        "p95_ms": 130.18,
+        "stdev_ms": 0.96
+      },
+      "parallel_latency_reduction_pct": 73.91,
+      "parallel_speedup": 3.833,
+      "serial": {
+        "max_ms": 495.741,
+        "mean_ms": 494.645,
+        "median_ms": 494.988,
+        "min_ms": 492.925,
+        "n": 18,
+        "p95_ms": 495.741,
+        "stdev_ms": 0.779
+      }
+    },
+    "help_startup": {
+      "a": {
+        "max_ms": 4.131,
+        "mean_ms": 3.505,
+        "median_ms": 3.511,
+        "min_ms": 2.828,
+        "n": 80,
+        "p95_ms": 3.887,
+        "stdev_ms": 0.268
+      },
+      "b": {
+        "max_ms": 2.331,
+        "mean_ms": 1.951,
+        "median_ms": 2.011,
+        "min_ms": 1.384,
+        "n": 80,
+        "p95_ms": 2.271,
+        "stdev_ms": 0.238
+      },
+      "b_latency_reduction_pct": 42.72,
+      "b_speedup_vs_a": 1.746
+    },
+    "one_request_loopback_overhead": {
+      "a": {
+        "max_ms": 1058.688,
+        "mean_ms": 1056.096,
+        "median_ms": 1056.059,
+        "min_ms": 1053.837,
+        "n": 80,
+        "p95_ms": 1057.688,
+        "stdev_ms": 1.044
+      },
+      "b": {
+        "max_ms": 3.655,
+        "mean_ms": 3.053,
+        "median_ms": 3.042,
+        "min_ms": 2.337,
+        "n": 80,
+        "p95_ms": 3.507,
+        "stdev_ms": 0.309
+      },
+      "b_latency_reduction_pct": 99.71,
+      "b_speedup_vs_a": 347.141
+    },
+    "one_request_max_rss": {
+      "v2": {
+        "max_kib": 9592.0,
+        "median_kib": 9208.0,
+        "min_kib": 8760.0,
+        "n": 20,
+        "p95_kib": 9392.0
+      },
+      "v3": {
+        "max_kib": 7036.0,
+        "median_kib": 6794.0,
+        "min_kib": 6444.0,
+        "n": 20,
+        "p95_kib": 6980.0
+      }
+    },
+    "routine_command_default_40ms_rtt": {
+      "a": {
+        "max_ms": 2063.466,
+        "mean_ms": 2059.766,
+        "median_ms": 2059.847,
+        "min_ms": 2056.745,
+        "n": 40,
+        "p95_ms": 2062.146,
+        "stdev_ms": 1.482
+      },
+      "b": {
+        "max_ms": 46.418,
+        "mean_ms": 45.749,
+        "median_ms": 45.76,
+        "min_ms": 45.207,
+        "n": 40,
+        "p95_ms": 46.272,
+        "stdev_ms": 0.339
+      },
+      "b_latency_reduction_pct": 97.78,
+      "b_speedup_vs_a": 45.015
+    },
+    "two_turn_continuation_40ms_rtt": {
+      "a": {
+        "max_ms": 3080.326,
+        "mean_ms": 3063.801,
+        "median_ms": 3062.281,
+        "min_ms": 3060.29,
+        "n": 30,
+        "p95_ms": 3077.753,
+        "stdev_ms": 4.688
+      },
+      "b": {
+        "max_ms": 132.934,
+        "mean_ms": 127.695,
+        "median_ms": 127.231,
+        "min_ms": 126.143,
+        "n": 30,
+        "p95_ms": 132.668,
+        "stdev_ms": 1.527
+      },
+      "b_latency_reduction_pct": 95.85,
+      "b_speedup_vs_a": 24.069
+    },
+    "version_startup": {
+      "a": {
+        "max_ms": 3.981,
+        "mean_ms": 3.337,
+        "median_ms": 3.396,
+        "min_ms": 2.625,
+        "n": 160,
+        "p95_ms": 3.791,
+        "stdev_ms": 0.297
+      },
+      "b": {
+        "max_ms": 2.435,
+        "mean_ms": 1.878,
+        "median_ms": 1.933,
+        "min_ms": 1.318,
+        "n": 160,
+        "p95_ms": 2.177,
+        "stdev_ms": 0.24
+      },
+      "b_latency_reduction_pct": 43.08,
+      "b_speedup_vs_a": 1.757
+    }
+  },
+  "environment": {
+    "cpu_count": 16,
+    "load_average": [
+      0.419921875,
+      1.06396484375,
+      1.57177734375
+    ],
+    "load_average_after": [
+      2.65283203125,
+      1.09033203125,
+      1.2802734375
+    ],
+    "machine": "x86_64",
+    "platform": "Linux-7.1.9-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "python": "3.14.7"
+  },
+  "method": {
+    "baseline": "GitHub Release v2.1 binary",
+    "candidate": "local pre-CI get v3.0.0 Linux candidate built with Nim 2.2.6",
+    "clock": "time.perf_counter_ns (monotonic)",
+    "pairing": "interleaved order, isolated configuration roots",
+    "provider": "loopback HTTP/1.1 deterministic mock",
+    "simulated_request_delay_ms": 40,
+    "baseline_sha256": "a3ba3c3a48bbc58163a78275af795131681a08d7f7920946a5121519d8ae5ba9",
+    "candidate_sha256": "2e03f467621ced8862dc3225eec0b3d1e9d14e61a3d7bde45f1dc166448c6d03",
+    "archive_size_note": "Exact archive size is populated and verified by native release CI; excluded from this pre-CI benchmark."
+  },
+  "request_accounting": {
+    "cache_hit_v2": {
+      "connections_per_operation": 0.0,
+      "operations_seen": 0,
+      "request_kinds": {},
+      "requests_per_operation": 0.0,
+      "requests_total": 0
+    },
+    "cache_hit_v3": {
+      "connections_per_operation": 0.0,
+      "operations_seen": 0,
+      "request_kinds": {},
+      "requests_per_operation": 0.0,
+      "requests_total": 0
+    },
+    "cache_population_v2": {
+      "connections_per_operation": 3,
+      "operations_seen": 30,
+      "request_kinds": {
+        "cache": 30,
+        "model": 30,
+        "review": 30
+      },
+      "requests_per_operation": 3,
+      "requests_total": 90
+    },
+    "cache_population_v3": {
+      "connections_per_operation": 1,
+      "operations_seen": 30,
+      "request_kinds": {
+        "model": 30
+      },
+      "requests_per_operation": 1,
+      "requests_total": 30
+    },
+    "continuation_v2": {
+      "connections_per_operation": 3,
+      "operations_seen": 30,
+      "request_kinds": {
+        "model": 60,
+        "review": 30
+      },
+      "requests_per_operation": 3,
+      "requests_total": 90
+    },
+    "continuation_v3": {
+      "connections_per_operation": 1,
+      "operations_seen": 30,
+      "request_kinds": {
+        "model": 60
+      },
+      "requests_per_operation": 2,
+      "requests_total": 60
+    },
+    "one_request_v2": {
+      "connections_per_operation": 1,
+      "operations_seen": 80,
+      "request_kinds": {
+        "model": 80
+      },
+      "requests_per_operation": 1,
+      "requests_total": 80
+    },
+    "one_request_v3": {
+      "connections_per_operation": 1,
+      "operations_seen": 80,
+      "request_kinds": {
+        "model": 80
+      },
+      "requests_per_operation": 1,
+      "requests_total": 80
+    },
+    "routine_v2": {
+      "connections_per_operation": 2,
+      "operations_seen": 40,
+      "request_kinds": {
+        "model": 40,
+        "review": 40
+      },
+      "requests_per_operation": 2,
+      "requests_total": 80
+    },
+    "routine_v3": {
+      "connections_per_operation": 1,
+      "operations_seen": 40,
+      "request_kinds": {
+        "model": 40
+      },
+      "requests_per_operation": 1,
+      "requests_total": 40
+    }
+  },
+  "sizes": {
+    "linux_binary": {
+      "change_pct": 27.85,
+      "v2_bytes": 1309192,
+      "v3_bytes": 1673832
+    }
+  },
+  "stress": {
+    "concurrent_cache_writers": {
+      "backup_valid_json": true,
+      "elapsed_ms": 8723.836,
+      "entries_preserved": 192,
+      "hash_algorithm": "sha256",
+      "mode_octal": "0o600",
+      "schema_version": 3,
+      "stale_lock": false,
+      "temporary_files": 0,
+      "waves": 8,
+      "writers_per_wave": 24,
+      "writes_total": 192
+    },
+    "deadline": {
+      "all_under_1800ms": true,
+      "expected_exit": 124,
+      "max_ms": 1062.723,
+      "mean_ms": 1057.191,
+      "median_ms": 1055.907,
+      "min_ms": 1053.898,
+      "n": 20,
+      "p95_ms": 1062.377,
+      "stdev_ms": 3.047
+    },
+    "output_cap": {
+      "all_reported_truncated": true,
+      "limit_bytes": 100,
+      "max_ms": 69.377,
+      "mean_ms": 63.828,
+      "median_ms": 63.748,
+      "min_ms": 59.985,
+      "n": 50,
+      "p95_ms": 67.259,
+      "runs": 50,
+      "stdev_ms": 2.062
+    }
+  }
+}

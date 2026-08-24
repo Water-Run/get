@@ -1,10 +1,13 @@
-import std/[httpclient, os]
+import std/[httpclient, os, uri]
+
+import tls_context
 
 const DefaultReleaseSmokeUrl = "https://example.com/"
 
 let target = getEnv("GET_RELEASE_HTTPS_URL", DefaultReleaseSmokeUrl)
 var client = newHttpClient(
   userAgent = "get/3.0.0 release-smoke",
+  sslContext = newVerifiedSslContext(parseUri(target).hostname),
   timeout = 30_000,
 )
 

@@ -93,6 +93,7 @@ type
     elapsedMs*: int64     ## Tool wall-clock duration in milliseconds.
     timedOut*: bool       ## Whether execution exceeded its timeout.
     truncated*: bool      ## Whether output exceeded its byte budget.
+    policyRejected*: bool ## Whether policy denied it before any execution.
 
   ## Applies hard resource limits to a complete harness run.
 type

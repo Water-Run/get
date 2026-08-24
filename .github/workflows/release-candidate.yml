@@ -364,6 +364,10 @@ jobs:
             "$package_dir/ZLIB-LICENSE.txt"
           install -m 0644 RELEASE_NOTES-v3.0.0.md \
             "$package_dir/RELEASE_NOTES.md"
+          install -m 0644 VALIDATION-v3.0.0.md \
+            "$package_dir/VALIDATION.md"
+          install -m 0644 benchmark-results-v3.0.0.json \
+            "$package_dir/benchmark-results.json"
 
           python3 - "$package_dir/BUILDINFO.json" <<'PY'
           import json
@@ -449,7 +453,9 @@ jobs:
             RELEASE_NOTES.md
             SHA256SUMS
             THIRD_PARTY_NOTICES.md
+            VALIDATION.md
             ZLIB-LICENSE.txt
+            benchmark-results.json
             get-linux-x64
             get-macos-arm64
             get-windows-x64.exe

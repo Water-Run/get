@@ -68,6 +68,21 @@ suite "v3 configuration":
     check value.commandTimeout == 30
     check value.maxOutputBytes == 1_048_576
 
+  test "accepts only supported shells from trusted paths":
+    for shell in [
+      "bash", "/bin/bash", "/usr/bin/fish", "/opt/homebrew/bin/zsh",
+      "powershell.exe", "C:\\Windows\\System32\\cmd.exe",
+      "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+    ]:
+      check isSupportedShell(shell)
+    for shell in [
+      "python", "/tmp/bash", "./bash", "/usr/bin/../../../tmp/bash",
+      "C:\\Temp\\powershell.exe", "evilbash"
+    ]:
+      check not isSupportedShell(shell)
+    check parseConfigForTest("{\"shell\":\"/tmp/bash\"}").shell ==
+      defaultConfig().shell
+
   when defined(windows):
     test "stores API keys with a DPAPI round trip":
       let originalAppData = getEnv("APPDATA")
