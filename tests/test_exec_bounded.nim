@@ -11,7 +11,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/unittest
+import std/[strutils, unittest]
 
 import exec
 
@@ -46,3 +46,18 @@ suite "bounded command execution":
         "echo ready", "cmd", 2, 1024)
       check value.output.strip() == "ready"
       check value.exitCode == 0
+
+    test "caps captured output":
+      let value = executeCommandBounded(
+        "echo 1234567890", "cmd", 2, 5)
+      check value.output == "12345"
+      check value.truncated
+      check not value.timedOut
+
+    test "stops a silent process at its deadline":
+      let value = executeCommandBounded(
+        "ping -n 3 127.0.0.1 >NUL", "cmd", 1, 1024)
+      check value.timedOut
+      check value.elapsedMs >= 900
+      check value.elapsedMs < 2_000
+      check value.exitCode != 0

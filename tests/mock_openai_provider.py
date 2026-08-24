@@ -57,6 +57,12 @@ class Handler(BaseHTTPRequestHandler):
             if message.get("role") == "system"
         ).lower()
         has_tools = bool(body.get("tools"))
+        is_windows = "os=windows" in system_text
+        is_cmd = "cmd.exe:" in system_text
+
+        def output(text: str) -> str:
+            """Return a deterministic command for the requested test shell."""
+            return f"echo {text}" if is_windows else f"printf {text}"
 
         if "transient transport" in user_text \
                 and Handler.transient_failures < 3:
@@ -80,7 +86,8 @@ class Handler(BaseHTTPRequestHandler):
             elif "force unsafe review" in system_text:
                 self._completion(content="```sh\nrm -rf ./never-run\n```")
             else:
-                self._completion(content="```sh\nprintf reviewed-ok\n```")
+                self._completion(
+                    content=f"```sh\n{output('reviewed-ok')}\n```")
             return
         if "fallback" in user_text and has_tools:
             self._write(400, {"error": {"message": "unknown field tools"}})
@@ -94,13 +101,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "parallel" in user_text and has_tools:
             self._tool_completion([
-                ("parallel-a", "printf parallel-a", "return_raw"),
-                ("parallel-b", "printf parallel-b", "return_raw"),
+                ("parallel-a", output("parallel-a"), "return_raw"),
+                ("parallel-b", output("parallel-b"), "return_raw"),
             ])
             return
         if "continue" in user_text and has_tools:
             self._tool_completion([
-                ("continue-1", "printf evidence", "continue"),
+                ("continue-1", output("evidence"), "continue"),
             ])
             return
         if "unsafe policy" in user_text and has_tools:
@@ -110,12 +117,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "slow command" in user_text and has_tools:
             self._tool_completion([
-                ("slow-1", "sleep 10", "return_raw"),
+                ("slow-1", "ping -n 11 127.0.0.1 >NUL" if is_windows
+                 else "sleep 10", "return_raw"),
             ])
             return
         if "large output" in user_text and has_tools:
             self._tool_completion([
-                ("large-1", "yes x | head -c 5000", "return_raw"),
+                ("large-1",
+                 "for /L %i in (1,1,1000) do @echo xxxxx" if is_cmd else
+                 "1..1000 | ForEach-Object { 'xxxxx' }" if is_windows else
+                 "yes x | head -c 5000",
+                 "return_raw"),
             ])
             return
         if "fallback" in user_text:
@@ -123,14 +135,14 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "tool_calls",
                 "calls": [{
                     "id": "fallback-1",
-                    "command": "printf fallback-ok",
+                    "command": output("fallback-ok"),
                     "result_mode": "return_raw",
                 }],
             })
             self._completion(content=content)
             return
         self._tool_completion([
-            ("native-1", "printf native-ok", "return_raw"),
+            ("native-1", output("native-ok"), "return_raw"),
         ])
 
     def _completion(self, content: str) -> None:

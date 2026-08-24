@@ -13,6 +13,9 @@
 
 import std/[monotimes, unittest, times]
 
+when defined(windows):
+  import std/strutils
+
 import harness_executor
 import harness_protocol
 import harness_types
@@ -66,6 +69,33 @@ suite "harness tool executor":
       check values[2].output == "third"
       check elapsed < 750
   else:
-    test "empty batch is valid":
-      let budget = defaultRunBudget(hkParallel)
-      check executeToolBatch(@[], "cmd", budget, 2).len == 0
+    test "runs independent cmd calls in stable order":
+      let calls = @[
+        ToolCall(
+          id: "first",
+          toolName: READ_ONLY_SHELL_TOOL,
+          command: "echo first",
+          purpose: "first probe",
+          resultMode: trmReturnRaw
+        ),
+        ToolCall(
+          id: "second",
+          toolName: READ_ONLY_SHELL_TOOL,
+          command: "echo second",
+          purpose: "second probe",
+          resultMode: trmReturnRaw
+        )
+      ]
+      let budget = RunBudget(
+        maxTurns: 3,
+        maxToolCalls: 8,
+        maxParallel: 2,
+        commandTimeoutSec: 2,
+        maxOutputBytes: 1024
+      )
+      let values = executeToolBatch(calls, "cmd", budget, 2)
+      check values.len == 2
+      check values[0].callId == "first"
+      check values[0].output.strip() == "first"
+      check values[1].callId == "second"
+      check values[1].output.strip() == "second"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import shlex
 import shutil
 import signal
 import subprocess
@@ -30,11 +31,21 @@ class GetV3CliTests(unittest.TestCase):
             raise unittest.SkipTest(
                 "set GET_V3_BINARY to a compiled get v3 executable")
         cls.binary = cls.binary.resolve()
+        runner = shlex.split(os.environ.get("GET_V3_RUNNER", ""))
+        cls.command = [*runner, str(cls.binary)]
+        cls.target_os = os.environ.get(
+            "GET_V3_TARGET_OS",
+            "windows" if os.name == "nt" else "linux",
+        ).lower()
         cls.root = Path(tempfile.mkdtemp(prefix="get_v3_cli_"))
         cls.work = cls.root / "work"
         cls.work.mkdir()
+        cls.config_root = Path(os.environ.get(
+            "GET_V3_CONFIG_ROOT", str(cls.root / "config")))
         cls.env = os.environ.copy()
-        cls.env["XDG_CONFIG_HOME"] = str(cls.root / "config")
+        cls.env["XDG_CONFIG_HOME"] = str(cls.config_root)
+        if cls.target_os == "windows":
+            cls.env["APPDATA"] = str(cls.config_root)
         cls.env["NO_PROXY"] = "127.0.0.1,localhost"
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         cls.server_thread = threading.Thread(
@@ -55,6 +66,9 @@ class GetV3CliTests(unittest.TestCase):
             ("set", "key", "test-key"),
             ("set", "url", f"http://127.0.0.1:{port}/v1"),
             ("set", "model", "mock"),
+            ("set", "shell", os.environ.get(
+                "GET_V3_TEST_SHELL",
+                "powershell" if cls.target_os == "windows" else "bash")),
             ("set", "vivid", "false"),
             ("set", "hide-process", "true"),
             ("set", "log", "false"),
@@ -88,7 +102,7 @@ class GetV3CliTests(unittest.TestCase):
         if env_override:
             env.update(env_override)
         return subprocess.run(
-            [str(cls.binary), *args],
+            [*cls.command, *args],
             cwd=cls.work,
             env=env,
             capture_output=True,
@@ -215,8 +229,10 @@ class GetV3CliTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process audit")
     def test_11_ctrl_c_stops_the_active_process_tree(self) -> None:
+        if self.target_os != "linux":
+            self.skipTest("Linux target process audit")
         process = subprocess.Popen(
-            [str(self.binary), "slow command interrupt", "--no-cache"],
+            [*self.command, "slow command interrupt", "--no-cache"],
             cwd=self.work,
             env=self.env,
             stdout=subprocess.PIPE,
@@ -268,7 +284,7 @@ class GetV3CliTests(unittest.TestCase):
             self.run_get("cache", "--clean").returncode, 0)
         queries = [f"answer-only concurrent cache {i}" for i in range(12)]
         processes = [subprocess.Popen(
-            [str(self.binary), query, "--cache"],
+            [*self.command, query, "--cache"],
             cwd=self.work,
             env=self.env,
             stdout=subprocess.PIPE,
@@ -280,7 +296,7 @@ class GetV3CliTests(unittest.TestCase):
         results = [process.communicate(timeout=20) for process in processes]
         self.assertTrue(all(process.returncode == 0 for process in processes),
                         results)
-        cache_path = self.root / "config" / "get" / "cache.json"
+        cache_path = self.config_root / "get" / "cache.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["schemaVersion"], 3)
         self.assertEqual(payload["hashAlgorithm"], "sha256")
@@ -288,11 +304,11 @@ class GetV3CliTests(unittest.TestCase):
         self.assertTrue(set(queries).issubset(stored_queries))
         self.assertFalse(Path(str(cache_path) + ".lock").exists())
         self.assertFalse(list(cache_path.parent.glob("cache.json.tmp.*")))
-        if os.name != "nt":
+        if self.target_os != "windows":
             self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
 
     def test_14_corrupt_primary_recovers_from_last_good_copy(self) -> None:
-        cache_path = self.root / "config" / "get" / "cache.json"
+        cache_path = self.config_root / "get" / "cache.json"
         backup_path = cache_path.with_name(cache_path.name + ".bak")
         self.assertTrue(backup_path.is_file())
         previous = json.loads(backup_path.read_text(encoding="utf-8"))

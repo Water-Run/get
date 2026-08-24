@@ -8,6 +8,12 @@ update at: 2026-04-19
 switch("define", "ssl")
 switch("threads", "on")
 
+when defined(windows):
+  # Nim 2.2 ARC/ORC can race when a process uses async HTTP before spawning
+  # osproc workers. The short-lived CLI favors refc's isolated thread heaps
+  # until the upstream Windows runtime path is safe under ORC.
+  switch("mm", "refc")
+
 when defined(release):
   switch("opt", "size")
 

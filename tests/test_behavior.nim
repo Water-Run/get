@@ -14,6 +14,10 @@ suite "version metadata":
     check APP_VERSION == "3.0.0"
     check nimbleContent.contains("version       = \"3.0.0\"")
 
+  when defined(windows):
+    test "uses the stable Windows thread memory manager":
+      check defined(gcrefc)
+
 suite "response parsing":
   test "strips provider think blocks from chat content":
     let body = $(%*{

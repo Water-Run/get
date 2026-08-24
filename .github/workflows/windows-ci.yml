@@ -1,0 +1,81 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-amd64:
+    name: Windows amd64
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Nim 2.2.10
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec
+        with:
+          nim-version: 2.2.10
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nim dependencies
+        shell: pwsh
+        run: nimble -y install --depsOnly
+
+      - name: Validate package and Python test sources
+        shell: pwsh
+        run: |
+          nimble check
+          python -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+
+      - name: Run Windows Nim unit tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force .ci | Out-Null
+          Get-ChildItem tests/test_*.nim | Sort-Object Name | ForEach-Object {
+            $name = $_.BaseName
+            nim c -r -d:release -d:getTest --path:src `
+              --nimcache:".ci/nimcache-$name" `
+              --out:".ci/$name.exe" $_.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows Nim test failed: $name"
+            }
+          }
+
+      - name: Build Windows release binary
+        shell: pwsh
+        run: |
+          nim c -d:release --path:src `
+            --nimcache:.ci/nimcache-get `
+            --out:.ci/get.exe src/get.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release build failed"
+          }
+          .ci/get.exe --version
+
+      - name: Run Windows CLI end-to-end tests
+        shell: pwsh
+        run: |
+          $env:GET_V3_BINARY = (Resolve-Path .ci/get.exe).Path
+          $env:GET_V3_TARGET_OS = "windows"
+          $env:GET_V3_TEST_SHELL = "powershell"
+          python tests/test_cli_v3.py -v
+
+      - name: Run comprehensive Windows offline suite
+        shell: pwsh
+        run: |
+          $env:PATH = "$(Resolve-Path .ci);$env:PATH"
+          python get_test.py --key dummy --skip-llm

@@ -11,9 +11,14 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[unittest]
+import std/unittest
+
+when defined(windows):
+  import std/[options, os, strutils, tempfiles]
 
 import config
+when defined(windows):
+  import utils
 
 ## Verifies v3 configuration defaults and migration behavior.
 suite "v3 configuration":
@@ -62,3 +67,25 @@ suite "v3 configuration":
     check value.maxParallel == 4
     check value.commandTimeout == 30
     check value.maxOutputBytes == 1_048_576
+
+  when defined(windows):
+    test "stores API keys with a DPAPI round trip":
+      let originalAppData = getEnv("APPDATA")
+      let root = createTempDir("get_v3_dpapi_", "")
+      putEnv("APPDATA", root)
+      defer:
+        if originalAppData.len > 0:
+          putEnv("APPDATA", originalAppData)
+        else:
+          delEnv("APPDATA")
+        removeDir(root)
+
+      const secret = "windows-dpapi-roundtrip-test"
+      saveKey(some(secret))
+      let stored = readFile(getKeyFilePath())
+      check stored.len > 0
+      check not stored.contains(secret)
+      check loadKey() == some(secret)
+
+      saveKey(none(string))
+      check not fileExists(getKeyFilePath())
