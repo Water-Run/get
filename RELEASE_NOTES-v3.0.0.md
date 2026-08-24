@@ -34,7 +34,8 @@ get version
 ```
 
 Keep all files together while running the installer. Windows requires the two
-bundled OpenSSL DLLs; the installer copies them beside `get.exe`.
+bundled OpenSSL DLLs and `zlib1.dll`; the installer copies all three beside
+`get.exe`.
 
 Before installation, compare the archive with `get-v3.0.0.zip.sha256`. The
 archive also contains `SHA256SUMS` for every payload file.

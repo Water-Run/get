@@ -11,7 +11,10 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[strutils, unittest]
+import std/unittest
+
+when defined(windows):
+  import std/strutils
 
 import exec
 
@@ -36,6 +39,15 @@ suite "bounded command execution":
     test "stops a silent process at its deadline":
       let value = executeCommandBounded(
         "sleep 2", "bash", 1, 1024)
+      check value.timedOut
+      check value.elapsedMs >= 900
+      check value.elapsedMs < 1800
+      check value.exitCode != 0
+
+    test "keeps output produced before the deadline":
+      let value = executeCommandBounded(
+        "printf 'started'; sleep 2", "bash", 1, 1024)
+      check value.output == "started"
       check value.timedOut
       check value.elapsedMs >= 900
       check value.elapsedMs < 1800

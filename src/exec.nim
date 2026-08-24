@@ -27,8 +27,10 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[atomics, locks, monotimes, os, osproc, streams,
-            strformat, strutils, times]
+import std/[locks, monotimes, os, osproc, strformat, strutils, times]
+
+when defined(windows):
+  import std/[atomics, streams]
 
 when defined(posix):
   import std/posix
@@ -75,13 +77,14 @@ type
     timedOut*: bool    ## Whether the configured deadline stopped the process.
     truncated*: bool   ## Whether the output byte cap stopped capture.
 
-## Shares deadline state with a command watchdog thread.
-type
-  WatchdogContext = object
-    process: Process           ## Process whose tree is being supervised.
-    completed: ptr Atomic[bool] ## Set when normal capture has completed.
-    timedOut: ptr Atomic[bool] ## Set when the deadline is reached.
-    timeoutMs: int             ## Positive watchdog deadline in milliseconds.
+when defined(windows):
+  ## Shares deadline state with a Windows command watchdog thread.
+  type
+    WatchdogContext = object
+      process: Process           ## Process whose tree is being supervised.
+      completed: ptr Atomic[bool] ## Set when normal capture has completed.
+      timedOut: ptr Atomic[bool] ## Set when the deadline is reached.
+      timeoutMs: int             ## Positive deadline in milliseconds.
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -148,10 +151,14 @@ proc implTerminateProcessTree(process: Process) {.gcsafe.} =
   when defined(posix):
     let groupId = Pid(-process.processID)
     discard posix.kill(groupId, SIGTERM)
+    # Keep the shell stoppable even if a platform's osproc implementation
+    # could not establish the requested process group.
+    discard posix.kill(Pid(process.processID), SIGTERM)
     sleep(50)
     try:
       if process.running():
         discard posix.kill(groupId, SIGKILL)
+        discard posix.kill(Pid(process.processID), SIGKILL)
     except OSError, ValueError:
       discard
   else:
@@ -179,24 +186,46 @@ proc implTerminateProcessTree(process: Process) {.gcsafe.} =
       except OSError, ValueError:
         discard
 
-## Enforces one process deadline while its blocking pipe is drained elsewhere.
+when defined(windows):
+  ## Enforces one Windows process deadline while its blocking pipe is drained
+  ## elsewhere. POSIX capture uses poll(2) and needs no watchdog thread.
+  ##
+  ## :param context: Process and atomic deadline state copied into the thread.
+  proc implWatchCommand(context: WatchdogContext) {.thread, gcsafe.} =
+    var waitedMs = 0
+    while waitedMs < context.timeoutMs:
+      if context.completed[].load():
+        return
+      let interval = min(10, context.timeoutMs - waitedMs)
+      sleep(interval)
+      waitedMs += interval
+    if not context.completed[].load():
+      context.timedOut[].store(true)
+      implTerminateProcessTree(context.process)
+
+## Copies one captured pipe chunk without exceeding the configured byte cap.
 ##
-## Nim's portable process streams are blocking and expose no async handle.
-## A tiny watchdog thread is therefore required to interrupt a silent process;
-## model networking continues to use asyncdispatch independently.
-##
-## :param context: Process and atomic deadline state copied into the thread.
-proc implWatchCommand(context: WatchdogContext) {.thread, gcsafe.} =
-  var waitedMs = 0
-  while waitedMs < context.timeoutMs:
-    if context.completed[].load():
-      return
-    let interval = min(10, context.timeoutMs - waitedMs)
-    sleep(interval)
-    waitedMs += interval
-  if not context.completed[].load():
-    context.timedOut[].store(true)
-    implTerminateProcessTree(context.process)
+## :returns: true when bytes had to be discarded because the cap was reached.
+proc implCaptureChunk(
+  output: var string,
+  data: pointer,
+  count: int,
+  maxOutputBytes: int
+): bool =
+  if count <= 0:
+    return false
+  if maxOutputBytes > 0 and output.len >= maxOutputBytes:
+    return true
+  let remaining =
+    if maxOutputBytes <= 0:
+      count
+    else:
+      min(count, maxOutputBytes - output.len)
+  if remaining > 0:
+    let previousLength = output.len
+    output.setLen(previousLength + remaining)
+    copyMem(addr output[previousLength], data, remaining)
+  result = remaining < count
 
 ## Builds the argument list for invoking a command through the
 ## given shell.  For PowerShell and pwsh shells, the UTF-8
@@ -722,11 +751,11 @@ proc confirmExecution*(
 
 ## Executes a shell command with deadline and output-size enforcement.
 ##
-## A dedicated watchdog interrupts silent processes because portable Nim
-## process streams block while awaiting bytes. POSIX shells are placed in a
-## separate process group so timeout and truncation stop their whole tree.
-## Windows uses ``taskkill /T`` to stop the corresponding process tree.
-## Captured Windows bytes retain the existing UTF normalization behavior.
+## POSIX uses poll(2), keeping deadlines in the capture loop without a helper
+## thread. Windows uses a watchdog because its portable process stream is
+## blocking. POSIX shells are placed in a separate process group; Windows uses
+## ``taskkill /T`` to stop the corresponding process tree. Captured Windows
+## bytes retain the existing UTF normalization behavior.
 ##
 ## :param command: Validated command to execute.
 ## :param shell: Shell executable name or path.
@@ -777,63 +806,99 @@ proc executeCommandBounded*(
     release(processStartLock)
   implRegisterProcess(p)
 
-  var completed: Atomic[bool]
-  var timedOut: Atomic[bool]
-  completed.store(false)
-  timedOut.store(false)
-  var watchdog: Thread[WatchdogContext]
-  let usesWatchdog = timeoutSec > 0
-  if usesWatchdog:
-    let timeoutMs =
-      if timeoutSec > high(int) div 1000:
-        high(int)
-      else:
-        timeoutSec * 1000
-    createThread(watchdog, implWatchCommand, WatchdogContext(
-      process: p,
-      completed: addr completed,
-      timedOut: addr timedOut,
-      timeoutMs: timeoutMs
-    ))
+  var didTimeOut = false
+  when defined(windows):
+    var completed: Atomic[bool]
+    var timedOut: Atomic[bool]
+    completed.store(false)
+    timedOut.store(false)
+    var watchdog: Thread[WatchdogContext]
+    let usesWatchdog = timeoutSec > 0
+    if usesWatchdog:
+      let timeoutMs =
+        if timeoutSec > high(int) div 1000:
+          high(int)
+        else:
+          timeoutSec * 1000
+      createThread(watchdog, implWatchCommand, WatchdogContext(
+        process: p,
+        completed: addr completed,
+        timedOut: addr timedOut,
+        timeoutMs: timeoutMs
+      ))
 
   var rawOutput = ""
   var exitCode = -1
   var truncated = false
-  let outp = p.outputStream
   var buffer: array[8192, char]
   try:
-    while true:
-      let count = outp.readData(addr buffer[0], buffer.len)
-      if count <= 0:
-        exitCode = p.peekExitCode()
-        if exitCode != -1:
+    when defined(posix):
+      let outputFd = cint(p.outputHandle)
+      let deadline = started + initDuration(seconds = timeoutSec)
+      while true:
+        var pollTimeout = -1.cint
+        if timeoutSec > 0:
+          let remaining = deadline - getMonoTime()
+          if remaining <= DurationZero:
+            didTimeOut = true
+            implTerminateProcessTree(p)
+            break
+          let remainingMs = max(1'i64, remaining.inMilliseconds)
+          pollTimeout = cint(min(remainingMs, int64(high(cint))))
+
+        var descriptor = TPollfd(
+          fd: outputFd,
+          events: POLLIN,
+          revents: 0
+        )
+        let ready = posix.poll(
+          addr descriptor, Tnfds(1), pollTimeout)
+        if ready == 0:
+          didTimeOut = true
+          implTerminateProcessTree(p)
           break
-        continue
-      if maxOutputBytes <= 0 or rawOutput.len < maxOutputBytes:
-        let remaining =
-          if maxOutputBytes <= 0:
-            count
-          else:
-            min(count, maxOutputBytes - rawOutput.len)
-        if remaining > 0:
-          let previousLength = rawOutput.len
-          rawOutput.setLen(previousLength + remaining)
-          copyMem(
-            addr rawOutput[previousLength],
-            addr buffer[0],
-            remaining
-          )
-        if remaining < count and not truncated:
-          truncated = true
-          implTerminateProcessTree(p)
-      else:
-        if not truncated:
-          truncated = true
-          implTerminateProcessTree(p)
+        if ready < 0:
+          if errno == EINTR:
+            continue
+          raiseOSError(osLastError())
+
+        let count = int(posix.read(
+          outputFd, addr buffer[0], buffer.len))
+        if count > 0:
+          if implCaptureChunk(
+              rawOutput, addr buffer[0], count,
+              maxOutputBytes):
+            truncated = true
+            implTerminateProcessTree(p)
+            break
+        elif count == 0:
+          exitCode = p.peekExitCode()
+          break
+        elif errno == EINTR or errno == EAGAIN:
+          continue
+        else:
+          raiseOSError(osLastError())
+    else:
+      let outp = p.outputStream
+      while true:
+        let count = outp.readData(addr buffer[0], buffer.len)
+        if count <= 0:
+          exitCode = p.peekExitCode()
+          if exitCode != -1:
+            break
+          continue
+        if implCaptureChunk(
+            rawOutput, addr buffer[0], count,
+            maxOutputBytes):
+          if not truncated:
+            truncated = true
+            implTerminateProcessTree(p)
   finally:
-    completed.store(true)
-    if usesWatchdog:
-      joinThread(watchdog)
+    when defined(windows):
+      completed.store(true)
+      if usesWatchdog:
+        joinThread(watchdog)
+      didTimeOut = timedOut.load()
     if exitCode == -1:
       try:
         exitCode = p.waitForExit(1000)
@@ -853,7 +918,7 @@ proc executeCommandBounded*(
       if exitCode == -1: 1
       else: exitCode,
     elapsedMs: (getMonoTime() - started).inMilliseconds,
-    timedOut: timedOut.load(),
+    timedOut: didTimeOut,
     truncated: truncated
   )
 
