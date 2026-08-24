@@ -38,7 +38,10 @@ get isok
 
 安装器可以保留旧配置。v2 配置会自动迁移：`instance=true` 转换为 `harness=direct`；其他情况使用新的默认值 `harness=auto`。
 
-Windows 下需让 `get-windows-x64.exe`、`libcrypto-1_1-x64.dll`、`libssl-1_1-x64.dll` 与安装器保持在一起；安装时会一并复制。
+Windows 下需让 `get-windows-x64.exe`、`libcrypto-3.dll`、`libssl-3.dll` 和
+`zlib1.dll` 与安装器保持在一起；安装时会一并复制。DLL 提供 OpenSSL
+3.5.7 LTS 与 zlib 1.3.2；来源与许可见包内 `THIRD_PARTY_NOTICES.md`、
+`OPENSSL-LICENSE.txt` 和 `ZLIB-LICENSE.txt`。
 
 API 密钥不会被打印或写入日志。Linux 密钥文件权限为 `0600`；Windows 使用 DPAPI 保护。
 

@@ -7,12 +7,20 @@ The v3.0 release package is intentionally flat:
     get_ready.py
     get-linux-x64
     get-windows-x64.exe
-    libcrypto-1_1-x64.dll
-    libssl-1_1-x64.dll
+    libcrypto-3.dll
+    libssl-3.dll
+    zlib1.dll
     get-macos-arm64
     get.1
     README.md
+    README-zh.md
     LICENSE
+    OPENSSL-LICENSE.txt
+    ZLIB-LICENSE.txt
+    THIRD_PARTY_NOTICES.md
+    RELEASE_NOTES.md
+    BUILDINFO.json
+    SHA256SUMS
 
 The installer copies the platform binary, installs the optional man page,
 updates the user PATH, and optionally configures LLM settings.
@@ -45,8 +53,9 @@ DEFAULT_SHELL: str = "powershell" if IS_WINDOWS else ("zsh" if IS_MACOS else "ba
 DEFAULT_URL: str = "https://api.minimaxi.com/v1"
 DEFAULT_MODEL: str = "minimax-m3"
 WINDOWS_RUNTIME_FILES: tuple[str, ...] = (
-    "libcrypto-1_1-x64.dll",
-    "libssl-1_1-x64.dll",
+    "libcrypto-3.dll",
+    "libssl-3.dll",
+    "zlib1.dll",
 )
 
 MESSAGES: dict[str, dict[str, str]] = {

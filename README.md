@@ -35,7 +35,11 @@ get version
 
 The installer can retain an existing configuration while replacing the binary. A v2 configuration is migrated automatically: `instance=true` becomes `harness=direct`; otherwise the new default is `harness=auto`.
 
-On Windows, `get-windows-x64.exe`, `libcrypto-1_1-x64.dll`, and `libssl-1_1-x64.dll` must remain beside the installer; all three are installed together.
+On Windows, `get-windows-x64.exe`, `libcrypto-3.dll`, `libssl-3.dll`, and
+`zlib1.dll` must remain beside the installer; all four are installed together.
+The DLLs provide OpenSSL 3.5.7 LTS and zlib 1.3.2; their provenance and licenses
+are included in `THIRD_PARTY_NOTICES.md`, `OPENSSL-LICENSE.txt`, and
+`ZLIB-LICENSE.txt`.
 
 ## Setup
 

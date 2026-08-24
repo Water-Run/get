@@ -19,8 +19,8 @@ required gates below pass on the exact candidate commit.
 - Faster direct-first prompts and removal of router/cache-classifier model
   requests; cached answers require zero provider calls.
 - Windows production hardening: DPAPI key storage, PowerShell/cmd guidance,
-  process-tree termination, output decoding, runtime DLL packaging, and native
-  Windows CI coverage.
+  process-tree termination, output decoding, pinned OpenSSL 3.5.7 LTS runtime,
+  and native Windows CI coverage.
 
 ## Compatibility notes
 
@@ -38,11 +38,12 @@ required gates below pass on the exact candidate commit.
 ## Required release gates
 
 - [ ] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
-- [ ] Linux amd64: release build, 63 Nim tests, 18 CLI E2E tests, and the full
-  offline suite pass with zero failures.
-- [ ] Windows amd64: release build starts with packaged OpenSSL DLLs; 65 Nim
-  tests, Windows CLI E2E, DPAPI, PowerShell, proxy, timeout, output-cap,
-  parallel-execution, and concurrent-cache tests pass on native Windows.
+- [ ] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
+  full offline suite pass with zero failures.
+- [ ] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
+  Nim unit tests, Windows CLI E2E, DPAPI, PowerShell, proxy, timeout,
+  output-cap, parallel-execution, and concurrent-cache tests pass on native
+  Windows.
 - [ ] macOS arm64: release build and smoke tests pass on native Apple Silicon.
 - [ ] DeepSeek and local Qwen live smoke tests pass on the exact candidate
   binary without logging or persisting credentials.
@@ -60,19 +61,28 @@ Create `get-v3.0.0.zip` with this flat layout:
 get_ready.py
 get-linux-x64
 get-windows-x64.exe
-libcrypto-1_1-x64.dll
-libssl-1_1-x64.dll
+libcrypto-3.dll
+libssl-3.dll
+zlib1.dll
 get-macos-arm64
 get.1
 README.md
 README-zh.md
 LICENSE
+OPENSSL-LICENSE.txt
+ZLIB-LICENSE.txt
+THIRD_PARTY_NOTICES.md
+RELEASE_NOTES.md
+BUILDINFO.json
 SHA256SUMS
 ```
 
-Build all binaries from the same commit with Nim 2.2.10. Generate
-`SHA256SUMS` only after the final archive contents are frozen. Do not reuse an
-older binary or DLL by filename alone; record its source and checksum.
+Build all binaries from the same commit with Nim 2.2.10. Windows binaries must
+be compiled with `sslVersion=3`. The OpenSSL 3.5.7-1 and zlib 1.3.2-1
+packages are pinned to the Cygwin repository metadata and verified before
+extraction. Generate `SHA256SUMS` only after the final archive contents are
+frozen. Do not reuse an older binary or DLL by filename alone; record its
+source and checksum.
 
 ## Publish sequence
 
@@ -80,8 +90,8 @@ older binary or DLL by filename alone; record its source and checksum.
 2. Build in clean environments and assemble the canonical archive.
 3. Verify checksums, versions, archive layout, and installers from the archive.
 4. Create an annotated `v3.0.0` tag on the verified commit and push the tag.
-5. Create a draft GitHub Release using the highlights and compatibility notes
-   above; attach the archive and `SHA256SUMS`.
+5. Create a draft GitHub Release using `RELEASE_NOTES-v3.0.0.md`; attach the
+   archive and `get-v3.0.0.zip.sha256`.
 6. Download the draft assets once, verify them independently, then publish.
 7. Monitor installation and provider smoke checks; if a blocker appears, keep
    the release unpublished or mark it as a prerelease and fix forward from a

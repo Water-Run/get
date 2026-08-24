@@ -14,6 +14,16 @@ suite "version metadata":
     check APP_VERSION == "3.0.0"
     check nimbleContent.contains("version       = \"3.0.0\"")
 
+  test "pins the supported Windows OpenSSL 3 runtime":
+    const buildConfig = staticRead("../config.nims")
+    const installer = staticRead("../get_ready.py")
+    check buildConfig.contains("sslVersion=3")
+    check installer.contains("libcrypto-3.dll")
+    check installer.contains("libssl-3.dll")
+    check installer.contains("zlib1.dll")
+    check not installer.contains("libcrypto-1_1-x64.dll")
+    check not installer.contains("libssl-1_1-x64.dll")
+
   when defined(windows):
     test "uses the stable Windows thread memory manager":
       check defined(gcrefc)

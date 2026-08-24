@@ -34,6 +34,10 @@ jobs:
         shell: pwsh
         run: nimble -y install --depsOnly
 
+      - name: Prepare pinned OpenSSL 3 runtime
+        shell: pwsh
+        run: ./scripts/prepare_windows_openssl.ps1 -Destination .ci
+
       - name: Validate package and Python test sources
         shell: pwsh
         run: |
@@ -65,6 +69,13 @@ jobs:
             throw "Windows release build failed"
           }
           .ci/get.exe --version
+
+      - name: Verify HTTPS with packaged OpenSSL
+        shell: pwsh
+        run: |
+          nim c -r -d:release --path:src `
+            --nimcache:.ci/nimcache-https `
+            --out:.ci/release-https-smoke.exe tests/release_https_smoke.nim
 
       - name: Run Windows CLI end-to-end tests
         shell: pwsh

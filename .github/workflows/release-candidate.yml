@@ -1,0 +1,510 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NIM_VERSION: 2.2.10
+  RELEASE_VERSION: 3.0.0
+
+jobs:
+  linux-amd64:
+    name: Linux amd64 release gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Nim 2.2.10
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: nimble -y install --depsOnly
+
+      - name: Validate sources
+        run: |
+          nimble check
+          python3 -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          git diff --check
+          if git grep -IlE 'sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- .; then
+            echo "Potential credential material found in tracked files" >&2
+            exit 1
+          fi
+          if ! command -v groff >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y groff-base
+          fi
+          groff -man -Tutf8 get.1 >/dev/null
+
+      - name: Run Linux Nim unit tests
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+          for test_file in tests/test_*.nim; do
+            test_name=$(basename "$test_file" .nim)
+            nim c -r -d:release -d:getTest --path:src \
+              --nimcache:".ci/nimcache-$test_name" \
+              --out:".ci/$test_name" "$test_file"
+          done
+
+      - name: Build Linux release binary
+        run: |
+          nim c -d:release --path:src \
+            --nimcache:.ci/nimcache-get \
+            --out:.ci/get-linux-x64 src/get.nim
+          .ci/get-linux-x64 --version
+          file .ci/get-linux-x64
+
+      - name: Verify Linux HTTPS runtime
+        run: |
+          nim c -r -d:release --path:src \
+            --nimcache:.ci/nimcache-https \
+            --out:.ci/release-https-smoke tests/release_https_smoke.nim
+
+      - name: Run Linux CLI end-to-end tests
+        env:
+          GET_V3_BINARY: ${{ github.workspace }}/.ci/get-linux-x64
+          GET_V3_TARGET_OS: linux
+          GET_V3_TEST_SHELL: bash
+        run: python3 tests/test_cli_v3.py -v
+
+      - name: Smoke-test Linux installer
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/get-v3-linux-installer"
+          install_home="$RUNNER_TEMP/get-v3-linux-home"
+          mkdir -p "$install_dir" "$install_home"
+          install -m 0755 .ci/get-linux-x64 "$install_dir/get-linux-x64"
+          install -m 0644 get_ready.py get.1 "$install_dir/"
+          printf 'y\ny\nn\nn\n' |
+            env HOME="$install_home" SHELL=/bin/bash PATH=/usr/bin:/bin \
+              python3 "$install_dir/get_ready.py"
+          "$install_home/.local/bin/get" version
+          test -f "$install_home/.local/share/man/man1/get.1"
+
+      - name: Run comprehensive Linux offline suite
+        run: |
+          install -m 0755 .ci/get-linux-x64 .ci/get
+          PATH="$GITHUB_WORKSPACE/.ci:$PATH" \
+            python3 get_test.py --key dummy --skip-llm
+
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-linux-x64
+          path: .ci/get-linux-x64
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-amd64:
+    name: Windows amd64 release gate
+    runs-on: windows-2022
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install Nim 2.2.10
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        shell: pwsh
+        run: nimble -y install --depsOnly
+
+      - name: Prepare pinned OpenSSL 3 runtime
+        shell: pwsh
+        run: ./scripts/prepare_windows_openssl.ps1 -Destination .ci
+
+      - name: Validate sources
+        shell: pwsh
+        run: |
+          nimble check
+          python -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          git diff --check
+
+      - name: Run Windows Nim unit tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem tests/test_*.nim | Sort-Object Name | ForEach-Object {
+            $name = $_.BaseName
+            nim c -r -d:release -d:getTest --path:src `
+              --nimcache:".ci/nimcache-$name" `
+              --out:".ci/$name.exe" $_.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows Nim test failed: $name"
+            }
+          }
+
+      - name: Build Windows release binary
+        shell: pwsh
+        run: |
+          nim c -d:release --path:src `
+            --nimcache:.ci/nimcache-get `
+            --out:.ci/get-windows-x64.exe src/get.nim
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows release build failed"
+          }
+          .ci/get-windows-x64.exe --version
+
+      - name: Verify HTTPS with packaged OpenSSL
+        shell: pwsh
+        run: |
+          nim c -r -d:release --path:src `
+            --nimcache:.ci/nimcache-https `
+            --out:.ci/release-https-smoke.exe tests/release_https_smoke.nim
+
+      - name: Run Windows CLI end-to-end tests
+        shell: pwsh
+        run: |
+          $env:GET_V3_BINARY = (Resolve-Path .ci/get-windows-x64.exe).Path
+          $env:GET_V3_TARGET_OS = "windows"
+          $env:GET_V3_TEST_SHELL = "powershell"
+          python tests/test_cli_v3.py -v
+
+      - name: Smoke-test Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $python = (Get-Command python).Source
+          $candidate = Join-Path $env:RUNNER_TEMP "get-v3-windows-installer"
+          $profile = Join-Path $env:RUNNER_TEMP "get-v3-windows-profile"
+          New-Item -ItemType Directory -Force $candidate, $profile | Out-Null
+          Copy-Item get_ready.py, .ci/get-windows-x64.exe, `
+            .ci/libcrypto-3.dll, .ci/libssl-3.dll, .ci/zlib1.dll `
+            -Destination $candidate
+          $env:USERPROFILE = $profile
+          $env:APPDATA = Join-Path $profile "AppData/Roaming"
+          $env:LOCALAPPDATA = Join-Path $profile "AppData/Local"
+          $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
+          "y`ny`nn`nn`n" | & $python (Join-Path $candidate "get_ready.py")
+          $installed = Join-Path $env:LOCALAPPDATA "Programs/get/get.exe"
+          & $installed version
+          if (-not (Test-Path (
+              Join-Path (Split-Path $installed) "libcrypto-3.dll"
+          ))) {
+            throw "Installer did not copy libcrypto-3.dll"
+          }
+          if (-not (Test-Path (
+              Join-Path (Split-Path $installed) "libssl-3.dll"
+          ))) {
+            throw "Installer did not copy libssl-3.dll"
+          }
+          if (-not (Test-Path (
+              Join-Path (Split-Path $installed) "zlib1.dll"
+          ))) {
+            throw "Installer did not copy zlib1.dll"
+          }
+
+      - name: Run comprehensive Windows offline suite
+        shell: pwsh
+        run: |
+          Copy-Item .ci/get-windows-x64.exe .ci/get.exe
+          $env:PATH = "$(Resolve-Path .ci);$env:PATH"
+          python get_test.py --key dummy --skip-llm
+
+      - name: Upload Windows payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-windows-x64
+          path: |
+            .ci/get-windows-x64.exe
+            .ci/libcrypto-3.dll
+            .ci/libssl-3.dll
+            .ci/zlib1.dll
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-arm64:
+    name: macOS arm64 release gate
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Require native Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Install Nim 2.2.10
+        uses: jiro4989/setup-nim-action@cb1fc1270b117457dd0d9f610ec981fad3369cec
+        with:
+          nim-version: ${{ env.NIM_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: nimble -y install --depsOnly
+
+      - name: Validate sources
+        run: |
+          nimble check
+          python3 -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          git diff --check
+
+      - name: Run macOS Nim unit tests
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+          for test_file in tests/test_*.nim; do
+            test_name=$(basename "$test_file" .nim)
+            nim c -r -d:release -d:getTest --path:src \
+              --nimcache:".ci/nimcache-$test_name" \
+              --out:".ci/$test_name" "$test_file"
+          done
+
+      - name: Build macOS arm64 release binary
+        run: |
+          nim c -d:release --path:src \
+            --nimcache:.ci/nimcache-get \
+            --out:.ci/get-macos-arm64 src/get.nim
+          .ci/get-macos-arm64 --version
+          file .ci/get-macos-arm64 | tee .ci/macos-file.txt
+          grep -q "arm64" .ci/macos-file.txt
+
+      - name: Verify macOS HTTPS runtime
+        run: |
+          nim c -r -d:release --path:src \
+            --nimcache:.ci/nimcache-https \
+            --out:.ci/release-https-smoke tests/release_https_smoke.nim
+
+      - name: Run macOS CLI end-to-end tests
+        env:
+          GET_V3_BINARY: ${{ github.workspace }}/.ci/get-macos-arm64
+          GET_V3_TARGET_OS: macos
+          GET_V3_TEST_SHELL: zsh
+        run: python3 tests/test_cli_v3.py -v
+
+      - name: Smoke-test macOS installer
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/get-v3-macos-installer"
+          install_home="$RUNNER_TEMP/get-v3-macos-home"
+          python_bin=$(command -v python3)
+          mkdir -p "$candidate" "$install_home"
+          install -m 0755 .ci/get-macos-arm64 "$candidate/get-macos-arm64"
+          install -m 0644 get_ready.py get.1 "$candidate/"
+          printf 'y\ny\nn\nn\n' |
+            env HOME="$install_home" SHELL=/bin/zsh PATH=/usr/bin:/bin \
+              "$python_bin" "$candidate/get_ready.py"
+          "$install_home/.local/bin/get" version
+          test -f "$install_home/.local/share/man/man1/get.1"
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-macos-arm64
+          path: .ci/get-macos-arm64
+          if-no-files-found: error
+          retention-days: 30
+
+  assemble:
+    name: Assemble and verify release package
+    needs: [linux-amd64, windows-amd64, macos-arm64]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-linux-x64
+          path: dist/native
+
+      - name: Download Windows payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-windows-x64
+          path: dist/native
+
+      - name: Download macOS binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-macos-arm64
+          path: dist/native
+
+      - name: Assemble flat package
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/dist/package"
+          mkdir -p "$package_dir"
+          install -m 0755 dist/native/get-linux-x64 "$package_dir/"
+          install -m 0755 dist/native/get-macos-arm64 "$package_dir/"
+          install -m 0644 dist/native/get-windows-x64.exe "$package_dir/"
+          install -m 0644 dist/native/libcrypto-3.dll "$package_dir/"
+          install -m 0644 dist/native/libssl-3.dll "$package_dir/"
+          install -m 0644 dist/native/zlib1.dll "$package_dir/"
+          install -m 0755 get_ready.py "$package_dir/"
+          install -m 0644 get.1 README.md README-zh.md LICENSE \
+            THIRD_PARTY_NOTICES.md "$package_dir/"
+          install -m 0644 licenses/OPENSSL.txt \
+            "$package_dir/OPENSSL-LICENSE.txt"
+          install -m 0644 licenses/ZLIB.txt \
+            "$package_dir/ZLIB-LICENSE.txt"
+          install -m 0644 RELEASE_NOTES-v3.0.0.md \
+            "$package_dir/RELEASE_NOTES.md"
+
+          python3 - "$package_dir/BUILDINFO.json" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          output = sys.argv[1]
+          commit_time = subprocess.check_output(
+              ["git", "show", "-s", "--format=%cI", os.environ["GITHUB_SHA"]],
+              text=True,
+          ).strip()
+          data = {
+              "name": "get",
+              "version": os.environ["RELEASE_VERSION"],
+              "commit": os.environ["GITHUB_SHA"],
+              "commit_time": commit_time,
+              "repository": os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"],
+              "workflow_run": (
+                  os.environ["GITHUB_SERVER_URL"]
+                  + "/"
+                  + os.environ["GITHUB_REPOSITORY"]
+                  + "/actions/runs/"
+                  + os.environ["GITHUB_RUN_ID"]
+              ),
+              "toolchain": {"nim": os.environ["NIM_VERSION"]},
+              "targets": ["linux-amd64", "windows-amd64", "macos-arm64"],
+              "windows_runtime": {
+                  "distribution": "Cygwin mingw64",
+                  "openssl": {
+                      "version": "3.5.7",
+                      "package_sha512": "267a9f43890533c0dd77f45d1435aacc9d1b5ae08b48ae6d192422a30e527a5e7c211e9bd30af9d5f29e8c3c5fdda93930cf7f65f75f48be6b0f19b3c1a21a58",
+                  },
+                  "zlib": {
+                      "version": "1.3.2",
+                      "package_sha512": "a58cff59f69b63ec11e3a8de762c9829f61a2034c9d4df084706083bb98dea7adc8f62b011477fd127b9b44531aaec0dc118e7ae2cfb2805a6756e6788531d78",
+                  },
+              },
+          }
+          with open(output, "w", encoding="utf-8", newline="\n") as handle:
+              json.dump(data, handle, ensure_ascii=False, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+          (
+            cd "$package_dir"
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' |
+              LC_ALL=C sort -z |
+              xargs -0 sha256sum > SHA256SUMS
+          )
+
+          source_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          find "$package_dir" -maxdepth 1 -type f -exec \
+            touch -d "@$source_epoch" {} +
+          mapfile -t payload_files < <(
+            find "$package_dir" -maxdepth 1 -type f -printf '%f\n' |
+              LC_ALL=C sort
+          )
+          (
+            cd "$package_dir"
+            zip -X -9 "../get-v$RELEASE_VERSION.zip" "${payload_files[@]}"
+          )
+          (
+            cd dist
+            sha256sum "get-v$RELEASE_VERSION.zip" >
+              "get-v$RELEASE_VERSION.zip.sha256"
+          )
+
+      - name: Verify final package
+        run: |
+          set -euo pipefail
+          archive="dist/get-v$RELEASE_VERSION.zip"
+          verify_dir="$RUNNER_TEMP/get-v3-package-verify"
+          mkdir -p "$verify_dir"
+          unzip -q "$archive" -d "$verify_dir"
+
+          expected=(
+            BUILDINFO.json
+            LICENSE
+            OPENSSL-LICENSE.txt
+            README-zh.md
+            README.md
+            RELEASE_NOTES.md
+            SHA256SUMS
+            THIRD_PARTY_NOTICES.md
+            ZLIB-LICENSE.txt
+            get-linux-x64
+            get-macos-arm64
+            get-windows-x64.exe
+            get.1
+            get_ready.py
+            libcrypto-3.dll
+            libssl-3.dll
+            zlib1.dll
+          )
+          mapfile -t actual < <(
+            find "$verify_dir" -maxdepth 1 -type f -printf '%f\n' |
+              LC_ALL=C sort
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          diff <(printf '%s\n' "${expected_sorted[@]}") <(printf '%s\n' "${actual[@]}")
+
+          (
+            cd "$verify_dir"
+            sha256sum --check SHA256SUMS
+          )
+          "$verify_dir/get-linux-x64" --version | grep -F "3.0.0"
+          file "$verify_dir/get-linux-x64" | grep -E "x86-64|x86_64"
+          file "$verify_dir/get-windows-x64.exe" | grep -F "x86-64"
+          file "$verify_dir/get-macos-arm64" | grep -F "arm64"
+          python3 -m py_compile "$verify_dir/get_ready.py"
+          (
+            cd dist
+            sha256sum --check "get-v$RELEASE_VERSION.zip.sha256"
+          )
+
+      - name: Write release summary
+        run: |
+          {
+            echo "## get v$RELEASE_VERSION release candidate"
+            echo
+            echo "- Commit: `$GITHUB_SHA`"
+            echo "- Linux amd64, Windows amd64, and macOS arm64 gates passed."
+            echo "- Installer, HTTPS runtime, archive layout, and checksums passed."
+            echo
+            echo "### Archive SHA-256"
+            echo
+            echo '```text'
+            cat "dist/get-v$RELEASE_VERSION.zip.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: get-v3.0.0-release-candidate-${{ github.sha }}
+          path: |
+            dist/get-v3.0.0.zip
+            dist/get-v3.0.0.zip.sha256
+            dist/package/BUILDINFO.json
+            dist/package/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

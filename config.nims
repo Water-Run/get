@@ -13,6 +13,9 @@ when defined(windows):
   # osproc workers. The short-lived CLI favors refc's isolated thread heaps
   # until the upstream Windows runtime path is safe under ORC.
   switch("mm", "refc")
+  # Bind the dynamic wrapper to the bundled OpenSSL 3 ABI. Nim's default
+  # Windows name still targets OpenSSL 1.1, which is no longer supported.
+  switch("define", "sslVersion=3")
 
 when defined(release):
   switch("opt", "size")
