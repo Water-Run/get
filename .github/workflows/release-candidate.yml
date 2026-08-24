@@ -428,7 +428,7 @@ jobs:
           )
           (
             cd dist
-            sha256sum "get-v$RELEASE_VERSION.zip" >
+            sha256sum "get-v$RELEASE_VERSION.zip" > \
               "get-v$RELEASE_VERSION.zip.sha256"
           )
 
