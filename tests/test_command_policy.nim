@@ -745,6 +745,16 @@ suite "mandatory read-only command policy":
     check not checkReadOnlyCommand(
       "sort.exe /OUTPUT result.txt input.txt", "cmd").allowed
     check not checkReadOnlyCommand(
+      "sort -o result.txt input.txt", "powershell").allowed
+    check not checkReadOnlyCommand(
+      "Get-Process | Sort-Object -OutVariable captured", "powershell").allowed
+    check not checkReadOnlyCommand(
+      "Get-Process | sort -PV captured", "powershell").allowed
+    check checkReadOnlyCommand(
+      "Get-Process | sort CPU", "powershell").allowed
+    check checkReadOnlyCommand(
+      "Get-Process | Sort-Object -Descending CPU", "powershell").allowed
+    check not checkReadOnlyCommand(
       "Get-Process | where 'Remove-Item marker'", "powershell").allowed
     check checkReadOnlyCommand(
       "Get-Process | where Name -eq bash", "powershell").allowed

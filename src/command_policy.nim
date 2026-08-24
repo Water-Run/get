@@ -1728,6 +1728,16 @@ func implValidateWhereObject(tokens: seq[string]): CommandPolicyDecision =
   result = implAllow()
 
 func implValidateSortObject(tokens: seq[string]): CommandPolicyDecision =
+  # PowerShell's bare `sort` alias resolves to Sort-Object, not sort.exe.
+  # In particular, `sort -o file` is parsed as an ambiguous common parameter
+  # rather than GNU sort's output option. Reject output/pipeline-variable
+  # parameters (including their built-in aliases and prefixes) so the policy
+  # decision remains fail-closed and deterministic across PowerShell versions.
+  if implHasForbiddenPowerShellParameter(tokens, [
+    "-outvariable", "-ov", "-pipelinevariable", "-pv"
+  ]):
+    return implReject(
+      "PowerShell Sort-Object variable-output parameters are not permitted")
   for token in tokens:
     if token.contains('{') or token.contains('}') or token.contains("$_"):
       return implReject("Sort-Object script-block properties are not permitted")
