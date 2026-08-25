@@ -1428,7 +1428,7 @@ def _harness_query_table(scratch: Path
                          ) -> List[Tuple[str, str,
                                          Callable[[str], bool], str]]:
     f = FACTS
-    return [
+    cases = [
         ("uname",
          "Use exactly the read-only command `uname -s` and return its output.",
          lambda o: f.platform_name in o.lower()
@@ -1480,6 +1480,33 @@ def _harness_query_table(scratch: Path
          lambda o: f.py_major_minor in o or f.py_major in o,
          "Harness invokes `python3 --version`"),
     ]
+    if f.platform_name == "linux":
+        cases.append((
+            "performance_snapshot",
+            "Report a one-shot system performance snapshot. Use the exact "
+            "read-only command `top -bn1 | head -n 15` and return its output.",
+            lambda o: "load average" in o.lower()
+            and ("tasks:" in o.lower() or "%cpu" in o.lower()),
+            "Harness admits bounded Linux top",
+        ))
+    elif f.platform_name == "darwin":
+        cases.append((
+            "performance_snapshot",
+            "Report a one-shot system performance snapshot. Use the exact "
+            "read-only command `top -l 1 -n 15` and return its output.",
+            lambda o: "load avg" in o.lower()
+            or "cpu usage" in o.lower(),
+            "Harness admits bounded macOS top",
+        ))
+    elif f.platform_name == "windows":
+        cases.append((
+            "performance_snapshot",
+            "Report a one-shot process performance snapshot using Get-Process "
+            "and return its output.",
+            lambda o: bool(o.strip()),
+            "Harness uses a Windows performance reader",
+        ))
+    return cases
 
 
 def _build_scratch() -> Path:

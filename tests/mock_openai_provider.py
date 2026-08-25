@@ -78,6 +78,7 @@ class Handler(BaseHTTPRequestHandler):
         ).lower()
         has_tools = bool(body.get("tools"))
         is_windows = "os=windows" in system_text
+        is_macos = "os=macos" in system_text or "os=darwin" in system_text
         is_cmd = "cmd.exe:" in system_text
 
         def output(text: str) -> str:
@@ -145,6 +146,18 @@ class Handler(BaseHTTPRequestHandler):
                 "purpose: integration compatibility test, "
                 "result_mode: return_raw}"
             ))
+            return
+        if "performance snapshot" in user_text and has_tools:
+            command = (
+                "tasklist" if is_cmd else
+                "Get-Process | Sort-Object CPU -Descending | "
+                "Select-Object -First 5" if is_windows else
+                "top -l 1 -n 15" if is_macos else
+                "top -bn1 | head -n 15"
+            )
+            self._tool_completion([
+                ("performance-1", command, "return_raw"),
+            ])
             return
         if "continue" in user_text and any(
                 message.get("role") == "tool" for message in messages):

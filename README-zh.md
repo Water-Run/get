@@ -87,6 +87,13 @@ get set tool-protocol legacy   # 结构化 JSON，并接受 v2 Markdown
 
 强制策略只解析简单命令和只读管道，再逐一校验可执行文件及其可能修改状态的参数；未知语法和未知程序一律关闭失败。它会拦截命令替换、串联、普通文件输出重定向、脚本与包装器、内联解释器、PowerShell splatting/脚本转换、参数缩写与通配符参数注入、辅助程序/配置注入、修改型 Git/容器/集群/包管理操作、上传，以及危险短参数变体。仅有一组经过验证的纯数据读取器可以使用一次、目标为字面文件路径的 `<` 标准输入重定向；heredoc、here-string、进程替换、文件描述符复制、展开、多重重定向及会读写文件的 `<>` 仍一律拒绝。Shell 别名与空设备按平台判断，只允许配置受支持且位于可信路径的 Shell。子进程不加载 profile，并移除动态加载器、语言运行时、Git、分页器、跟踪和工具配置等注入变量；缓存命令和复核模型改写后的命令仍经过同一安全门。
 
+白名单覆盖实际跨平台检查，而不只允许最简单的文件读取。Linux 可用
+`top -b -n 1`，macOS 可用 `top -l 1` 取得有界性能快照；Windows 使用
+`Get-Process`、`Get-CimInstance`、`tasklist` 等原生命令。常见硬件/进程报告器和
+纯 AWK 字段选择器可以直接使用。`sed` 只开放类似
+`sed -n '1,80p' 文件` 的显示型地址表达式；原地修改、输出到文件、加载外部程序和
+执行命令仍会被拒绝。双用途工具按具体语义校验，兼顾日常可用性与防绕过。
+
 HTTP 检查应使用 `curl -q ...`，首个 `-q` 用于阻止 `.curlrc` 改写操作；策略仅接受 GET/HEAD 和明确的只读协议。`wget` 仅接受同时带有 `--no-config --no-hsts -O-` 的形式。POSIX 下未引用的通配符应加 `./` 前缀，或先写 `--`。`$HOME`、`$USER`、`$LOGNAME`、`$PWD` 只允许用于纯终端输出。清空 `command-pattern` 只会关闭附加正则，不会关闭强制策略。
 
 `git status` 与读取工作树内容的普通 `git diff` 会被有意拒绝：仓库自身的 clean/textconv/filter 配置可能让表面只读的 Git 命令执行辅助程序。请用 `git branch --show-current` 查看分支，用 `git diff-files --name-only --no-ext-diff --no-textconv` 查看已修改的跟踪文件名，用 `git ls-files --others --exclude-standard` 查看未跟踪文件，用 `git diff --cached --no-ext-diff --no-textconv` 查看暂存内容。`git show` 与输出补丁的 `git log` 同样必须带两个禁用参数。

@@ -38,6 +38,21 @@ const SafeCorpus = [
   "find . -maxdepth 2 -type f | head",
   "fd -t f README",
   "jq -r '.name' package.json",
+  "printf 'a b\\n' | awk '{print $1, $2}'",
+  "printf 'a b\\n' | awk 'NR==1 {print $1}'",
+  "printf 'a b\\n' | awk '{print $1; exit}'",
+  "printf 'a b\\n' | awk '{print $0}'",
+  "printf 'a b\\n' | awk '{print NR, NF, $NF}' -",
+  "awk -F: '{print $1}' /etc/passwd",
+  "awk '{print $1}' < README.md",
+  "awk --field-separator=: 'NR<=2 {print $1}' /etc/passwd",
+  "sed -n '1,20p' README.md",
+  "sed -n '/Harness/p' README.md",
+  "sed -n -e '1p' -e '$p' README.md",
+  "sed -ne '1,5p' README.md",
+  "sed '20q' README.md",
+  "sed -n '1p' -",
+  "sed -n '1,5p' < README.md",
   "sort README.md",
   "sort --stable README.md",
   "printf '%s\\n' a b | sort | uniq -c",
@@ -59,6 +74,38 @@ const SafeCorpus = [
   "du -sh .",
   "df -h",
   "free -h",
+  "top -bn1 | head -n 15",
+  "top -b -n 1",
+  "top -bHn2 -d 0.5 -w120",
+  "top -b -n 5 -d 10 -o %CPU | head -n 20",
+  "top --batch-mode --iterations=1 --pid=1,2 --width=120",
+  "top --batch-mode --iterations 2 --delay .5 --filter-only-euser root",
+  "top -l 1 -n 15 -o cpu",
+  "top -l1 -n15 -stats pid,cpu,mem",
+  "top -l 5 -s 10 -ncols 160 -pid 0",
+  "top -h",
+  "nproc",
+  "lsmem --summary=only",
+  "lsns --type pid",
+  "lsipc",
+  "lslocks",
+  "lsmod",
+  "modinfo loop",
+  "pmap 1",
+  "pidof get",
+  "sw_vers -productVersion",
+  "system_profiler -listDataTypes",
+  "ioreg -l | head -n 1",
+  "lsb_release -a",
+  "biosdecode",
+  "cpuid -1",
+  "acpi -V",
+  "glxinfo -B",
+  "clinfo --list",
+  "rocminfo",
+  "vm_stat",
+  "sensors",
+  "sensors -A",
   "whoami",
   "id -u",
   "uptime",
@@ -268,10 +315,23 @@ const AttackCorpus = [
   "ruby -e 'File.write(\"x\",\"y\")'",
   "php -r 'file_put_contents(\"x\",\"y\");'",
   "sed -i 's/a/b/' file",
+  "sed --in-place=.bak '1p' file",
   "sed 'w result.txt' file",
+  "sed -n '1p;2e touch marker' file",
+  "sed -e '1p' -e '2w result.txt' file",
+  "sed -f untrusted.sed file",
+  "sed --file=untrusted.sed file",
+  "sed -n '/needle/e touch marker' file",
+  "sed 's/a/b/e' file",
+  "sed 's/a/b/w result.txt' file",
   "awk 'BEGIN { system(\"touch x\") }'",
   "awk '{ print > \"result.txt\" }'",
   "awk -f untrusted.awk",
+  "awk --load=untrusted '{print $1}'",
+  "awk 'NR==1 {print $1; system(\"touch x\")}'",
+  "awk '{print $1 | \"touch x\"}'",
+  "awk '{getline value < \"input\"; print value}'",
+  "awk '{print tolower($1)}'",
   "find . -delete",
   "find . -exec rm {} +",
   "find . -fprintf result.txt '%p\\n'",
@@ -311,6 +371,28 @@ const AttackCorpus = [
   "ping -f 127.0.0.1",
   "ping -i 0.01 127.0.0.1",
   "ping -c 999999 127.0.0.1",
+  "top",
+  "top -b",
+  "top -n 1",
+  "top -bn0",
+  "top -bn6",
+  "top -b -n 1 -d 10.1",
+  "top -b -n 5 -d 10.0001",
+  "top -b --iterations=6",
+  "top -b -n 1 --width=513",
+  "top -b -n 1 --pid=1,bad",
+  "top -b -n 1 --unknown",
+  "top -l 0",
+  "top -l 6",
+  "top -l 1 -s 10.1",
+  "top -l 1 -i 11",
+  "top -l 1 -ncols 513",
+  "top -l 1 -pid bad",
+  "top -l 1 -n 1000000",
+  "top -l 1 -unknown value",
+  "sensors -s",
+  "sensors -As",
+  "sensors --set",
   "date --set='2030-01-01'",
   "date 010100002030",
   "hostname changed-host",
@@ -554,6 +636,59 @@ suite "mandatory read-only command policy":
     if allowed.len > 0:
       checkpoint(allowed.join("\n"))
     check allowed.len == 0
+
+  test "accepts bounded Linux performance diagnostics":
+    for command in [
+      "top -bn1 | head -n 15",
+      "free -h",
+      "vmstat 1 2",
+      "sensors -A",
+      "nproc"
+    ]:
+      check checkReadOnlyCommand(command, "bash").allowed
+      check checkReadOnlyCommand(command, "fish").allowed
+
+  test "accepts bounded macOS performance diagnostics":
+    for command in [
+      "top -l 1 -n 15 -o cpu",
+      "vm_stat",
+      "sysctl hw.memsize",
+      "system_profiler -detailLevel mini SPHardwareDataType"
+    ]:
+      check checkReadOnlyCommand(command, "zsh").allowed
+
+  test "accepts native Windows performance diagnostics":
+    for command in [
+      "Get-Process | Sort-Object CPU | Select-Object -First 15",
+      "Get-CimInstance Win32_OperatingSystem | " &
+        "Select-Object TotalVisibleMemorySize,FreePhysicalMemory",
+      "Get-Counter '\\Processor(_Total)\\% Processor Time'",
+      "tasklist /fo csv /nh"
+    ]:
+      check checkReadOnlyCommand(command, "powershell").allowed
+
+  test "accepts common display-only text selectors":
+    for command in [
+      "sed -n '1,80p' README.md",
+      "sed -n '/Safety model/p' README.md",
+      "awk -F: 'NR<=5 {print $1, $NF}' /etc/passwd",
+      "awk '{print NR, $0}' < README.md"
+    ]:
+      check checkReadOnlyCommand(command, "bash").allowed
+
+  test "keeps dual-use diagnostic and selector mutation paths closed":
+    for command in [
+      "top",
+      "top -bn6",
+      "sensors -s",
+      "sed -i 's/a/b/' file",
+      "sed '1w result.txt' file",
+      "sed '1e touch marker' file",
+      "awk 'BEGIN {system(\"touch marker\")}'",
+      "awk '{print > \"result.txt\"}'",
+      "free -h && uname -a"
+    ]:
+      check not checkReadOnlyCommand(command, "bash").allowed
 
   test "rejects malformed and oversized input":
     for command in ["", "   ", "| head", "pwd |", "pwd # hidden"]:

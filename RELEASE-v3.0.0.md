@@ -15,6 +15,10 @@ required gates below pass on the exact candidate commit.
   glob-injection, and child-environment hardening.
 - Non-executing policy-denial observations let budgeted Harness strategies ask
   for a fully revalidated safe replacement without widening the allowlist.
+- History-driven compatibility rules admit bounded Linux/macOS `top`, native
+  Windows performance readers, additional system reporters, pure AWK field
+  selection, and display-only `sed` address expressions while retaining
+  semantic rejection of their write, execute, and unbounded forms.
 - Reusable HTTP transport with transient pre-HTTP retries, response-size caps,
   redirect blocking for bearer requests, proxy controls, and robust DeepSeek /
   Qwen response normalization.
@@ -60,7 +64,9 @@ required gates below pass on the exact candidate commit.
   Windows.
 - [ ] macOS arm64: release build and smoke tests pass on native Apple Silicon.
 - [ ] DeepSeek and local Qwen live smoke tests pass on the exact candidate
-  binary without logging or persisting credentials.
+  binary for all 261 scenarios without logging or persisting credentials.
+- [ ] Positive compatibility and paired mutation cases pass identically on
+  Linux, Windows, and macOS; Wine is supplementary, not a native substitute.
 - [ ] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
   accounts with no pre-existing get configuration.
 - [ ] Repository credential scan, `git diff --check`, man-page rendering,

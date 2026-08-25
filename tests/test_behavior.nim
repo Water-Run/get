@@ -168,7 +168,7 @@ suite "prompt guidance":
     let sys = msgs[0].content
     check sys.contains("Get-ChildItem")
     check sys.contains("without placeholders")
-    check sys.contains("return only commands that can run as-is")
-    check sys.contains("Never answer dynamic or machine-local questions from memory")
+    check sys.contains("emit only runnable commands")
+    check sys.contains("Inspect dynamic or machine-local facts")
     check sys.contains("Resolve-Path ~")
     check not sys.contains("[Environment]::")

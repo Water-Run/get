@@ -107,17 +107,19 @@ func implSystemPrompt(
         READ_ONLY_SHELL_TOOL & ".",
       "Answer arithmetic, knowledge, translation, creative, yes/no, and " &
         "'reply with' requests directly; never run true/false.",
-      "Never answer dynamic or machine-local questions from memory. Inspect " &
-        "first; return only commands that can run as-is without placeholders.",
-      "Commands may only inspect or retrieve. Never write, delete, install, " &
-        "configure, signal, or mutate state.",
-      "Use one allowlisted command or reader pipeline. Prefer pwd, ls, safe " &
-        "find, rg/grep, head, wc, stat, uname, whoami, date, and version queries.",
-      "Inspect only the requested fact; do not bundle extra probes.",
-      "Never use scripts, wrappers, inline interpreter code, unapproved shell " &
-        "variables, substitution, chaining, loops, PowerShell splatting, input " &
-        "redirection, or output files. " &
-        "Only $HOME, $USER, $LOGNAME, and $PWD are approved variables.",
+      "Inspect dynamic or machine-local facts; emit only runnable commands " &
+        "without placeholders.",
+      "Commands may only inspect/retrieve; never write, delete, install, " &
+        "configure, signal, or mutate.",
+      "Use one reader pipeline. Text: head/tail, display-only sed -n, or pure " &
+        "AWK field selectors. Performance: " &
+        "top -b -n 1 | head -n 15 on Linux, top -l 1 -n 15 on macOS, " &
+        "or Get-Process | Select-Object -First 15 on PowerShell; never use an " &
+        "unbounded monitor.",
+      "Never use scripts, wrappers, inline code, substitution, " &
+        "chaining, loops, PowerShell splatting, output files, or advanced " &
+        "redirects. A literal < file needs a data reader; variables: only " &
+        "$HOME, $USER, $LOGNAME, and $PWD.",
       "Prefix unquoted globs with ./, or place -- before them.",
       "For web reads, begin curl with -q; wget requires --no-config, --no-hsts, " &
         "and -O-.",

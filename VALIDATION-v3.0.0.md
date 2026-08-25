@@ -1,8 +1,9 @@
 # get v3.0.0 validation report
 
-Date: 2026-08-24 (Asia/Shanghai)
-Status: release-candidate evidence; native release CI remains the canonical
-cross-platform gate for the exact pushed commit.
+Date: 2026-08-25 (Asia/Shanghai)
+Status: compatibility-corrected release-candidate evidence; native release CI
+and two-provider replay remain the canonical gates for the exact pushed
+commit.
 
 ## Candidate and method
 
@@ -50,39 +51,45 @@ Request accounting explains the large end-to-end changes:
   local startup/cache-path improvement, not removed network latency.
 
 Median max RSS was 9208 KiB for v2.1 and 6794 KiB for v3.0 (-26.22%). The
-benchmarked local Nim 2.2.6 Linux binary changed from 1,309,192 to 1,673,832
-bytes (+27.85%). The canonical Nim 2.2.10 Linux payload is 1,803,360 bytes
-(+37.75%), SHA-256
-`cdba10d2e7d342222c8955cc5aa1248b040e0dd08e1752a5bec568d3f4e100b8`.
-The size tradeoff includes the typed Harness, cache v3, hardened policy,
-bounded executor, and TLS work.
+compatibility-corrected local Nim 2.2.6 Linux binary changed from 1,309,192 to
+1,700,712 bytes (+29.91%); the compatibility rules add 1.61% over the earlier
+v3 candidate. The final canonical Nim 2.2.10 payload size and SHA-256 are
+recorded after native assembly and exact-payload provider replay. The size
+tradeoff includes the typed Harness, cache v3, hardened policy, bounded
+executor, and TLS work.
 
 ## Correctness and stress
 
 | Gate | Result |
 |---|---:|
-| Nim unit tests | 12 files, 19 suites, 98 assertions, 0 failures |
-| Linux CLI E2E | 25/25 |
-| Offline comprehensive suite | 168 passed, 0 failed, 98 live-only skipped |
-| DeepSeek `deepseek-v4-flash` | 260/260, 0 failed, 0 skipped |
-| DGX Qwen `qwen3.8-27b` | Latest full run 260/260, 0 retries used, 0 failed, 0 skipped |
+| Nim unit tests | 12 files, 19 suites, 103 tests, 0 failures |
+| Linux CLI E2E | 26/26 |
+| Windows CLI E2E under Wine | 25/25 applicable, 1 Linux-only process audit skipped |
+| Offline comprehensive suite | 168 passed, 0 failed, 99 live-only skipped |
+| DeepSeek `deepseek-v4-flash` | Local compatibility candidate 261/261; exact native payload replay required |
+| DGX Qwen `qwen3.8-27b` | Local compatibility candidate 261/261; exact native payload replay required |
 | Command deadline | 20/20; median 1055.907 ms, max 1062.723 ms, exit 124 |
 | 100-byte output cap | 50/50 truncated and stopped; no displayed result exceeded 100 bytes |
 | Concurrent cache writers | 192/192 entries preserved (8 waves × 24 writers) |
 | Cache durability after stress | Schema 3, SHA-256, valid backup, mode 0600, 0 stale locks, 0 temp files |
 
-After canonical assembly, the Nim 2.2.10 Linux payload identified above was
-replayed directly against both providers: DeepSeek and DGX Qwen each passed
-260/260 with 0 failures and 0 skips. Release CI pins that provider-validated
-SHA-256 and fails assembly if a later build is not byte-identical.
+The earlier pre-compatibility payload passed 260/260 scenarios independently
+with DeepSeek and DGX Qwen. It is deliberately no longer treated as release
+evidence because the policy and prompt changed. The compatibility-corrected
+suite adds a real platform performance-snapshot scenario, bringing the exact
+payload replay requirement to 261/261 per provider. The local Nim 2.2.6
+candidate already passed 261/261 with each provider, including bounded `top`;
+that catches behavior regressions but does not substitute for replaying the
+canonical Nim 2.2.10 binary. Release CI pins the new provider-validated SHA-256
+and fails assembly if a later build is not byte-identical.
 
-The local Qwen campaign also sampled the model's stochastic command choices.
-One earlier full run on the same binary was 259/260 first-attempt: the lone
+The earlier local Qwen campaign also sampled the model's stochastic command
+choices. One pre-compatibility full run was 259/260 first-attempt: the lone
 failure was a semantically unrelated model answer ("My name is Claude"), not a
 transport, parser, policy, or executor error. The next full run was 260/260 on
 first attempts. Live semantic cases permit one separately logged evaluation
 retry so provider wobble cannot be mistaken for a deterministic product
-regression; no retry was used in the reported 260/260 run. Twelve repeated
+regression; no retry was used in its later 260/260 run. Twelve repeated
 line-count requests passed, including three real
 `wc -l < literal-file` proposals that previously caused false positives.
 Policy-rejection recovery was tested deterministically and against Qwen; a
@@ -91,20 +98,29 @@ never executed.
 
 ## Read-only attack resistance
 
-The deterministic corpus contains:
+The compatibility-expanded deterministic corpus contains:
 
-- 176 realistic safe commands;
-- 328 targeted mutation/bypass attempts;
+- 223 realistic safe commands;
+- 363 targeted mutation/bypass attempts;
 - 775 generated executable-obfuscation variants;
 - 1,025 generated shell-control combinations;
 - 140 dangerous GNU long-option abbreviations;
 - 31 PowerShell parameter-abbreviation/script-conversion variants;
 - 164 dangerous-word false-positive probes.
 
-Total: 2,639 policy decisions, all matching the expected allow/deny result on
-Linux and the Windows build under Wine. A 1,600,000-decision release
-microbenchmark took 3499.988 ms: 2187.5 ns/decision, approximately 457,144
-decisions/second.
+Total: 2,721 policy decisions, all matching the expected allow/deny result on
+Linux and the Windows build under Wine. The compatibility-specific matrix
+separately verifies bounded Linux and macOS `top`, Windows native performance
+commands, system/hardware reporters, pure AWK selectors, and display-only
+`sed`, with paired rejection cases for unbounded sampling, threshold writes,
+external programs, command execution, pipes, and output files.
+
+On the currently loaded validation host, a fixed-CPU five-run median over
+1,600,000 decisions was 4,383.0 ns/decision (228,154 decisions/second), versus
+4,499.2 ns/decision for the pre-compatibility v3 policy binary in the same
+session. The -2.58% paired difference is within host-load variance, but rules
+out a material policy-throughput regression; every decision remains in the
+low-microsecond range.
 
 Coverage includes shell substitution/chaining, quote and escape obfuscation,
 glob option injection, output and advanced input redirection, interpreters and
@@ -124,8 +140,12 @@ observations may be sent to the configured model provider.
 ## Platform and transport validation
 
 - Linux x86_64 release build and real HTTPS request passed.
-- Windows x86_64 cross-build starts under Wine; the complete policy corpus and
-  Windows TLS tests pass there.
+- A remote macOS 26.5 arm64 smoke on `yymac06` executed the documented
+  `top -l 1 -n 3`, `vm_stat`, `sw_vers`, and display-only `sed` forms
+  successfully; the exact release binary still requires native CI below.
+- Windows x86_64 cross-build starts under Wine; all 2,721 deterministic policy
+  decisions pass, and the Windows-target CLI suite passes 25/25 applicable
+  cases (the Linux `/proc` process-tree audit is intentionally skipped).
 - Windows HTTPS imports the native ROOT store into OpenSSL and verifies both
   chain and DNS/IP host name without requiring `cacert.pem`.
 - Native Windows Server and macOS Apple Silicon jobs are required before the

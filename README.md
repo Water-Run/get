@@ -103,6 +103,16 @@ Every model-proposed, model-revised, or cached command follows the same gate:
 
 The mandatory policy parses only simple commands and reader pipelines, then validates every executable and its state-changing options. Unknown syntax and executables fail closed. It blocks command substitution, chaining, regular-file output redirection, scripts and wrappers, inline interpreters, PowerShell splatting/script conversion, option abbreviations and glob-to-option injection, helper/config injection, mutating Git/container/cluster/package-manager operations, uploads, and unsafe short-option variants. A single literal-file `<` stdin redirect is accepted only for a small set of validated data readers; heredocs, here-strings, process substitution, descriptor duplication, expansion, multiple redirects, and read/write `<>` remain rejected. Shell aliases and null devices are checked per platform; only trusted supported shells can be configured. Child processes start without profile hooks and without loader, language-runtime, Git, pager, tracing, or tool-config injection variables. Cached and reviewer-rewritten commands pass through the identical gate.
 
+The allowlist includes practical cross-platform inspection, not just trivial
+file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
+and `top -l 1` on macOS; Windows uses native readers such as `Get-Process`,
+`Get-CimInstance`, and `tasklist`. Common hardware/process reporters and pure
+AWK field selectors are accepted. `sed` is admitted for display-only address
+expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
+external program files, and command execution remain denied. This keeps normal
+diagnostics usable while validating dual-use tools by semantics rather than by
+executable name alone.
+
 For HTTP inspection, use `curl -q ...`; the leading `-q` prevents `.curlrc` from changing the operation, and only GET/HEAD with an explicit read protocol is accepted. `wget` is accepted only with `--no-config --no-hsts -O-`. Prefix unquoted POSIX globs with `./` or place `--` before them. `$HOME`, `$USER`, `$LOGNAME`, and `$PWD` are accepted only for pure terminal output. Clearing `command-pattern` disables only the supplemental regex; it never disables the mandatory policy.
 
 `git status` and worktree-content `git diff` are deliberately rejected: repository-owned clean/textconv/filter configuration can execute helpers even for commands that appear read-only. Use `git branch --show-current`; `git diff-files --name-only --no-ext-diff --no-textconv` for modified tracked names; `git ls-files --others --exclude-standard` for untracked names; and `git diff --cached --no-ext-diff --no-textconv` for staged content. `git show` and patch-rendering `git log` also require both disabling flags.

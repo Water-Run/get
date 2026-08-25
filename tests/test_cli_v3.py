@@ -47,6 +47,9 @@ class GetV3CliTests(unittest.TestCase):
         cls.work.mkdir()
         cls.config_root = Path(os.environ.get(
             "GET_V3_CONFIG_ROOT", str(cls.root / "config")))
+        cls.host_config_root = Path(os.environ.get(
+            "GET_V3_HOST_CONFIG_ROOT", str(cls.config_root)))
+        cls.under_wine = os.environ.get("GET_V3_UNDER_WINE", "") == "1"
         cls.env = os.environ.copy()
         cls.env["XDG_CONFIG_HOME"] = str(cls.config_root)
         if cls.target_os == "windows":
@@ -153,6 +156,11 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "qwen-text-ok")
 
+    def test_04c_platform_performance_snapshot(self) -> None:
+        result = self.run_get("performance snapshot cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip())
+
     def test_05_mandatory_policy_blocks_redirection(self) -> None:
         result = self.run_get("unsafe policy cli", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
@@ -223,13 +231,17 @@ class GetV3CliTests(unittest.TestCase):
     def test_07_command_deadline_returns_124(self) -> None:
         self.assertEqual(
             self.run_get("set", "command-timeout", "1").returncode, 0)
-        started = time.monotonic()
-        result = self.run_get("slow command cli", "--no-cache")
-        elapsed = time.monotonic() - started
-        self.assertEqual(result.returncode, 124, result.stderr)
-        self.assertLess(elapsed, 2.0)
-        self.assertEqual(
-            self.run_get("set", "command-timeout").returncode, 0)
+        try:
+            started = time.monotonic()
+            result = self.run_get("slow command cli", "--no-cache")
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 124, result.stderr)
+            # Wine process creation and taskkill emulation add several seconds;
+            # the exit code still proves the one-second child deadline fired.
+            self.assertLess(elapsed, 12.0 if self.under_wine else 2.0)
+        finally:
+            self.assertEqual(
+                self.run_get("set", "command-timeout").returncode, 0)
 
     def test_08_output_cap_stops_capture(self) -> None:
         self.assertEqual(
@@ -324,8 +336,8 @@ class GetV3CliTests(unittest.TestCase):
         reference = self.run_get(reference_query)
         self.assertEqual(reference.returncode, 0, reference.stderr)
 
-        cache_path = self.config_root / "get" / "cache.json"
-        config_path = self.config_root / "get" / "config.json"
+        cache_path = self.host_config_root / "get" / "cache.json"
+        config_path = self.host_config_root / "get" / "config.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
         config = json.loads(config_path.read_text(encoding="utf-8"))
         reference_entry = next(
@@ -403,7 +415,7 @@ class GetV3CliTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(second.stdout, first.stdout)
-        self.assertLess(elapsed, 0.5)
+        self.assertLess(elapsed, 10.0 if self.under_wine else 0.5)
 
     def test_13_concurrent_cache_writers_keep_every_entry(self) -> None:
         self.assertEqual(
@@ -422,7 +434,7 @@ class GetV3CliTests(unittest.TestCase):
         results = [process.communicate(timeout=20) for process in processes]
         self.assertTrue(all(process.returncode == 0 for process in processes),
                         results)
-        cache_path = self.config_root / "get" / "cache.json"
+        cache_path = self.host_config_root / "get" / "cache.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["schemaVersion"], 3)
         self.assertEqual(payload["hashAlgorithm"], "sha256")
@@ -434,7 +446,7 @@ class GetV3CliTests(unittest.TestCase):
             self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
 
     def test_14_corrupt_primary_recovers_from_last_good_copy(self) -> None:
-        cache_path = self.config_root / "get" / "cache.json"
+        cache_path = self.host_config_root / "get" / "cache.json"
         backup_path = cache_path.with_name(cache_path.name + ".bak")
         self.assertTrue(backup_path.is_file())
         previous = json.loads(backup_path.read_text(encoding="utf-8"))

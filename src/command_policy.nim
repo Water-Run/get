@@ -38,6 +38,10 @@ const SIMPLE_READ_ONLY_COMMANDS = [
   "host", "dig", "nslookup", "traceroute", "tracert",
   "tracepath", "netstat", "lsof", "ps", "pstree", "vmstat",
   "iostat", "mpstat", "lsblk", "lscpu", "lspci", "lsusb",
+  "nproc", "lsmem", "lsns", "lsipc", "lslocks", "lsmod", "modinfo",
+  "pmap", "pidof", "sw_vers", "system_profiler", "ioreg",
+  "lsb_release", "biosdecode", "cpuid", "acpi", "glxinfo", "clinfo",
+  "rocminfo", "vm_stat",
   "findmnt", "md5sum", "sha1sum", "sha224sum", "sha256sum",
   "sha384sum", "sha512sum", "b2sum", "cksum", "strings",
   "od", "hexdump", "cmp", "comm", "nl", "fold", "fmt", "expand",
@@ -83,7 +87,8 @@ const STDIN_DATA_READERS = [
   "jq", "column", "md5sum", "sha1sum", "sha224sum", "sha256sum",
   "sha384sum", "sha512sum", "b2sum", "cksum", "strings", "od",
   "hexdump", "nl", "fold", "fmt", "expand", "unexpand", "paste", "join",
-  "sort", "uniq", "base64", "xxd", "cmp", "comm", "diff", "diff3"
+  "sort", "uniq", "base64", "xxd", "cmp", "comm", "diff", "diff3",
+  "awk", "sed"
 ]
 
 func implReject(reason: string): CommandPolicyDecision =
@@ -110,6 +115,66 @@ func implUnsignedAtMost(value: string, maximum: int): bool =
       return false
     parsed = parsed * 10 + digit
   result = parsed <= maximum
+
+func implPositiveAtMost(value: string, maximum: int): bool =
+  if not implUnsignedAtMost(value, maximum):
+    return false
+  for character in value:
+    if character != '0':
+      return true
+  result = false
+
+func implDecimalAtMost(value: string, maximum: int): bool =
+  if value.len == 0:
+    return false
+  var whole = 0
+  var seenDigit = false
+  var seenDecimal = false
+  var fractionalNonZero = false
+  for character in value:
+    if character == '.':
+      if seenDecimal:
+        return false
+      seenDecimal = true
+      continue
+    if character notin {'0' .. '9'}:
+      return false
+    seenDigit = true
+    let digit = ord(character) - ord('0')
+    if seenDecimal:
+      fractionalNonZero = fractionalNonZero or digit != 0
+    else:
+      if whole > (maximum - digit) div 10:
+        return false
+      whole = whole * 10 + digit
+  if not seenDigit or whole > maximum:
+    return false
+  result = whole < maximum or not fractionalNonZero
+
+func implSafeDiagnosticWord(value: string): bool =
+  if value.len == 0 or value.len > 256:
+    return false
+  for character in value:
+    if character notin {
+      'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_', '-', '.', '+', '%', ','
+    }:
+      return false
+  result = true
+
+func implSafePidList(value: string): bool =
+  if value.len == 0 or value.len > 384:
+    return false
+  var entries = 1
+  var digitsInEntry = 0
+  for character in value:
+    if character in {'0' .. '9'}:
+      digitsInEntry += 1
+    elif character == ',' and digitsInEntry > 0 and entries < 32:
+      entries += 1
+      digitsInEntry = 0
+    else:
+      return false
+  result = digitsInEntry > 0
 
 func implOptionMatches(token: string, option: string): bool =
   let lower = toLowerAscii(token)
@@ -730,21 +795,443 @@ func implValidatePing(
     index += 1
   result = implAllow()
 
-## Supports the common read-only field-selection form without admitting AWK's
-## system(), file redirection, pipes, getline, or program-file capabilities.
-func implValidateAwk(tokens: seq[string]): CommandPolicyDecision =
-  if tokens.len != 2:
-    return implReject("awk is limited to one built-in field selector")
-  let program = tokens[1].replace(" ", "").replace("\t", "")
-  if program == "{print}" or program in [
-    "{print$NF}", "{printNF}", "{printNR}"
+## Accepts procps ``top`` only as a finite, non-interactive snapshot. The
+## Linux and macOS programs use incompatible flags, so each documented dialect
+## is parsed independently instead of treating arbitrary options as harmless.
+func implValidateTopGnu(tokens: seq[string]): bool =
+  var hasBatch = false
+  var hasIterations = false
+  var index = 1
+  while index < tokens.len:
+    let token = tokens[index]
+    let lower = toLowerAscii(token)
+    if lower in [
+      "--batch-mode", "--cmdline-toggle", "--threads-show",
+      "--idle-toggle", "--accum-time-toggle", "--secure-mode",
+      "--single-cpu-toggle"
+    ]:
+      hasBatch = hasBatch or lower == "--batch-mode"
+      index += 1
+      continue
+    if lower in [
+      "--iterations", "--delay", "--scale-summary-mem",
+      "--scale-task-mem", "--sort-override", "--pid",
+      "--filter-any-user", "--filter-only-euser"
+    ]:
+      if index + 1 >= tokens.len:
+        return false
+      let value = tokens[index + 1]
+      case lower
+      of "--iterations":
+        if not implPositiveAtMost(value, 5):
+          return false
+        hasIterations = true
+      of "--delay":
+        if not implDecimalAtMost(value, 10):
+          return false
+      of "--scale-summary-mem":
+        if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p', 'e'}:
+          return false
+      of "--scale-task-mem":
+        if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p'}:
+          return false
+      of "--pid":
+        if not implSafePidList(value):
+          return false
+      else:
+        if not implSafeDiagnosticWord(value):
+          return false
+      index += 2
+      continue
+    if lower == "--width":
+      if index + 1 < tokens.len and implAllDigits(tokens[index + 1]):
+        if not implPositiveAtMost(tokens[index + 1], 512):
+          return false
+        index += 2
+      else:
+        index += 1
+      continue
+    var matchedLongValue = false
+    for item in [
+      ("--iterations=", 0), ("--delay=", 1),
+      ("--scale-summary-mem=", 2), ("--scale-task-mem=", 3),
+      ("--sort-override=", 4), ("--pid=", 5),
+      ("--filter-any-user=", 6), ("--filter-only-euser=", 7),
+      ("--width=", 8)
+    ]:
+      if lower.startsWith(item[0]):
+        let value = token[item[0].len .. ^1]
+        case item[1]
+        of 0:
+          if not implPositiveAtMost(value, 5):
+            return false
+          hasIterations = true
+        of 1:
+          if not implDecimalAtMost(value, 10):
+            return false
+        of 2:
+          if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p', 'e'}:
+            return false
+        of 3:
+          if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p'}:
+            return false
+        of 5:
+          if not implSafePidList(value):
+            return false
+        of 8:
+          if not implPositiveAtMost(value, 512):
+            return false
+        else:
+          if not implSafeDiagnosticWord(value):
+            return false
+        matchedLongValue = true
+        break
+    if matchedLongValue:
+      index += 1
+      continue
+    if not token.startsWith("-") or token.startsWith("--") or
+        token.len < 2:
+      return false
+    var cursor = 1
+    while cursor < token.len:
+      let option = token[cursor]
+      if option in {'b', 'c', 'H', 'i', 'S', 's', '1'}:
+        hasBatch = hasBatch or option == 'b'
+        cursor += 1
+        continue
+      if option notin {'n', 'd', 'E', 'e', 'o', 'p', 'U', 'u', 'w'}:
+        return false
+      var value = ""
+      if cursor + 1 < token.len:
+        value = token[cursor + 1 .. ^1]
+        if value.startsWith("="):
+          value = value[1 .. ^1]
+      elif option == 'w':
+        if index + 1 < tokens.len and implAllDigits(tokens[index + 1]):
+          value = tokens[index + 1]
+          index += 1
+      else:
+        if index + 1 >= tokens.len:
+          return false
+        value = tokens[index + 1]
+        index += 1
+      case option
+      of 'n':
+        if not implPositiveAtMost(value, 5):
+          return false
+        hasIterations = true
+      of 'd':
+        if not implDecimalAtMost(value, 10):
+          return false
+      of 'E':
+        if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p', 'e'}:
+          return false
+      of 'e':
+        if value.len != 1 or value[0] notin {'k', 'm', 'g', 't', 'p'}:
+          return false
+      of 'p':
+        if not implSafePidList(value):
+          return false
+      of 'w':
+        if value.len > 0 and not implPositiveAtMost(value, 512):
+          return false
+      else:
+        if not implSafeDiagnosticWord(value):
+          return false
+      cursor = token.len
+    index += 1
+  result = hasBatch and hasIterations
+
+func implValidateTopMac(tokens: seq[string]): bool =
+  var hasSamples = false
+  var index = 1
+  while index < tokens.len:
+    let token = tokens[index]
+    if token in ["-a", "-d", "-e", "-F", "-f", "-R", "-r", "-S", "-u", "-W"]:
+      index += 1
+      continue
+    if token in [
+      "-c", "-i", "-l", "-ncols", "-o", "-O", "-s", "-n",
+      "-stats", "-pid", "-user", "-U"
+    ]:
+      if index + 1 >= tokens.len:
+        return false
+      let value = tokens[index + 1]
+      case token
+      of "-c":
+        if value notin ["a", "d", "e", "n"]:
+          return false
+      of "-i":
+        if not implPositiveAtMost(value, 10):
+          return false
+      of "-l":
+        if not implPositiveAtMost(value, 5):
+          return false
+        hasSamples = true
+      of "-ncols":
+        if not implPositiveAtMost(value, 512):
+          return false
+      of "-s":
+        if not implDecimalAtMost(value, 10):
+          return false
+      of "-n":
+        if not implPositiveAtMost(value, 200):
+          return false
+      of "-pid":
+        if not implUnsignedAtMost(value, 2_147_483_647):
+          return false
+      else:
+        if not implSafeDiagnosticWord(value):
+          return false
+      index += 2
+      continue
+    var option = ""
+    var value = ""
+    for candidate in ["-ncols", "-stats", "-pid", "-user", "-l", "-i", "-s", "-n", "-o", "-O", "-U"]:
+      if token.startsWith(candidate) and token.len > candidate.len:
+        option = candidate
+        value = token[candidate.len .. ^1]
+        if value.startsWith("="):
+          value = value[1 .. ^1]
+        break
+    if option.len == 0:
+      return false
+    case option
+    of "-l":
+      if not implPositiveAtMost(value, 5):
+        return false
+      hasSamples = true
+    of "-i":
+      if not implPositiveAtMost(value, 10):
+        return false
+    of "-ncols":
+      if not implPositiveAtMost(value, 512):
+        return false
+    of "-s":
+      if not implDecimalAtMost(value, 10):
+        return false
+    of "-n":
+      if not implPositiveAtMost(value, 200):
+        return false
+    of "-pid":
+      if not implUnsignedAtMost(value, 2_147_483_647):
+        return false
+    else:
+      if not implSafeDiagnosticWord(value):
+        return false
+    index += 1
+  result = hasSamples
+
+func implValidateTop(tokens: seq[string]): CommandPolicyDecision =
+  if tokens.len == 2 and toLowerAscii(tokens[1]) in [
+    "-h", "--help", "-v", "--version"
   ]:
     return implAllow()
-  if program.startsWith("{print$") and program.endsWith("}"):
-    let field = program[7 ..< program.len - 1]
-    if implAllDigits(field) and field != "0":
-      return implAllow()
-  result = implReject("awk program is outside the pure field-selector subset")
+  if implValidateTopGnu(tokens) or implValidateTopMac(tokens):
+    return implAllow()
+  result = implReject(
+    "top requires a bounded non-interactive snapshot: use -b -n 1 on " &
+    "Linux or -l 1 on macOS, with recognized read-only options")
+
+func implSafeAwkPrintExpression(expression: string): bool =
+  if expression.len == 0:
+    return true
+  for item in expression.split(','):
+    if item in ["NR", "NF", "$0", "$NF"]:
+      continue
+    if item.startsWith("$") and item.len > 1 and
+        implPositiveAtMost(item[1 .. ^1], 10_000):
+      continue
+    return false
+  result = true
+
+func implSafeAwkCondition(condition: string): bool =
+  if condition.len == 0:
+    return true
+  for operation in ["==", "!=", ">=", "<=", ">", "<"]:
+    let prefix = "NR" & operation
+    if condition.startsWith(prefix):
+      return implUnsignedAtMost(condition[prefix.len .. ^1], 1_000_000_000)
+  result = false
+
+## Supports common pure selectors without admitting AWK's system(), getline,
+## file redirection, pipes, program files, extension loading, or general code.
+func implSafeAwkProgram(raw: string): bool =
+  let program = raw.replace(" ", "").replace("\t", "")
+  if program.contains('\n') or program.contains('\r') or
+      not program.endsWith("}"):
+    return false
+  let bodyStart = program.find('{')
+  if bodyStart < 0 or not implSafeAwkCondition(program[0 ..< bodyStart]):
+    return false
+  var body = program[bodyStart + 1 ..< program.len - 1]
+  if not body.startsWith("print"):
+    return false
+  body = body[5 .. ^1]
+  if body.endsWith(";exit"):
+    body = body[0 ..< body.len - 5]
+  result = implSafeAwkPrintExpression(body)
+
+func implValidateAwk(tokens: seq[string]): CommandPolicyDecision =
+  var index = 1
+  while index < tokens.len:
+    let token = tokens[index]
+    if token == "--":
+      index += 1
+      break
+    if token == "-F" or token == "--field-separator":
+      if index + 1 >= tokens.len or tokens[index + 1].len == 0 or
+          tokens[index + 1].len > 32:
+        return implReject("awk field separator is missing or too long")
+      index += 2
+      continue
+    if token.startsWith("-F") and token.len > 2:
+      if token.len > 34:
+        return implReject("awk field separator is too long")
+      index += 1
+      continue
+    if token.startsWith("--field-separator="):
+      let value = token[18 .. ^1]
+      if value.len == 0 or value.len > 32:
+        return implReject("awk field separator is missing or too long")
+      index += 1
+      continue
+    if token.startsWith("-"):
+      return implReject("awk option can load or execute an external program")
+    break
+  if index >= tokens.len or not implSafeAwkProgram(tokens[index]):
+    return implReject("awk program is outside the pure selector subset")
+  index += 1
+  while index < tokens.len:
+    if tokens[index] != "-" and tokens[index].startsWith("-"):
+      return implReject("awk input operand resembles an option")
+    index += 1
+  result = implAllow()
+
+func implSafeSedAddress(value: string): bool =
+  if value == "$" or implUnsignedAtMost(value, 1_000_000_000):
+    return true
+  if value.len < 2 or value[0] != '/':
+    return false
+  var escaped = false
+  for index in 1 ..< value.len:
+    if escaped:
+      escaped = false
+    elif value[index] == '\\':
+      escaped = true
+    elif value[index] == '/':
+      return index == value.len - 1
+  result = false
+
+func implSafeSedAddressExpression(raw: string): bool =
+  var value = raw
+  if value.endsWith("!"):
+    value.setLen(value.len - 1)
+  if value.len == 0 or implSafeSedAddress(value):
+    return true
+  let separator = value.find(',')
+  if separator <= 0 or separator >= value.len - 1 or
+      value.find(',', separator + 1) >= 0:
+    return false
+  result = implSafeSedAddress(value[0 ..< separator]) and
+    implSafeSedAddress(value[separator + 1 .. ^1])
+
+## ``sed`` is useful for file inspection, but its full language can write
+## files or execute commands. Admit only address + observational-command
+## expressions such as ``1,20p``, ``/needle/p``, and ``20q``.
+func implSafeSedProgram(raw: string): bool =
+  let program = raw.strip()
+  if program.len == 0 or program.len > 512 or
+      program.contains('\n') or program.contains('\r') or
+      program.contains(';') or program.contains('{') or
+      program.contains('}'):
+    return false
+  if program[^1] notin {'p', 'P', 'q', 'Q', 'd', 'D', '=', 'l', 'n', 'N'}:
+    return false
+  result = implSafeSedAddressExpression(program[0 ..< program.len - 1])
+
+func implValidateSed(tokens: seq[string]): CommandPolicyDecision =
+  if tokens.len == 2 and toLowerAscii(tokens[1]) in ["-h", "--help", "--version"]:
+    return implAllow()
+  var index = 1
+  var expressionCount = 0
+  var optionsEnded = false
+  while index < tokens.len:
+    let token = tokens[index]
+    if not optionsEnded and token == "--":
+      optionsEnded = true
+      index += 1
+      continue
+    if not optionsEnded and token.startsWith("--"):
+      if token in [
+        "--quiet", "--silent", "--regexp-extended", "--unbuffered",
+        "--separate", "--null-data", "--posix", "--sandbox", "--binary"
+      ]:
+        index += 1
+        continue
+      if token == "--expression":
+        if index + 1 >= tokens.len or
+            not implSafeSedProgram(tokens[index + 1]):
+          return implReject("sed expression is outside the display-only subset")
+        expressionCount += 1
+        index += 2
+        continue
+      if token.startsWith("--expression="):
+        if not implSafeSedProgram(token[13 .. ^1]):
+          return implReject("sed expression is outside the display-only subset")
+        expressionCount += 1
+        index += 1
+        continue
+      return implReject("sed option can modify files or load a program")
+    if not optionsEnded and token.startsWith("-") and token != "-":
+      var cursor = 1
+      while cursor < token.len:
+        let option = token[cursor]
+        if option in {'n', 'E', 'r', 'u', 's', 'z', 'b'}:
+          cursor += 1
+          continue
+        if option != 'e':
+          return implReject("sed option can modify files or load a program")
+        var expression = ""
+        if cursor + 1 < token.len:
+          expression = token[cursor + 1 .. ^1]
+        elif index + 1 < tokens.len:
+          expression = tokens[index + 1]
+          index += 1
+        if not implSafeSedProgram(expression):
+          return implReject("sed expression is outside the display-only subset")
+        expressionCount += 1
+        cursor = token.len
+      index += 1
+      continue
+    if expressionCount == 0:
+      if not implSafeSedProgram(token):
+        return implReject("sed expression is outside the display-only subset")
+      expressionCount = 1
+      index += 1
+    break
+  if expressionCount == 0:
+    return implReject("sed requires a display-only expression")
+  while index < tokens.len:
+    if not optionsEnded and tokens[index] != "-" and
+        tokens[index].startsWith("-"):
+      return implReject("sed input operand resembles an option")
+    index += 1
+  result = implAllow()
+
+func implValidateSensors(tokens: seq[string]): CommandPolicyDecision =
+  if implHasForbiddenOption(tokens, ["-s", "--set"]):
+    return implReject("sensors set mode can change hardware thresholds")
+  for token in tokens:
+    if token.startsWith("-") and not token.startsWith("--"):
+      var index = 1
+      while index < token.len:
+        if token[index] == 's':
+          return implReject("sensors set mode can change hardware thresholds")
+        if token[index] == 'c':
+          break
+        index += 1
+  result = implAllow()
 
 func implValidateDate(tokens: seq[string]): CommandPolicyDecision =
   if implHasForbiddenOption(tokens, ["-s", "--set"]):
@@ -1808,7 +2295,10 @@ func implValidateStage(
   of "pgrep": return implValidatePgrep(tokens)
   of "sar": return implValidateSar(tokens)
   of "ping": return implValidatePing(tokens, shell)
+  of "top": return implValidateTop(tokens)
   of "awk": return implValidateAwk(tokens)
+  of "sed": return implValidateSed(tokens)
+  of "sensors": return implValidateSensors(tokens)
   of "yq":
     if implHasForbiddenOption(tokens, [
       "-i", "--inplace", "--in-place", "--split-exp", "--split-exp-file"

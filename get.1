@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-08-24" "get 3.0.0" "User Commands"
+.TH GET 1 "2026-08-25" "get 3.0.0" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -332,6 +332,13 @@ from trusted executable paths can be configured. Shell profiles are disabled,
 and child environments remove loader, runtime, Git, pager, tracing, and
 tool-config injection variables. curl reads require leading -q; wget reads
 require --no-config, --no-hsts, and -O-.
+.PP
+Practical bounded diagnostics are supported across platforms: top requires
+-b and a finite -n count on Linux, or a finite -l count on macOS; Windows can
+use native Get-Process, Get-CimInstance, and tasklist readers. Pure AWK field
+selectors and display-only sed address expressions are accepted. sed in-place
+mode, output commands, external program files, and command execution remain
+denied.
 .PP
 git status and worktree-content git diff are rejected because repository-owned
 clean, textconv, and filter configuration can execute helpers. Use git branch
