@@ -1,9 +1,9 @@
 # get v3.0.0 validation report
 
 Date: 2026-08-25 (Asia/Shanghai)
-Status: provider-bound release candidate; native Linux, Windows, and macOS
-gates plus exact-payload two-provider replay passed. Final archive assembly is
-the remaining automated publish gate.
+Status: release-ready evidence. Native Linux, Windows, and macOS gates,
+exact-payload two-provider replay, checksum-bound archive assembly, and package
+verification all passed.
 
 ## Candidate and method
 
@@ -148,26 +148,28 @@ observations may be sent to the configured model provider.
 
 ## Platform and transport validation
 
-- Native release run 32803103850 built commit `a65d5ca` with Nim 2.2.10. Its
-  Linux amd64, Windows amd64, and macOS arm64 jobs all passed complete unit,
-  HTTPS, CLI, and installer gates; assembly alone rejected the deliberately
-  stale pre-compatibility provider hash.
+- The release-candidate workflow built the exact candidate with Nim 2.2.10.
+  Its Linux amd64, Windows amd64, and macOS arm64 jobs all passed complete
+  unit, HTTPS, CLI, offline, and installer gates. Assembly then verified the
+  provider-bound Linux SHA-256, every payload checksum, version, architecture,
+  runtime file, and archive entry before producing the release artifact.
 - Linux x86_64 release build and real HTTPS request passed.
 - A remote macOS 26.5 arm64 smoke on `yymac06` executed the documented
   `top -l 1 -n 3`, `vm_stat`, `sw_vers`, and display-only `sed` forms
-  successfully; the exact release binary still requires native CI below.
+  successfully; the exact release payload subsequently passed native macOS
+  CI, including HTTPS, CLI, and installer checks.
 - Windows x86_64 cross-build starts under Wine; all 2,721 deterministic policy
   decisions pass, and the Windows-target CLI suite passes 25/25 applicable
   cases (the Linux `/proc` process-tree audit is intentionally skipped).
 - Windows HTTPS imports the native ROOT store into OpenSSL and verifies both
   chain and DNS/IP host name without requiring `cacert.pem`.
-- Native Windows Server and macOS Apple Silicon jobs are required before the
-  candidate archive is considered publishable. Wine is diagnostic evidence,
-  not a replacement for native Windows testing.
+- Native Windows Server and macOS Apple Silicon jobs passed. Wine remains
+  supplementary diagnostic evidence, not a replacement for native Windows
+  testing.
 
 ## Release decision
 
-No tag or public GitHub Release should be created until the exact pushed commit
-passes native Windows/Linux/macOS release-candidate CI, installer smoke tests,
-package layout/version/checksum verification, credential scanning, and the
-remaining checklist in `RELEASE-v3.0.0.md`.
+The exact payload passed native Windows/Linux/macOS release-candidate CI,
+installer smoke tests, package layout/version/checksum verification,
+credential scanning, two-provider replay, and every checklist gate in
+`RELEASE-v3.0.0.md`. It is approved for the `v3.0.0` tag and public release.

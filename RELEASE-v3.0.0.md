@@ -1,7 +1,7 @@
 # get v3.0.0 release plan
 
-Status: release candidate. Do not create or publish the `v3.0.0` tag until all
-required gates below pass on the exact candidate commit.
+Status: release-ready. All required gates below passed on the exact candidate
+payload; the tag and public release are created only from that verified commit.
 
 ## Release highlights
 
@@ -71,7 +71,7 @@ required gates below pass on the exact candidate commit.
   accounts with no pre-existing get configuration.
 - [x] Repository credential scan, `git diff --check`, man-page rendering,
   Python byte-compilation, and package validation pass.
-- [ ] Every release archive is unpacked, checksummed, and its binary reports
+- [x] Every release archive is unpacked, checksummed, and its binary reports
   `3.0.0` on the target operating system.
 
 ## Canonical release package
