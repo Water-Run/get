@@ -52,19 +52,19 @@ provider latency from 2059.847 ms to 45.760 ms (-97.78%), and four 120 ms tools
 from 494.988 ms serial to 129.135 ms parallel (-73.91%, 3.833x). Median
 one-request RSS fell from 9208 KiB to 6794 KiB (-26.22%). The
 compatibility-corrected local Nim 2.2.6 Linux binary is 1,700,712 bytes,
-29.91% larger than v2.1; the final canonical Nim 2.2.10 size and hash are
-recorded only after native release assembly. The tradeoff covers the new
-runtime, policy, cache, and transport functionality.
+29.91% larger than v2.1. The canonical Nim 2.2.10 Linux payload is 1,833,888
+bytes (40.08% larger than v2.1), SHA-256
+`00bb41bf74bc0bd6ac3d5c789cba55fafe949e9566d50c57aa64bece24d42ad5`.
+The tradeoff covers the new runtime, policy, cache, transport, and practical
+compatibility functionality.
 
 The compatibility-expanded deterministic policy corpus performs 2,721
 allow/deny decisions with zero mismatches on Linux and the Windows build under
 Wine. Stress validation preserved 192/192 concurrent cache writes, enforced
-20/20 command deadlines and 50/50 output caps. The exact final native Linux
-payload is a release gate: it must pass all 261 live scenarios independently
-with DeepSeek and local Qwen, and release assembly rejects any payload whose
-SHA-256 differs from that provider-tested binary. The local compatibility
-candidate has already passed 261/261 with each provider; canonical native
-payload replay remains required. See
+20/20 command deadlines and 50/50 output caps. The exact native Linux payload
+identified above passed all 261 live scenarios independently with DeepSeek and
+local Qwen. Release assembly rejects any payload whose SHA-256 differs from
+that provider-tested binary. See
 `VALIDATION-v3.0.0.md` for methods, exact results, and boundaries.
 
 ## Install

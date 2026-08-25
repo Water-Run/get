@@ -1483,11 +1483,17 @@ def _harness_query_table(scratch: Path
     if f.platform_name == "linux":
         cases.append((
             "performance_snapshot",
-            "Report a one-shot system performance snapshot. Use the exact "
-            "read-only command `top -bn1 | head -n 15` and return its output.",
-            lambda o: "load average" in o.lower()
-            and ("tasks:" in o.lower() or "%cpu" in o.lower()),
-            "Harness admits bounded Linux top",
+            "Report a one-shot system performance snapshot using a bounded "
+            "read-only command. Prefer `top -bn1 | head -n 15`; an equivalent "
+            "one-shot process CPU/memory table is acceptable. Return output.",
+            lambda o: (
+                "load average" in o.lower()
+                and ("tasks:" in o.lower() or "%cpu" in o.lower())
+            ) or (
+                "pid" in o.lower() and "%cpu" in o.lower()
+                and ("%mem" in o.lower() or "rss" in o.lower())
+            ),
+            "Harness admits a bounded Linux performance reader",
         ))
     elif f.platform_name == "darwin":
         cases.append((

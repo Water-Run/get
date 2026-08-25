@@ -55,23 +55,24 @@ required gates below pass on the exact candidate commit.
 
 ## Required release gates
 
-- [ ] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
-- [ ] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
+- [x] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
+- [x] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
   full offline suite pass with zero failures.
-- [ ] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
+- [x] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
   Nim unit tests, Windows CLI E2E, DPAPI, PowerShell, proxy, timeout,
   output-cap, parallel-execution, and concurrent-cache tests pass on native
   Windows.
-- [ ] macOS arm64: release build and smoke tests pass on native Apple Silicon.
-- [ ] DeepSeek and local Qwen live smoke tests pass on the exact candidate
+- [x] macOS arm64: release build and smoke tests pass on native Apple Silicon.
+- [x] DeepSeek and local Qwen live smoke tests pass on the exact candidate
   binary for all 261 scenarios without logging or persisting credentials.
-- [ ] Positive compatibility and paired mutation cases pass identically on
+- [x] Positive compatibility and paired mutation cases pass identically on
   Linux, Windows, and macOS; Wine is supplementary, not a native substitute.
-- [ ] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
+- [x] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
   accounts with no pre-existing get configuration.
-- [ ] Repository credential scan, `git diff --check`, man-page rendering,
+- [x] Repository credential scan, `git diff --check`, man-page rendering,
   Python byte-compilation, and package validation pass.
-- [ ] Every release archive is unpacked and its binary reports `3.0.0`.
+- [ ] Every release archive is unpacked, checksummed, and its binary reports
+  `3.0.0` on the target operating system.
 
 ## Canonical release package
 

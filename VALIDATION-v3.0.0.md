@@ -1,9 +1,9 @@
 # get v3.0.0 validation report
 
 Date: 2026-08-25 (Asia/Shanghai)
-Status: compatibility-corrected release-candidate evidence; native release CI
-and two-provider replay remain the canonical gates for the exact pushed
-commit.
+Status: provider-bound release candidate; native Linux, Windows, and macOS
+gates plus exact-payload two-provider replay passed. Final archive assembly is
+the remaining automated publish gate.
 
 ## Candidate and method
 
@@ -53,10 +53,11 @@ Request accounting explains the large end-to-end changes:
 Median max RSS was 9208 KiB for v2.1 and 6794 KiB for v3.0 (-26.22%). The
 compatibility-corrected local Nim 2.2.6 Linux binary changed from 1,309,192 to
 1,700,712 bytes (+29.91%); the compatibility rules add 1.61% over the earlier
-v3 candidate. The final canonical Nim 2.2.10 payload size and SHA-256 are
-recorded after native assembly and exact-payload provider replay. The size
-tradeoff includes the typed Harness, cache v3, hardened policy, bounded
-executor, and TLS work.
+v3 candidate. The canonical Nim 2.2.10 Linux payload is 1,833,888 bytes
+(+40.08% versus v2.1), SHA-256
+`00bb41bf74bc0bd6ac3d5c789cba55fafe949e9566d50c57aa64bece24d42ad5`.
+The size tradeoff includes the typed Harness, cache v3, hardened policy,
+bounded executor, compatibility parsers, and TLS work.
 
 ## Correctness and stress
 
@@ -66,8 +67,8 @@ executor, and TLS work.
 | Linux CLI E2E | 26/26 |
 | Windows CLI E2E under Wine | 25/25 applicable, 1 Linux-only process audit skipped |
 | Offline comprehensive suite | 168 passed, 0 failed, 99 live-only skipped |
-| DeepSeek `deepseek-v4-flash` | Local compatibility candidate 261/261; exact native payload replay required |
-| DGX Qwen `qwen3.8-27b` | Local compatibility candidate 261/261; exact native payload replay required |
+| DeepSeek `deepseek-v4-flash` | Exact native payload 261/261, 0 failed, 0 skipped |
+| DGX Qwen `qwen3.8-27b` | Exact native payload 261/261, 0 failed, 0 skipped |
 | Command deadline | 20/20; median 1055.907 ms, max 1062.723 ms, exit 124 |
 | 100-byte output cap | 50/50 truncated and stopped; no displayed result exceeded 100 bytes |
 | Concurrent cache writers | 192/192 entries preserved (8 waves × 24 writers) |
@@ -78,10 +79,18 @@ with DeepSeek and DGX Qwen. It is deliberately no longer treated as release
 evidence because the policy and prompt changed. The compatibility-corrected
 suite adds a real platform performance-snapshot scenario, bringing the exact
 payload replay requirement to 261/261 per provider. The local Nim 2.2.6
-candidate already passed 261/261 with each provider, including bounded `top`;
-that catches behavior regressions but does not substitute for replaying the
-canonical Nim 2.2.10 binary. Release CI pins the new provider-validated SHA-256
+candidate passed 261/261 with each provider. The canonical Nim 2.2.10 binary
+identified above was then replayed independently and also passed 261/261 with
+DeepSeek and 261/261 with Qwen. Release CI pins this provider-validated SHA-256
 and fails assembly if a later build is not byte-identical.
+
+The first canonical DeepSeek replay scored 260/261 only because its two valid,
+successful `ps` CPU/memory snapshots did not contain the `top`-specific text
+required by the initial semantic checker. The live checker was corrected to
+accept equivalent bounded process snapshots, while deterministic policy and
+CLI tests continue to require exact Linux/macOS `top` forms. The full replay
+then passed 261/261. This was a test false negative, not a policy, parser,
+transport, or executor failure.
 
 The earlier local Qwen campaign also sampled the model's stochastic command
 choices. One pre-compatibility full run was 259/260 first-attempt: the lone
@@ -139,6 +148,10 @@ observations may be sent to the configured model provider.
 
 ## Platform and transport validation
 
+- Native release run 32803103850 built commit `a65d5ca` with Nim 2.2.10. Its
+  Linux amd64, Windows amd64, and macOS arm64 jobs all passed complete unit,
+  HTTPS, CLI, and installer gates; assembly alone rejected the deliberately
+  stale pre-compatibility provider hash.
 - Linux x86_64 release build and real HTTPS request passed.
 - A remote macOS 26.5 arm64 smoke on `yymac06` executed the documented
   `top -l 1 -n 3`, `vm_stat`, `sw_vers`, and display-only `sed` forms
