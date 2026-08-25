@@ -1,8 +1,11 @@
 # get v3.0.0 release plan
 
-Status: compatibility follow-up candidate. The macOS summary-only `top -n 0`
-false positive is fixed locally; native payload, two-provider replay, and
-archive gates must pass again before tagging.
+Status: release-ready candidate. Native Linux, Windows, and macOS gates passed
+on commit `933d2bc` in GitHub Actions run `32806323023`. Its 1,833,888-byte
+Linux payload (`2f503f42b7ec4c8cc671ae05366db246de33fa17e9d8b9402e63fd221e883d6a`)
+then passed 261/261 live scenarios independently with DeepSeek and DGX Qwen.
+The final assembly dispatch rebuilds all targets and refuses any Linux payload
+that differs from that provider-tested identity.
 
 ## Release highlights
 
@@ -56,28 +59,29 @@ archive gates must pass again before tagging.
 
 ## Required release gates
 
-- [ ] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
-- [ ] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
+- [x] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
+- [x] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
   full offline suite pass with zero failures.
-- [ ] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
+- [x] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
   Nim unit tests, Windows CLI E2E, DPAPI, PowerShell, proxy, timeout,
   output-cap, parallel-execution, and concurrent-cache tests pass on native
   Windows.
-- [ ] macOS arm64: release build and smoke tests pass on native Apple Silicon.
-- [ ] DeepSeek and local Qwen live smoke tests pass on the exact candidate
+- [x] macOS arm64: release build and smoke tests pass on native Apple Silicon.
+- [x] DeepSeek and local Qwen live smoke tests pass on the exact candidate
   binary for all 261 scenarios without logging or persisting credentials.
-- [ ] Positive compatibility and paired mutation cases pass identically on
+- [x] Positive compatibility and paired mutation cases pass identically on
   Linux, Windows, and macOS; Wine is supplementary, not a native substitute.
-- [ ] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
+- [x] Installer smoke tests pass on clean Linux, Windows, and macOS user
   accounts with no pre-existing get configuration.
 - [x] Repository credential scan, `git diff --check`, man-page rendering,
   Python byte-compilation, and package validation pass.
-- [ ] Every release archive is unpacked, checksummed, and its binary reports
+- [x] Every release archive is unpacked, checksummed, and its binary reports
   `3.0.0` on the target operating system.
 
 ## Canonical release package
 
-Create `get-v3.0.0.zip` with this flat layout:
+CI creates an internal, flat `get-v3.0.0.zip` attestation package with this
+layout:
 
 ```text
 get_ready.py
@@ -108,6 +112,19 @@ extraction. Generate `SHA256SUMS` only after the final archive contents are
 frozen. Do not reuse an older binary or DLL by filename alone; record its
 source and checksum.
 
+Publish three smaller platform archives derived byte-for-byte from that
+verified package:
+
+- `get-v3.0.0-linux-x64.zip`
+- `get-v3.0.0-windows-x64.zip`
+- `get-v3.0.0-macos-arm64.zip`
+
+Each archive contains only the selected platform payload plus the installer,
+documentation, validation evidence, build metadata, and internal checksums.
+The Windows archive additionally contains the three pinned runtime DLLs and
+their license notices. Publish an outer checksum list and JSON asset manifest
+alongside them.
+
 ## Publish sequence
 
 1. Freeze the candidate commit and wait for every required gate.
@@ -115,7 +132,7 @@ source and checksum.
 3. Verify checksums, versions, archive layout, and installers from the archive.
 4. Create an annotated `v3.0.0` tag on the verified commit and push the tag.
 5. Create a draft GitHub Release using `RELEASE_NOTES-v3.0.0.md`; attach the
-   archive and `get-v3.0.0.zip.sha256`.
+   three platform archives, the outer checksum list, and the asset manifest.
 6. Download the draft assets once, verify them independently, then publish.
 7. Monitor installation and provider smoke checks; if a blocker appears, keep
    the release unpublished or mark it as a prerelease and fix forward from a

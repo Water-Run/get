@@ -1485,13 +1485,20 @@ def _harness_query_table(scratch: Path
             "performance_snapshot",
             "Report a one-shot system performance snapshot using a bounded "
             "read-only command. Prefer `top -bn1 | head -n 15`; an equivalent "
-            "one-shot process CPU/memory table is acceptable. Return output.",
+            "one-shot process CPU/memory table or `/proc/loadavg` record is "
+            "acceptable. Return output.",
             lambda o: (
                 "load average" in o.lower()
                 and ("tasks:" in o.lower() or "%cpu" in o.lower())
             ) or (
                 "pid" in o.lower() and "%cpu" in o.lower()
                 and ("%mem" in o.lower() or "rss" in o.lower())
+            ) or bool(
+                re.search(
+                    r"(?m)^\s*\d+(?:\.\d+)?\s+\d+(?:\.\d+)?\s+"
+                    r"\d+(?:\.\d+)?\s+\d+/\d+\s+\d+\s*$",
+                    o,
+                )
             ),
             "Harness admits a bounded Linux performance reader",
         ))

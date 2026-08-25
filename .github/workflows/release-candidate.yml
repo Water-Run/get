@@ -20,7 +20,7 @@ env:
   NIM_VERSION: 2.2.10
   RELEASE_VERSION: 3.0.0
   # Refresh only after the no-assembly candidate payload passes both providers.
-  PROVIDER_VALIDATED_LINUX_SHA256: 00bb41bf74bc0bd6ac3d5c789cba55fafe949e9566d50c57aa64bece24d42ad5
+  PROVIDER_VALIDATED_LINUX_SHA256: 2f503f42b7ec4c8cc671ae05366db246de33fa17e9d8b9402e63fd221e883d6a
 
 jobs:
   linux-amd64:
