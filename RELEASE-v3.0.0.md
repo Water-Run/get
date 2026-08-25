@@ -1,7 +1,8 @@
 # get v3.0.0 release plan
 
-Status: release-ready. All required gates below passed on the exact candidate
-payload; the tag and public release are created only from that verified commit.
+Status: compatibility follow-up candidate. The macOS summary-only `top -n 0`
+false positive is fixed locally; native payload, two-provider replay, and
+archive gates must pass again before tagging.
 
 ## Release highlights
 
@@ -55,23 +56,23 @@ payload; the tag and public release are created only from that verified commit.
 
 ## Required release gates
 
-- [x] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
-- [x] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
+- [ ] GitHub `Windows CI / Windows amd64` passes on the candidate commit.
+- [ ] Linux amd64: release build, all Nim unit tests, CLI E2E tests, and the
   full offline suite pass with zero failures.
-- [x] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
+- [ ] Windows amd64: release build starts with packaged OpenSSL 3 DLLs; all
   Nim unit tests, Windows CLI E2E, DPAPI, PowerShell, proxy, timeout,
   output-cap, parallel-execution, and concurrent-cache tests pass on native
   Windows.
-- [x] macOS arm64: release build and smoke tests pass on native Apple Silicon.
-- [x] DeepSeek and local Qwen live smoke tests pass on the exact candidate
+- [ ] macOS arm64: release build and smoke tests pass on native Apple Silicon.
+- [ ] DeepSeek and local Qwen live smoke tests pass on the exact candidate
   binary for all 261 scenarios without logging or persisting credentials.
-- [x] Positive compatibility and paired mutation cases pass identically on
+- [ ] Positive compatibility and paired mutation cases pass identically on
   Linux, Windows, and macOS; Wine is supplementary, not a native substitute.
-- [x] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
+- [ ] Installer smoke tests pass on clean Linux, Windows 10/11, and macOS user
   accounts with no pre-existing get configuration.
 - [x] Repository credential scan, `git diff --check`, man-page rendering,
   Python byte-compilation, and package validation pass.
-- [x] Every release archive is unpacked, checksummed, and its binary reports
+- [ ] Every release archive is unpacked, checksummed, and its binary reports
   `3.0.0` on the target operating system.
 
 ## Canonical release package

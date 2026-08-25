@@ -1,9 +1,9 @@
 # get v3.0.0 validation report
 
 Date: 2026-08-25 (Asia/Shanghai)
-Status: release-ready evidence. Native Linux, Windows, and macOS gates,
-exact-payload two-provider replay, checksum-bound archive assembly, and package
-verification all passed.
+Status: compatibility follow-up candidate. Local Linux and MinGW/Wine gates
+pass after the macOS summary-only fix; native CI, exact-payload two-provider
+replay, and checksum-bound assembly remain required.
 
 ## Candidate and method
 
@@ -53,11 +53,10 @@ Request accounting explains the large end-to-end changes:
 Median max RSS was 9208 KiB for v2.1 and 6794 KiB for v3.0 (-26.22%). The
 compatibility-corrected local Nim 2.2.6 Linux binary changed from 1,309,192 to
 1,700,712 bytes (+29.91%); the compatibility rules add 1.61% over the earlier
-v3 candidate. The canonical Nim 2.2.10 Linux payload is 1,833,888 bytes
-(+40.08% versus v2.1), SHA-256
-`00bb41bf74bc0bd6ac3d5c789cba55fafe949e9566d50c57aa64bece24d42ad5`.
-The size tradeoff includes the typed Harness, cache v3, hardened policy,
-bounded executor, compatibility parsers, and TLS work.
+v3 candidate. The final canonical Nim 2.2.10 size and SHA-256 are recorded
+after native CI and exact-payload provider replay. The size tradeoff includes
+the typed Harness, cache v3, hardened policy, bounded executor, compatibility
+parsers, and TLS work.
 
 ## Correctness and stress
 
@@ -67,8 +66,8 @@ bounded executor, compatibility parsers, and TLS work.
 | Linux CLI E2E | 26/26 |
 | Windows CLI E2E under Wine | 25/25 applicable, 1 Linux-only process audit skipped |
 | Offline comprehensive suite | 168 passed, 0 failed, 99 live-only skipped |
-| DeepSeek `deepseek-v4-flash` | Exact native payload 261/261, 0 failed, 0 skipped |
-| DGX Qwen `qwen3.8-27b` | Exact native payload 261/261, 0 failed, 0 skipped |
+| DeepSeek `deepseek-v4-flash` | Follow-up exact native payload replay required |
+| DGX Qwen `qwen3.8-27b` | Follow-up exact native payload replay required |
 | Command deadline | 20/20; median 1055.907 ms, max 1062.723 ms, exit 124 |
 | 100-byte output cap | 50/50 truncated and stopped; no displayed result exceeded 100 bytes |
 | Concurrent cache writers | 192/192 entries preserved (8 waves × 24 writers) |
@@ -78,11 +77,10 @@ The earlier pre-compatibility payload passed 260/260 scenarios independently
 with DeepSeek and DGX Qwen. It is deliberately no longer treated as release
 evidence because the policy and prompt changed. The compatibility-corrected
 suite adds a real platform performance-snapshot scenario, bringing the exact
-payload replay requirement to 261/261 per provider. The local Nim 2.2.6
-candidate passed 261/261 with each provider. The canonical Nim 2.2.10 binary
-identified above was then replayed independently and also passed 261/261 with
-DeepSeek and 261/261 with Qwen. Release CI pins this provider-validated SHA-256
-and fails assembly if a later build is not byte-identical.
+payload replay requirement to 261/261 per provider. The preceding native
+candidate passed 261/261 with DeepSeek and 261/261 with Qwen. Because the
+macOS `top -n 0` policy branch changed afterward, its follow-up native Linux
+payload is replayed again and receives a new pinned SHA-256 before assembly.
 
 The first canonical DeepSeek replay scored 260/261 only because its two valid,
 successful `ps` CPU/memory snapshots did not contain the `top`-specific text
@@ -109,15 +107,15 @@ never executed.
 
 The compatibility-expanded deterministic corpus contains:
 
-- 223 realistic safe commands;
-- 363 targeted mutation/bypass attempts;
+- 224 realistic safe commands;
+- 364 targeted mutation/bypass attempts;
 - 775 generated executable-obfuscation variants;
 - 1,025 generated shell-control combinations;
 - 140 dangerous GNU long-option abbreviations;
 - 31 PowerShell parameter-abbreviation/script-conversion variants;
 - 164 dangerous-word false-positive probes.
 
-Total: 2,721 policy decisions, all matching the expected allow/deny result on
+Total: 2,723 policy decisions, all matching the expected allow/deny result on
 Linux and the Windows build under Wine. The compatibility-specific matrix
 separately verifies bounded Linux and macOS `top`, Windows native performance
 commands, system/hardware reporters, pure AWK selectors, and display-only
@@ -148,28 +146,32 @@ observations may be sent to the configured model provider.
 
 ## Platform and transport validation
 
-- The release-candidate workflow built the exact candidate with Nim 2.2.10.
-  Its Linux amd64, Windows amd64, and macOS arm64 jobs all passed complete
-  unit, HTTPS, CLI, offline, and installer gates. Assembly then verified the
-  provider-bound Linux SHA-256, every payload checksum, version, architecture,
-  runtime file, and archive entry before producing the release artifact.
+- The preceding provider-bound candidate was built with Nim 2.2.10. Its Linux
+  amd64, Windows amd64, and macOS arm64 jobs all passed complete unit, HTTPS,
+  CLI, offline, and installer gates. Assembly then verified the pinned Linux
+  SHA-256 and every package check. The follow-up repeats those native gates
+  before replacing this evidence.
 - Linux x86_64 release build and real HTTPS request passed.
 - A remote macOS 26.5 arm64 smoke on `yymac06` executed the documented
   `top -l 1 -n 3`, `vm_stat`, `sw_vers`, and display-only `sed` forms
-  successfully; the exact release payload subsequently passed native macOS
-  CI, including HTTPS, CLI, and installer checks.
-- Windows x86_64 cross-build starts under Wine; all 2,721 deterministic policy
+  successfully. A later real performance request exposed a safe
+  `top -l 1 -n 0` summary-only revision that the positive-integer parser
+  rejected. The system man page defines `-n` only as the maximum displayed
+  process count, and direct execution returned a complete summary with exit 0.
+  The follow-up accepts 0..200 for macOS `-n`, keeps `-l` at 1..5, rejects
+  negative/oversized counts, and awaits native payload replay.
+- Windows x86_64 cross-build starts under Wine; all 2,723 deterministic policy
   decisions pass, and the Windows-target CLI suite passes 25/25 applicable
   cases (the Linux `/proc` process-tree audit is intentionally skipped).
 - Windows HTTPS imports the native ROOT store into OpenSSL and verifies both
   chain and DNS/IP host name without requiring `cacert.pem`.
-- Native Windows Server and macOS Apple Silicon jobs passed. Wine remains
-  supplementary diagnostic evidence, not a replacement for native Windows
-  testing.
+- Native Windows Server and macOS Apple Silicon jobs remain mandatory for the
+  follow-up payload. Wine is supplementary diagnostic evidence, not a
+  replacement for native Windows testing.
 
 ## Release decision
 
-The exact payload passed native Windows/Linux/macOS release-candidate CI,
-installer smoke tests, package layout/version/checksum verification,
-credential scanning, two-provider replay, and every checklist gate in
-`RELEASE-v3.0.0.md`. It is approved for the `v3.0.0` tag and public release.
+Do not create the tag or public release until the follow-up payload passes
+native Windows/Linux/macOS CI, exact DeepSeek/Qwen replay, installer and
+package verification, credential scanning, and every checklist gate in
+`RELEASE-v3.0.0.md`.

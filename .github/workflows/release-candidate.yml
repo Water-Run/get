@@ -2,6 +2,12 @@ name: Release candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      assemble_release:
+        description: Assemble only after the Linux payload passes provider replay
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -13,6 +19,7 @@ concurrency:
 env:
   NIM_VERSION: 2.2.10
   RELEASE_VERSION: 3.0.0
+  # Refresh only after the no-assembly candidate payload passes both providers.
   PROVIDER_VALIDATED_LINUX_SHA256: 00bb41bf74bc0bd6ac3d5c789cba55fafe949e9566d50c57aa64bece24d42ad5
 
 jobs:
@@ -319,6 +326,7 @@ jobs:
 
   assemble:
     name: Assemble and verify release package
+    if: ${{ inputs.assemble_release }}
     needs: [linux-amd64, windows-amd64, macos-arm64]
     runs-on: ubuntu-22.04
     timeout-minutes: 15

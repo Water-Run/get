@@ -975,7 +975,9 @@ func implValidateTopMac(tokens: seq[string]): bool =
         if not implDecimalAtMost(value, 10):
           return false
       of "-n":
-        if not implPositiveAtMost(value, 200):
+        # macOS top documents -n as an upper bound on displayed processes;
+        # unlike -l, zero is valid and produces a summary-only snapshot.
+        if not implUnsignedAtMost(value, 200):
           return false
       of "-pid":
         if not implUnsignedAtMost(value, 2_147_483_647):
@@ -1011,7 +1013,7 @@ func implValidateTopMac(tokens: seq[string]): bool =
       if not implDecimalAtMost(value, 10):
         return false
     of "-n":
-      if not implPositiveAtMost(value, 200):
+      if not implUnsignedAtMost(value, 200):
         return false
     of "-pid":
       if not implUnsignedAtMost(value, 2_147_483_647):

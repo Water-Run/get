@@ -80,6 +80,7 @@ const SafeCorpus = [
   "top -b -n 5 -d 10 -o %CPU | head -n 20",
   "top --batch-mode --iterations=1 --pid=1,2 --width=120",
   "top --batch-mode --iterations 2 --delay .5 --filter-only-euser root",
+  "top -l 1 -n 0",
   "top -l 1 -n 15 -o cpu",
   "top -l1 -n15 -stats pid,cpu,mem",
   "top -l 5 -s 10 -ncols 160 -pid 0",
@@ -388,6 +389,7 @@ const AttackCorpus = [
   "top -l 1 -i 11",
   "top -l 1 -ncols 513",
   "top -l 1 -pid bad",
+  "top -l 1 -n -1",
   "top -l 1 -n 1000000",
   "top -l 1 -unknown value",
   "sensors -s",
@@ -650,6 +652,8 @@ suite "mandatory read-only command policy":
 
   test "accepts bounded macOS performance diagnostics":
     for command in [
+      "top -l 1 -n 0",
+      "top -l1 -n0",
       "top -l 1 -n 15 -o cpu",
       "vm_stat",
       "sysctl hw.memsize",
@@ -680,6 +684,7 @@ suite "mandatory read-only command policy":
     for command in [
       "top",
       "top -bn6",
+      "top -l 1 -n -1",
       "sensors -s",
       "sed -i 's/a/b/' file",
       "sed '1w result.txt' file",

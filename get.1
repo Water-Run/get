@@ -338,7 +338,7 @@ Practical bounded diagnostics are supported across platforms: top requires
 use native Get-Process, Get-CimInstance, and tasklist readers. Pure AWK field
 selectors and display-only sed address expressions are accepted. sed in-place
 mode, output commands, external program files, and command execution remain
-denied.
+denied. On macOS, top -n 0 is accepted as a finite summary-only snapshot.
 .PP
 git status and worktree-content git diff are rejected because repository-owned
 clean, textconv, and filter configuration can execute helpers. Use git branch

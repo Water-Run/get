@@ -105,7 +105,8 @@ The mandatory policy parses only simple commands and reader pipelines, then vali
 
 The allowlist includes practical cross-platform inspection, not just trivial
 file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
-and `top -l 1` on macOS; Windows uses native readers such as `Get-Process`,
+and `top -l 1` on macOS (`-n 0` is valid for a summary-only snapshot); Windows
+uses native readers such as `Get-Process`,
 `Get-CimInstance`, and `tasklist`. Common hardware/process reporters and pure
 AWK field selectors are accepted. `sed` is admitted for display-only address
 expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
