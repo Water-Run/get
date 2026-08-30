@@ -11,7 +11,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[json, os, strutils, unittest]
+import std/[json, options, os, strutils, unittest]
 
 import llm
 import utils
@@ -81,6 +81,16 @@ suite "LLM native tools":
     serialRequest.parallelToolCalls = false
     let serialBody = buildLlmRequestBodyForTest(serialRequest)
     check serialBody{"parallel_tool_calls"}.isNil
+    check serialBody{"temperature"}.isNil
+
+    var deterministicRequest = serialRequest
+    deterministicRequest.temperature = some(0.0)
+    let deterministicBody = buildLlmRequestBodyForTest(deterministicRequest)
+    check deterministicBody{"temperature"}.getFloat() == 0.0
+
+    deterministicRequest.temperature = some(2.1)
+    expect LlmApiError:
+      discard buildLlmRequestBodyForTest(deterministicRequest)
 
   test "parses a native tool response with null content":
     let raw = """{

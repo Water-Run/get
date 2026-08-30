@@ -19,6 +19,8 @@ import harness_types
 import llm
 import utils
 
+const MAX_MODEL_FEEDBACK_BYTES = 12 * 1024
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -78,15 +80,26 @@ proc implEmit(options: HarnessRunOptions, event: HarnessEvent) =
 proc implDecodeResponse(response: LlmResponse): HarnessAction =
   if response.toolCalls.len > 0:
     var calls: seq[ToolCall] = @[]
-    try:
-      for nativeCall in response.toolCalls:
+    for nativeCall in response.toolCalls:
+      try:
         calls.add(parseNativeToolCall(
           nativeCall.id,
           nativeCall.name,
           nativeCall.arguments
         ))
-    except ValueError as error:
-      raise newException(HarnessProtocolError, error.msg)
+      except ValueError:
+        # Preserve the provider call ID so the next request can contain the
+        # required matching tool response, but leave the command empty.  The
+        # executor boundary treats this as a rejected protocol proposal and
+        # never sends it to a shell.  This lets a flaky model self-correct
+        # without weakening the only registered tool or aborting a long run.
+        calls.add(ToolCall(
+          id: nativeCall.id,
+          toolName: nativeCall.name,
+          command: "",
+          purpose: "invalid provider tool call",
+          resultMode: trmContinue
+        ))
     return HarnessAction(
       kind: hakToolCalls,
       text: "",
@@ -152,6 +165,20 @@ proc implAppendFeedback(
   response: LlmResponse,
   observations: seq[ToolObservation]
 ) =
+  func compactForModel(observation: ToolObservation): ToolObservation =
+    result = observation
+    if result.output.len <= MAX_MODEL_FEEDBACK_BYTES:
+      return
+    var prefixBytes = MAX_MODEL_FEEDBACK_BYTES
+    while prefixBytes > 0 and prefixBytes < result.output.len and
+        (byte(result.output[prefixBytes]) and 0xC0'u8) == 0x80'u8:
+      prefixBytes -= 1
+    let originalBytes = result.output.len
+    result.output = result.output[0 ..< prefixBytes] &
+      fmt"\n[model feedback compacted: first {prefixBytes} of " &
+      fmt"{originalBytes} bytes]"
+    result.truncated = true
+
   if response.toolCalls.len > 0:
     messages.add(LlmMessage(
       role: "assistant",
@@ -160,9 +187,10 @@ proc implAppendFeedback(
       toolCallsJson: response.toolCallsJson
     ))
     for observation in observations:
+      let feedbackObservation = compactForModel(observation)
       messages.add(LlmMessage(
         role: "tool",
-        content: observationJson(observation),
+        content: observationJson(feedbackObservation),
         toolCallId: observation.callId,
         toolCallsJson: ""
       ))
@@ -175,7 +203,7 @@ proc implAppendFeedback(
     ))
     var values = newJArray()
     for observation in observations:
-      values.add(parseJson(observationJson(observation)))
+      values.add(parseJson(observationJson(compactForModel(observation))))
     messages.add(LlmMessage(
       role: "user",
       content: "Tool observations (JSON): " & $values,
@@ -191,6 +219,30 @@ proc implAppendFeedback(
 proc implFinish(value: HarnessResult, started: MonoTime): HarnessResult =
   result = value
   result.metrics.elapsedMs = implElapsedMs(started)
+
+## Some requests inherently need model interpretation after inspection. Models
+## occasionally mark a raw listing as terminal even for an explicit summary or
+## composition question; this small multilingual intent gate corrects that
+## protocol choice without exposing another tool or changing command policy.
+func implRequestNeedsInterpretation(messages: seq[LlmMessage]): bool =
+  var query = ""
+  for index in countdown(messages.high, 0):
+    if messages[index].role == "user":
+      query = toLowerAscii(messages[index].content)
+      break
+  for marker in [
+    "composition", "breakdown", "summarize", "summary", "compare",
+    "comparison", "whether", "determine if", "identical", "different",
+    "exists", "existence", "missing", "absent",
+    "explain", "analyze", "analyse", "status",
+    "clearly say", "as evidence", "interpret the exit", "explicit answer",
+    "weather", "forecast", "天气", "天氣", "天気", "날씨",
+    "组成", "构成", "汇总", "总结", "概览", "分析", "解释", "说明",
+    "比较", "对比", "情况", "状态", "是否", "有没有", "存在", "相同",
+    "一致", "缺失", "不存在", "内訳", "要約", "요약", "구성", "분석"
+  ]:
+    if query.contains(marker):
+      return true
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -235,6 +287,8 @@ proc runHarness*(
 
   let started = getMonoTime()
   var messages = initialMessages
+  let requestNeedsInterpretation =
+    implRequestNeedsInterpretation(initialMessages)
   var observations: seq[ToolObservation] = @[]
   var metrics = RunMetrics(
     modelTurns: 0,
@@ -274,7 +328,49 @@ proc runHarness*(
       elapsedMs: implElapsedMs(started)
     ))
 
-    let action = implDecodeResponse(response)
+    var action: HarnessAction
+    try:
+      action = implDecodeResponse(response)
+    except HarnessProtocolError:
+      # A malformed textual action cannot be associated with a native tool
+      # response, but it is also inert: no executor has seen it.  Auto/loop/
+      # parallel runs use one remaining bounded model turn to repair the wire
+      # format instead of failing an otherwise healthy long-running task.
+      # Direct mode remains exactly one turn and therefore fails immediately.
+      if options.kind == hkDirect or turn >= options.budget.maxTurns:
+        raise
+      const MAX_INVALID_ACTION_CONTEXT = 4096
+      var invalidText = response.content
+      if invalidText.len > MAX_INVALID_ACTION_CONTEXT:
+        var prefixBytes = MAX_INVALID_ACTION_CONTEXT
+        while prefixBytes > 0 and prefixBytes < invalidText.len and
+            (byte(invalidText[prefixBytes]) and 0xC0'u8) == 0x80'u8:
+          prefixBytes -= 1
+        invalidText = invalidText[0 ..< prefixBytes] &
+          "\n[invalid action text compacted]"
+      messages.add(LlmMessage(
+        role: "assistant",
+        content: invalidText,
+        toolCallId: "",
+        toolCallsJson: ""
+      ))
+      messages.add(LlmMessage(
+        role: "user",
+        content: "Protocol correction: the previous textual action was " &
+          "invalid and nothing was executed. Return exactly one valid action " &
+          "using the declared read-only tool, or strict JSON with type " &
+          "answer/refuse/tool_calls. Do not include Markdown or commentary.",
+        toolCallId: "",
+        toolCallsJson: ""
+      ))
+      implEmit(options, HarnessEvent(
+        kind: hekActionProposed,
+        turn: turn,
+        callId: "",
+        message: "invalid textual action; requesting protocol correction",
+        elapsedMs: implElapsedMs(started)
+      ))
+      continue
     implEmit(options, HarnessEvent(
       kind: hekActionProposed,
       turn: turn,
@@ -374,6 +470,14 @@ proc runHarness*(
       if batch.len != action.calls.len:
         raise newException(GetError,
           "tool executor returned an incomplete observation batch")
+      for index, observation in batch:
+        let call = action.calls[index]
+        if observation.callId != call.id or
+            observation.toolName != call.toolName or
+            observation.command != call.command:
+          raise newException(GetError,
+            "tool executor returned an observation that does not match " &
+              "its proposed call")
       metrics.toolCalls += action.calls.len
       for observation in batch:
         observations.add(observation)
@@ -389,12 +493,17 @@ proc runHarness*(
       for call in action.calls:
         if call.resultMode == trmContinue:
           needsContinuation = true
-      # Auto/loop/parallel strategies may recover from a policy false positive
-      # or an over-capable model proposal. The denied command was never run,
-      # and every replacement still passes through the same policy callback.
+      if options.kind != hkDirect and requestNeedsInterpretation:
+        needsContinuation = true
+      # Auto/loop/parallel strategies recover from policy false positives and
+      # ordinary finite reader failures (no matches, missing files/tools).
+      # A hard timeout or output cap is returned immediately when the model
+      # requested raw output: automatically repeating a resource-limit breach
+      # would turn one bounded command into maxTurns expensive attempts.
       if options.kind != hkDirect:
         for observation in batch:
-          if observation.policyRejected:
+          if observation.policyRejected or (observation.exitCode != 0 and
+              not observation.timedOut and not observation.truncated):
             needsContinuation = true
       if options.kind == hkDirect:
         needsContinuation = false

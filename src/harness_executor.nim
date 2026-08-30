@@ -86,7 +86,8 @@ proc implExecuteOne(
     call.command,
     shell,
     budget.commandTimeoutSec,
-    budget.maxOutputBytes
+    budget.maxOutputBytes,
+    readOnlySandbox = true
   )
   result = implObservation(call, value)
 

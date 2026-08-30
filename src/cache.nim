@@ -13,11 +13,15 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[algorithm, json, monotimes, options, os, strformat,
-            strutils, tables, times]
+import std/[algorithm, json, options, os, strformat, strutils, tables, times]
+
+when not defined(windows):
+  import std/monotimes
 
 when defined(posix):
   import std/posix
+elif defined(windows):
+  import std/[widestrs, winlean]
 
 import checksums/sha2
 
@@ -31,6 +35,11 @@ import utils
 ## On-disk cache schema. Older hashes are intentionally invalidated by SHA-256.
 const CACHE_SCHEMA_VERSION* = 3
 
+## Semantic identity of the built-in Harness, prompt, protocol, and mandatory
+## read-only policy. Bump this when a behavior change could make a cached result
+## or command incompatible even though the JSON schema itself remains v3.
+const CACHE_IDENTITY_REVISION* = "get-v3.0.1-harness-policy-20260830"
+
 ## Hard input bound protecting startup from an unexpectedly large cache file.
 const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024
 
@@ -40,9 +49,25 @@ const MAX_CACHE_COMMAND_CHARS* = 32_768
 const MAX_CACHE_OUTPUT_BYTES* = 4 * 1024 * 1024
 
 ## Cross-process writer lock behavior.
-const CACHE_LOCK_WAIT_MS = 2_000
-const CACHE_LOCK_POLL_MS = 10
-const CACHE_STALE_LOCK_SECONDS = 30
+const CACHE_LOCK_WAIT_MS = 10_000
+when not defined(windows):
+  const CACHE_LOCK_POLL_MS = 10
+  const CACHE_STALE_LOCK_SECONDS = 120
+
+when defined(windows):
+  ## ``winlean`` intentionally exposes only the small Win32 surface needed by
+  ## Nim's runtime.  Cache persistence additionally needs a crash-safe named
+  ## mutex so independent CLI processes cannot lose a read-modify-write.
+  const WAIT_ABANDONED = 0x00000080'i32
+
+  proc createMutexW(
+    attributes: pointer,
+    initialOwner: WINBOOL,
+    name: WideCString
+  ): Handle {.stdcall, dynlib: "kernel32", importc: "CreateMutexW".}
+
+  proc releaseMutex(handle: Handle): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "ReleaseMutex".}
 
 ## Timestamps farther into the future are treated as malformed.
 const MAX_CACHE_CLOCK_SKEW_SECONDS = 86_400'i64
@@ -54,6 +79,12 @@ const MAX_CACHE_CLOCK_SKEW_SECONDS = 86_400'i64
 ## Raised when a cache write cannot be completed safely.
 type
   CacheError* = object of GetError
+
+  CacheLock = object
+    when defined(windows):
+      handle: Handle
+    else:
+      path: string
 
 ## Whether a cache entry applies globally or to one working directory.
 type
@@ -238,12 +269,12 @@ proc computeGlobalHashV3*(
     if systemPrompt.isSome: systemPrompt.get
     else: ""
   let filterPattern =
-    if commandPattern.isSome:
+    if commandPattern.isSome and commandPattern.get.len > 0:
       "custom:" & commandPattern.get
     else:
-      "built-in:" & DEFAULT_COMMAND_PATTERN
+      "semantic-policy-only"
   result = implSha256($(%*[
-    "get-v3",
+    CACHE_IDENTITY_REVISION,
     query.strip(),
     shell,
     model,
@@ -323,6 +354,24 @@ proc implDecodeCache(content: string): CacheStore =
       "cache root must be a JSON object")
   result = CacheStore(entries: implNormalizeEntries(parsed))
 
+proc implReadFileBounded(path: string, maximumBytes: int): string =
+  var file: File
+  if not open(file, path, fmRead):
+    raise newException(CacheError, "cannot open cache snapshot")
+  try:
+    var buffer: array[8192, char]
+    while true:
+      let count = file.readBuffer(addr buffer[0], buffer.len)
+      if count <= 0:
+        break
+      if result.len > maximumBytes - count:
+        raise newException(CacheError, "cache snapshot exceeds the hard limit")
+      let previousLength = result.len
+      result.setLen(previousLength + count)
+      copyMem(addr result[previousLength], addr buffer[0], count)
+  finally:
+    file.close()
+
 proc implTryLoadPath(path: string): Option[CacheStore] =
   if not fileExists(path):
     return none(CacheStore)
@@ -330,13 +379,14 @@ proc implTryLoadPath(path: string): Option[CacheStore] =
     let size = getFileSize(path)
     if size < 0 or size > MAX_CACHE_FILE_BYTES:
       return none(CacheStore)
-    result = some(implDecodeCache(readFile(path)))
+    result = some(implDecodeCache(
+      implReadFileBounded(path, MAX_CACHE_FILE_BYTES)))
   except CatchableError:
     result = none(CacheStore)
 
-## Loads the primary cache, transparently falling back to the last-good copy.
-proc loadCache*(): CacheStore =
-  let path = getCacheFilePath()
+## Loads one cache snapshot without acquiring the writer mutex. Callers that
+## do not already hold the mutex must use ``loadCache`` instead.
+proc implLoadCacheUnlocked(path: string): CacheStore =
   let primary = implTryLoadPath(path)
   if primary.isSome:
     return primary.get
@@ -349,34 +399,76 @@ proc loadCache*(): CacheStore =
 # Private helpers — lock and atomic persistence
 # ---------------------------------------------------------------------------
 
-proc implAcquireCacheLock(path: string): string =
-  result = path & ".lock"
-  let started = getMonoTime()
-  while true:
-    try:
-      if not existsOrCreateDir(result):
-        return
+proc implAcquireCacheLock(path: string): CacheLock =
+  when defined(windows):
+    # Directory creation is not a reliable cross-process mutex on every
+    # Windows-compatible runtime (notably Wine under heavy contention).  A
+    # named kernel mutex is atomic, releases automatically after a crash, and
+    # makes a successful cache write mean that its update was actually merged.
+    let mutexName = "Local\\get-cache-v3-" &
+      implSha256(toLowerAscii(path))
+    let handle = createMutexW(nil, 0'i32, newWideCString(mutexName))
+    if handle == 0:
+      raise newException(CacheError,
+        "cannot create the cache writer mutex")
+    let waitResult = waitForSingleObject(handle, CACHE_LOCK_WAIT_MS.int32)
+    if waitResult notin [WAIT_OBJECT_0, WAIT_ABANDONED]:
+      discard closeHandle(handle)
+      if waitResult == WAIT_TIMEOUT:
+        raise newException(CacheError,
+          "cache is busy; retry the operation")
+      raise newException(CacheError,
+        "cannot acquire the cache writer mutex")
+    result = CacheLock(handle: handle)
+  else:
+    result.path = path & ".lock"
+    let started = getMonoTime()
+    while true:
       try:
-        let age = epochTime().int64 -
-          getLastModificationTime(result).toUnix
-        if age > CACHE_STALE_LOCK_SECONDS:
-          removeDir(result)
-          continue
+        if not existsOrCreateDir(result.path):
+          return
+        try:
+          let age = epochTime().int64 -
+            getLastModificationTime(result.path).toUnix
+          if age > CACHE_STALE_LOCK_SECONDS:
+            removeDir(result.path)
+            continue
+        except OSError, IOError:
+          discard
       except OSError, IOError:
         discard
+      if (getMonoTime() - started).inMilliseconds >=
+          CACHE_LOCK_WAIT_MS:
+        raise newException(CacheError,
+          "cache is busy; retry the operation")
+      sleep(CACHE_LOCK_POLL_MS)
+
+proc implReleaseCacheLock(lock: CacheLock) =
+  when defined(windows):
+    if lock.handle != 0:
+      discard releaseMutex(lock.handle)
+      discard closeHandle(lock.handle)
+  else:
+    try:
+      removeDir(lock.path)
     except OSError, IOError:
       discard
-    if (getMonoTime() - started).inMilliseconds >=
-        CACHE_LOCK_WAIT_MS:
-      raise newException(CacheError,
-        "cache is busy; retry the operation")
-    sleep(CACHE_LOCK_POLL_MS)
 
-proc implReleaseCacheLock(lockPath: string) =
-  try:
-    removeDir(lockPath)
-  except OSError, IOError:
-    discard
+## Loads the primary cache, transparently falling back to the last-good copy.
+proc loadCache*(): CacheStore =
+  let path = getCacheFilePath()
+  when defined(windows):
+    # Windows does not permit replacing a file while another process has it
+    # open without delete sharing.  Readers therefore join the same short
+    # critical section as atomic replacement; writers call the unlocked helper
+    # below after they have already acquired this mutex.
+    let lock = implAcquireCacheLock(path)
+    try:
+      result = implLoadCacheUnlocked(path)
+    finally:
+      implReleaseCacheLock(lock)
+  else:
+    result = implLoadCacheUnlocked(path)
 
 proc implEncodeCache(store: CacheStore): string =
   var entries = implNormalizeEntries(store.entries)
@@ -412,6 +504,15 @@ proc implWriteFileDurable(path: string, content: string) =
     file.flushFile()
     when defined(posix):
       if posix.fsync(getFileHandle(file).cint) != 0:
+        raise newException(CacheError,
+          "cannot flush temporary cache file")
+    elif defined(windows):
+      # ``getFileHandle(File)`` is a Microsoft CRT descriptor, not a Win32
+      # HANDLE. Convert it exactly as Nim's own Windows filesystem routines do
+      # before asking the kernel to flush durable storage.
+      let nativeHandle = get_osfhandle(getFileHandle(file).cint)
+      if nativeHandle == INVALID_HANDLE_VALUE or
+          flushFileBuffers(nativeHandle) == 0:
         raise newException(CacheError,
           "cannot flush temporary cache file")
   finally:
@@ -452,11 +553,11 @@ proc implSaveCacheUnlocked(store: CacheStore, path: string) =
 ## Atomically persists a complete cache snapshot under the writer lock.
 proc saveCache*(store: CacheStore) =
   let path = getCacheFilePath()
-  let lockPath = implAcquireCacheLock(path)
+  let lock = implAcquireCacheLock(path)
   try:
     implSaveCacheUnlocked(store, path)
   finally:
-    implReleaseCacheLock(lockPath)
+    implReleaseCacheLock(lock)
 
 # ---------------------------------------------------------------------------
 # Public API — lookup and mutation
@@ -537,13 +638,13 @@ proc putCacheEntry*(
   expiryDays: int
 ) =
   let path = getCacheFilePath()
-  let lockPath = implAcquireCacheLock(path)
+  let lock = implAcquireCacheLock(path)
   try:
-    var store = loadCache()
+    var store = implLoadCacheUnlocked(path)
     addCacheEntry(store, entry, maxEntries, expiryDays)
     implSaveCacheUnlocked(store, path)
   finally:
-    implReleaseCacheLock(lockPath)
+    implReleaseCacheLock(lock)
 
 ## Removes all identities whose normalized query matches the given text.
 proc unsetCacheEntries*(
@@ -566,24 +667,24 @@ proc unsetCacheEntries*(
 ## Atomically removes every cache entry.
 proc cleanCache*(): int =
   let path = getCacheFilePath()
-  let lockPath = implAcquireCacheLock(path)
+  let lock = implAcquireCacheLock(path)
   try:
-    let store = loadCache()
+    let store = implLoadCacheUnlocked(path)
     result = store.entries.len
     implSaveCacheUnlocked(CacheStore(entries: @[]), path)
   finally:
-    implReleaseCacheLock(lockPath)
+    implReleaseCacheLock(lock)
 
 ## Atomically removes cache entries matching a query.
 proc unsetCache*(query: string): int =
   let path = getCacheFilePath()
-  let lockPath = implAcquireCacheLock(path)
+  let lock = implAcquireCacheLock(path)
   try:
-    var store = loadCache()
+    var store = implLoadCacheUnlocked(path)
     result = unsetCacheEntries(store, query)
     implSaveCacheUnlocked(store, path)
   finally:
-    implReleaseCacheLock(lockPath)
+    implReleaseCacheLock(lock)
 
 ## Prints live, expiry-aware cache statistics.
 proc displayCacheInfo*(

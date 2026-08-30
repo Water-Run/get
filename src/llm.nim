@@ -20,8 +20,8 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[asyncdispatch, asyncstreams, httpclient, json, monotimes, net, os,
-            strformat, strutils, times, uri]
+import std/[asyncdispatch, asyncstreams, httpclient, json, monotimes, net,
+            options, os, strformat, strutils, times, uri]
 
 when defined(windows):
   import std/osproc
@@ -80,6 +80,7 @@ type
     model*: string                       ## Model identifier.
     messages*: seq[LlmMessage]           ## Conversation messages.
     maxTokens*: int                      ## Max tokens (0 = omit).
+    temperature*: Option[float]          ## Sampling temperature (none = omit).
     tools*: seq[LlmToolDefinition]       ## Available native function tools.
     parallelToolCalls*: bool             ## Allow multiple calls in one turn.
 
@@ -358,6 +359,12 @@ proc implBuildRequestBody(
   }
   if req.maxTokens > 0:
     result["max_tokens"] = %req.maxTokens
+  if req.temperature.isSome:
+    let temperature = req.temperature.get
+    if temperature != temperature or temperature < 0.0 or temperature > 2.0:
+      raise newException(LlmApiError,
+        "temperature must be between 0 and 2")
+    result["temperature"] = %temperature
   if req.tools.len > 0:
     var toolsNode = newJArray()
     for tool in req.tools:

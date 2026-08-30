@@ -12,7 +12,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[options, unittest]
+import std/[options, strutils, unittest]
 
 import harness_protocol
 import harness_types
@@ -172,6 +172,33 @@ suite "harness action protocol":
   test "rejects a bare legacy protocol marker":
     expect ValueError:
       discard decodeTextAction("<!-- INTERPRET -->")
+
+  test "adds precise model hints for silent finite readers":
+    let identical = observationJson(ToolObservation(
+      callId: "cmp-1",
+      toolName: READ_ONLY_SHELL_TOOL,
+      command: "cmp -s ./a ./b",
+      output: "",
+      exitCode: 0,
+      elapsedMs: 1,
+      timedOut: false,
+      truncated: false,
+      policyRejected: false
+    ))
+    check identical.contains("cmp exit 0 means the compared inputs are identical")
+
+    let noMatch = observationJson(ToolObservation(
+      callId: "grep-1",
+      toolName: READ_ONLY_SHELL_TOOL,
+      command: "/usr/bin/grep needle ./file",
+      output: "",
+      exitCode: 1,
+      elapsedMs: 1,
+      timedOut: false,
+      truncated: false,
+      policyRejected: false
+    ))
+    check noMatch.contains("Exit 1 means no lines matched")
 
 ## Verifies stable harness configuration parsing and budgets.
 suite "harness kinds and budgets":

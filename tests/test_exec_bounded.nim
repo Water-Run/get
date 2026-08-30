@@ -28,16 +28,27 @@ suite "bounded command execution":
       @["/D", "/Q", "/V:OFF", "/C", "ver"]
     check shellArgsForTest("powershell", "Get-Location")[0 .. 1] ==
       @["-NoProfile", "-NonInteractive"]
+    let powerShellCommand =
+      shellArgsForTest("powershell", "Get-Location")[3]
+    check "$PSHOME" in powerShellCommand
+    check "SystemDirectory" in powerShellCommand
+    check "Documents" notin powerShellCommand
 
   test "sanitizes executable child environment":
     let blockedNames = [
       "BASH_ENV", "SHELLOPTS", "PS4", "LD_LIBRARY_PATH",
-      "RIPGREP_CONFIG_PATH", "TAR_OPTIONS", "JAVA_TOOL_OPTIONS",
+      "RIPGREP_CONFIG_PATH", "TAR_OPTIONS", "TAPE", "JAVA_TOOL_OPTIONS",
       "OPENSSL_CONF", "GIT_TRACE", "PSMODULEPATH", "KUBECONFIG",
       "KUBE_EXTERNAL_DIFF", "DOCKER_CONFIG", "CORECLR_ENABLE_PROFILING",
       "MAKEFILES", "PIP_CONFIG_FILE", "NPM_CONFIG_SCRIPT_SHELL",
       "CARGO_HOME", "RUSTUP_HOME", "NIM_CONFIG_DIR", "NIMBLE_DIR",
-      "GOFLAGS", "HOMEBREW_CACHE", "IFS", "UNZIPOPT"
+      "GOFLAGS", "HOMEBREW_CACHE", "IFS", "UNZIPOPT", "PS_PERSONALITY",
+      "DEVELOPER_DIR", "SWIFT_EXEC", "XCODE_XCCONFIG_FILE",
+      "BASH_FUNC_uname%%", "GCONV_PATH", "GLIBC_TUNABLES",
+      "GIO_EXTRA_MODULES", "GTK_MODULES", "QT_PLUGIN_PATH",
+      "OCL_ICD_VENDORS", "LIBGL_DRIVERS_PATH", "VK_ICD_FILENAMES",
+      "CUDA_INJECTION64_PATH", "LUA_INIT", "LUA_INIT_5_4",
+      "SYSTEMD_GENERATOR_PATH", "SYSTEMD_ENVIRONMENT_GENERATOR_PATH"
     ]
     var previous: seq[tuple[name: string, existed: bool, value: string]] = @[]
     for name in blockedNames:
@@ -48,6 +59,7 @@ suite "bounded command execution":
         check childEnvironmentValueForTest(name) == ""
       check childEnvironmentValueForTest("PAGER") == "cat"
       check childEnvironmentValueForTest("GIT_OPTIONAL_LOCKS") == "0"
+      check childEnvironmentValueForTest("GIT_NO_LAZY_FETCH") == "1"
       check childEnvironmentValueForTest("GIT_CONFIG_COUNT") == "3"
       check childEnvironmentValueForTest("GIT_CONFIG_KEY_0") ==
         "core.fsmonitor"
@@ -60,15 +72,31 @@ suite "bounded command execution":
       when defined(posix):
         let pathExisted = existsEnv("PATH")
         let oldPath = getEnv("PATH", "")
-        putEnv("PATH", ".::relative:/usr/bin:/tmp/tools")
+        putEnv("PATH", ".::relative:/usr/bin:/tmp/tools:" & getCurrentDir())
         try:
-          check childEnvironmentValueForTest("PATH") ==
-            "/usr/bin" & $PathSep & "/tmp/tools"
+          let childPath = childEnvironmentValueForTest("PATH").split(PathSep)
+          check childPath.len > 0
+          check childPath[0] == "/usr/bin"
+          check "/tmp/tools" notin childPath
+          check getCurrentDir() notin childPath
+          check "." notin childPath
+          check "relative" notin childPath
         finally:
           if pathExisted:
             putEnv("PATH", oldPath)
           else:
             delEnv("PATH")
+        let homeExisted = existsEnv("HOME")
+        let oldHome = getEnv("HOME", "")
+        putEnv("HOME", "relative --output /tmp/marker")
+        try:
+          check childEnvironmentValueForTest("HOME") == "/"
+          check childEnvironmentValueForTest("PWD") == getCurrentDir()
+        finally:
+          if homeExisted:
+            putEnv("HOME", oldHome)
+          else:
+            delEnv("HOME")
     finally:
       for item in previous:
         if item.existed:
@@ -77,6 +105,40 @@ suite "bounded command execution":
           delEnv(item.name)
 
   when defined(posix):
+    test "does not resolve the shell or reader from an untrusted PATH":
+      let root = getTempDir() /
+        ("get-v3-path-shadow-" & $getCurrentProcessId())
+      createDir(root)
+      let fakeShell = root / "bash"
+      let fakeReader = root / "uname"
+      let marker = root / "executed"
+      writeFile(fakeShell,
+        "#!/bin/sh\nprintf shell > '" & marker & "'\n")
+      writeFile(fakeReader,
+        "#!/bin/sh\nprintf reader > '" & marker & "'\n")
+      for executable in [fakeShell, fakeReader]:
+        setFilePermissions(executable, {
+          fpUserRead, fpUserWrite, fpUserExec
+        })
+      let previousPath = getEnv("PATH", "")
+      putEnv("PATH", root & $PathSep & previousPath)
+      try:
+        let value = executeCommandBounded(
+          "uname -s", "bash", 2, 1024)
+        check value.exitCode == 0
+        check value.output.strip() notin ["shell", "reader"]
+        check not fileExists(marker)
+      finally:
+        putEnv("PATH", previousPath)
+        if fileExists(marker):
+          removeFile(marker)
+        if fileExists(fakeShell):
+          removeFile(fakeShell)
+        if fileExists(fakeReader):
+          removeFile(fakeReader)
+        if dirExists(root):
+          removeDir(root)
+
     test "does not execute a BASH_ENV startup payload":
       let root = getTempDir() /
         ("get-v3-bash-env-" & $getCurrentProcessId())
@@ -101,6 +163,32 @@ suite "bounded command execution":
           delEnv("BASH_ENV")
         if fileExists(startup):
           removeFile(startup)
+        if fileExists(marker):
+          removeFile(marker)
+        if dirExists(root):
+          removeDir(root)
+
+    test "does not import an exported Bash function over a reader name":
+      let root = getTempDir() /
+        ("get-v3-bash-function-" & $getCurrentProcessId())
+      createDir(root)
+      let marker = root / "executed"
+      let variable = "BASH_FUNC_uname%%"
+      let existed = existsEnv(variable)
+      let previous = getEnv(variable, "")
+      putEnv(variable,
+        "() { printf injected > '" & marker & "'; }")
+      try:
+        let value = executeCommandBounded(
+          "uname -s", "bash", 2, 1024)
+        check value.exitCode == 0
+        check value.output.strip().len > 0
+        check not fileExists(marker)
+      finally:
+        if existed:
+          putEnv(variable, previous)
+        else:
+          delEnv(variable)
         if fileExists(marker):
           removeFile(marker)
         if dirExists(root):
@@ -230,6 +318,45 @@ suite "bounded command execution":
       check not value.timedOut
       check not value.truncated
 
+    test "native read-only sandbox preserves reads and blocks file writes":
+      let readValue = executeCommandBounded(
+        "printf 'sandbox-ready'", "bash", 2, 1024,
+        readOnlySandbox = true)
+      check readValue.output == "sandbox-ready"
+      check readValue.exitCode == 0
+
+      if readOnlySandboxAvailableForTest():
+        let root = getTempDir() /
+          ("get-v3-readonly-sandbox-" & $getCurrentProcessId())
+        createDir(root)
+        let marker = root / "unexpected-write"
+        try:
+          let writeValue = executeCommandBounded(
+            "touch '" & marker & "'", "bash", 2, 4096,
+            readOnlySandbox = true)
+          check writeValue.exitCode != 0
+          check not fileExists(marker)
+          check writeValue.output.toLowerAscii().contains("read-only") or
+            writeValue.output.toLowerAscii().contains("operation not permitted")
+          let nullValue = executeCommandBounded(
+            "printf ignored >/dev/null", "bash", 2, 1024,
+            readOnlySandbox = true)
+          check nullValue.exitCode == 0
+        finally:
+          if fileExists(marker):
+            removeFile(marker)
+          if dirExists(root):
+            removeDir(root)
+
+    when defined(macosx):
+      test "macOS launchctl compatibility preserves the service table":
+        let value = executeCommandBounded(
+          "launchctl list | head -n 5", "zsh", 3, 16_384,
+          readOnlySandbox = true)
+        check value.exitCode == 0
+        check value.output.contains("PID")
+        check value.output.contains("Label")
+
     test "caps captured output":
       let value = executeCommandBounded(
         "printf '1234567890'", "bash", 2, 5)
@@ -244,6 +371,17 @@ suite "bounded command execution":
       check value.elapsedMs >= 900
       check value.elapsedMs < 1800
       check value.exitCode != 0
+
+    when defined(linux):
+      test "native sandbox preserves the command deadline":
+        if readOnlySandboxAvailableForTest():
+          let value = executeCommandBounded(
+            "sleep 10", "bash", 1, 1024,
+            readOnlySandbox = true)
+          check value.timedOut
+          check value.elapsedMs >= 900
+          check value.elapsedMs < 1800
+          check value.exitCode != 0
 
     test "keeps output produced before the deadline":
       let value = executeCommandBounded(

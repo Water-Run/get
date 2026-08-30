@@ -16,8 +16,8 @@
 ## Semantic colourisation (vivid mode only) highlights
 ## configuration values according to their meaning: booleans use
 ## a consistent green/grey pair, the API-key placeholder is
-## dimmed, the default command-pattern regex is dimmed while its
-## ``(default: built-in)`` marker is highlighted, a custom or
+## dimmed, the default command-pattern status is dimmed while its
+## ``(default)`` marker is highlighted, a custom or
 ## changed pattern is shown in emphatic red, and recognised
 ## values (known shells, strong models, in-range integers) are
 ## green while questionable ones are amber.
@@ -467,7 +467,7 @@ proc styleKeyValue*(
 ## Writes a key-value pair to stdout with semantic colouring of
 ## the value in vivid mode.  The value may be split into a main
 ## segment and an optional trailing segment that is highlighted
-## separately (used for the ``(default: built-in)`` marker on
+## separately (used for the ``(default)`` marker on
 ## the command-pattern value).
 ##
 ## :param kind: The active output style.

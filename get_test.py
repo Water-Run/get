@@ -9,7 +9,7 @@ Sections cover configuration, safety, cache, and live harness behavior.
     B  boolean_options    -- 7 booleans x {true,false,default}
     C  integer_options    -- disableable values plus hard Harness limits
     D  string_options     -- url / model / system-prompt set/clear/reset
-    E  command_pattern    -- default / disabled / custom / dangerous / reset
+    E  command_pattern    -- semantic-only / custom / dangerous / reset
     F  key_and_config     -- key set/clear isolation, config --reset, fields
     G  invalid_inputs     -- malformed CLI arguments, missing values, types
     H  cache_log_mgmt     -- clean/display/unset for cache and log stores
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import getpass
+import hashlib
 import os
 import platform
 import re
@@ -413,10 +414,10 @@ class ConfigManager:
             if k == "key":
                 continue       # not restorable (encrypted write-only store)
             if k == "command-pattern":
-                if "built-in" in v:
-                    self.clear("command-pattern")
-                elif "disabled" in v.lower() or v == "":
+                if "supplemental regex cleared" in v.lower() or v == "":
                     self.set("command-pattern", "")
+                elif "semantic policy only" in v.lower() or "built-in" in v:
+                    self.clear("command-pattern")
                 else:
                     self.set("command-pattern", v)
                 continue
@@ -838,22 +839,21 @@ def section_command_pattern(stats: Stats) -> None:
     cm = ConfigManager()
     prev = get_config_field("command-pattern")
 
-    # E-1 built-in default when value omitted
+    # E-1 semantic-policy-only default when value omitted
     cm.clear("command-pattern")
     v = get_config_field("command-pattern")
-    ok_builtin = "built-in" in v.lower() and ("\\b" in v or r"\b" in v)
-    if ok_builtin:
-        stats.pass_("E01 command-pattern default = built-in regex")
+    if "semantic policy only" in v.lower() and "default" in v.lower():
+        stats.pass_("E01 command-pattern default = semantic policy only")
     else:
         stats.fail("E01 command-pattern default", f"got={v!r}")
 
-    # E-2 disabled when empty string
+    # E-2 clearing an added regex keeps the mandatory semantic policy
     cm.set("command-pattern", "")
     v = get_config_field("command-pattern")
-    if "disabled" in v.lower():
-        stats.pass_("E02 command-pattern \"\" => disabled")
+    if "semantic policy only" in v.lower() and "cleared" in v.lower():
+        stats.pass_("E02 command-pattern \"\" => supplemental regex cleared")
     else:
-        stats.fail("E02 command-pattern disabled", f"got={v!r}")
+        stats.fail("E02 command-pattern clear", f"got={v!r}")
 
     # E-3 custom pattern roundtrip
     cm.set("command-pattern", r"\bmydanger\b")
@@ -882,9 +882,9 @@ def section_command_pattern(stats: Stats) -> None:
         stats.fail("E06 malformed pattern crash", f"exit={r.returncode}")
 
     # restore
-    if "built-in" in prev.lower():
+    if "semantic policy only" in prev.lower():
         cm.clear("command-pattern")
-    elif "disabled" in prev.lower():
+    elif "cleared" in prev.lower():
         cm.set("command-pattern", "")
     else:
         # best-effort: strip tags if the "value" shown includes decoration
@@ -1428,6 +1428,8 @@ def _harness_query_table(scratch: Path
                          ) -> List[Tuple[str, str,
                                          Callable[[str], bool], str]]:
     f = FACTS
+    alpha_digest = hashlib.sha256(
+        (scratch / "alpha.txt").read_bytes()).hexdigest()
     cases = [
         ("uname",
          "Use exactly the read-only command `uname -s` and return its output.",
@@ -1479,9 +1481,59 @@ def _harness_query_table(scratch: Path
          "include the version number in the reply.",
          lambda o: f.py_major_minor in o or f.py_major in o,
          "Harness invokes `python3 --version`"),
+        ("direct_file_count",
+         f"Count regular files directly inside '{scratch}' (do not recurse). "
+         "Use a bounded read-only find/wc pipeline and return the count.",
+         lambda o: re.search(r"\b7\b", o) is not None,
+         "seven deterministic direct child files"),
+        ("extension_composition",
+         f"Summarize the code/file extensions directly inside '{scratch}'. "
+         "Use only read-only stdout transforms; never use find -exec. Include "
+         "the txt, nim, py, and md extension counts.",
+         lambda o: all(part in o.lower() for part in ("txt", "nim", "py", "md")),
+         "mixed extension inventory without an AWK program"),
+        ("no_match_recovery",
+         f"Search '{scratch}' recursively for the literal marker "
+         "ZZZ_GET_NO_MATCH_9F31. If grep finds no match, treat exit 1 as "
+         "evidence and clearly say that no match exists.",
+         lambda o: any(part in o.lower() for part in
+                       ("no match", "not found", "none", "no occurrence",
+                        "no files", "no result")),
+         "ordinary grep exit 1 is interpreted, not surfaced as a crash"),
+        ("missing_path_recovery",
+         f"Check whether '{scratch / 'definitely-missing-31.txt'}' exists using "
+         "a simple read-only file/listing command. Treat a nonzero reader exit "
+         "as evidence and answer no if it is absent.",
+         lambda o: re.search(r"\b(no|absent|missing|not found|does not exist)\b",
+                             o, re.IGNORECASE) is not None,
+         "missing-file reader failure becomes a useful answer"),
+        ("sha256",
+         f"Compute the SHA-256 of '{scratch / 'alpha.txt'}' with a read-only "
+         "checksum command and return the digest.",
+         lambda o: alpha_digest in o.lower(),
+         "matches hashlib ground truth"),
+        ("identical_compare",
+         f"Use cmp to determine whether '{scratch / 'alpha.txt'}' is identical "
+         "to itself. Produce an explicit identical/different answer with a "
+         "small fully read-only &&/|| command sequence.",
+         lambda o: "identical" in o.lower() or "same" in o.lower(),
+         "safe compound readers produce a semantic answer"),
+        ("nested_marker",
+         f"Recursively search regular files below '{scratch / 'subdir'}' for "
+         "the exact literal inside-subdir-content with a read-only grep. "
+         "Return the matching content line, not only its filename.",
+         lambda o: "inside-subdir-content" in o,
+         "bounded recursive content discovery"),
+        ("file_type",
+         f"Inspect the file type of '{scratch / 'sample.py'}' with the file "
+         "command and include its text/script classification.",
+         lambda o: "text" in o.lower() or "script" in o.lower()
+         or "python" in o.lower(),
+         "file metadata inspection"),
     ]
     if f.platform_name == "linux":
-        cases.append((
+        cases.extend([
+          (
             "performance_snapshot",
             "Report a one-shot system performance snapshot using a bounded "
             "read-only command. Prefer `top -bn1 | head -n 15`; an equivalent "
@@ -1501,24 +1553,264 @@ def _harness_query_table(scratch: Path
                 )
             ),
             "Harness admits a bounded Linux performance reader",
-        ))
+          ),
+          (
+            "running_services",
+            "List currently running system services with a finite read-only "
+            "systemctl query and summarize what the output means.",
+            lambda o: any(part in o.lower() for part in
+                          (".service", "running", "systemd", "not booted",
+                           "failed to connect")),
+            "running-service inspection or an explicit host limitation",
+          ),
+          (
+            "failed_services",
+            "Inspect failed systemd services using exactly `systemctl --failed "
+            "--no-pager`; explain whether failed units exist.",
+            lambda o: any(part in o.lower() for part in
+                          ("failed", ".service", "no failed", "none", "0 loaded")),
+            "option-only systemctl query is usable",
+          ),
+          (
+            "listening_ports",
+            "Show listening TCP/UDP sockets with a finite read-only ss command "
+            "and summarize the result.",
+            lambda o: "listen" in o.lower() or
+            re.search(r":\d{1,5}\b", o) is not None,
+            "socket inventory",
+          ),
+          (
+            "default_route",
+            "Inspect the default network route and report its gateway/interface.",
+            lambda o: any(part in o.lower() for part in
+                          ("default", "gateway", " via ", " dev ")),
+            "routing query",
+          ),
+          (
+            "dns_configuration",
+            "Inspect this machine's active DNS resolver configuration using a "
+            "read-only command and summarize it.",
+            lambda o: "nameserver" in o.lower() or "dns" in o.lower()
+            or re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", o) is not None,
+            "DNS configuration query",
+          ),
+          (
+            "memory_and_disk",
+            "Report both current memory availability and root filesystem usage "
+            "using a small sequence or batch of read-only commands.",
+            lambda o: ("mem" in o.lower() or "memory" in o.lower()) and
+            ("filesystem" in o.lower() or "mounted" in o.lower()
+             or "disk" in o.lower()),
+            "multiple observational checks",
+          ),
+          (
+            "block_devices",
+            "List block devices and filesystems with a read-only lsblk command.",
+            lambda o: any(part in o.lower() for part in
+                          ("name", "mountpoint", "filesystem", "nvme", "loop")),
+            "storage inventory",
+          ),
+          (
+            "firewall_status",
+            "Inspect the local firewall state/rules using an available read-only "
+            "firewall-cmd, nft list, or iptables -L query. Explain permission or "
+            "service limitations instead of attempting to change anything.",
+            lambda o: any(part in o.lower() for part in
+                          ("firewall", "ruleset", "chain", "table", "running",
+                           "not running", "permission", "not installed")),
+            "firewall query with graceful unavailable/permission handling",
+          ),
+          (
+            "natural_ip_zh",
+            "设备的IP地址",
+            lambda o: re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", o)
+            is not None,
+            "unprompted Chinese local-IP request",
+          ),
+          (
+            "natural_weather_zh",
+            "今天天气",
+            lambda o: ("shanghai" in o.lower() or "上海" in o) and
+            (re.search(r"[+-]?\d+\s*°?[CF]\b", o, re.IGNORECASE) is not None
+             or any(part in o.lower() for part in
+                    ("sunny", "clear", "cloud", "overcast", "rain", "snow"))
+             or any(part in o for part in ("晴", "雨", "阴", "云", "雪"))),
+            "timezone-derived weather, never proxy-egress location",
+          ),
+          (
+            "natural_services_zh",
+            "在运行的服务",
+            lambda o: any(part in o.lower() for part in
+                          (".service", "running", "active", "systemd")),
+            "unprompted Chinese service inventory",
+          ),
+          (
+            "natural_code_composition_zh",
+            "目录下的代码组成",
+            lambda o: "nim" in o.lower() and
+            ("src" in o.lower() or "源码" in o) and
+            "budget exhausted" not in o.lower(),
+            "interpreted code breakdown rather than a raw artifact dump",
+          ),
+          (
+            "natural_performance_zh",
+            "系统性能情况",
+            lambda o: any(part in o.lower() for part in
+                          ("load", "cpu", "负载")) and
+            any(part in o.lower() for part in
+                ("mem", "memory", "内存")),
+            "unprompted bounded performance diagnosis",
+          ),
+          (
+            "natural_git_changes_zh",
+            "总结这个目录的 Git 分支和未提交变化",
+            lambda o: ("main" in o.lower() or "分支" in o) and
+            any(part in o.lower() for part in
+                ("modified", "untracked", "变化", "修改", "未提交", "干净")),
+            "safe branch/worktree summary without git status",
+          ),
+          (
+            "natural_recent_errors_zh",
+            "查看最近20条系统错误日志并说明重点",
+            lambda o: any(part in o.lower() for part in
+                          ("error", "failed", "warning", "journal",
+                           "permission", "错误", "失败", "日志", "无记录")),
+            "bounded system-log interpretation",
+          ),
+          (
+            "natural_largest_files_zh",
+            "列出这个目录中最大的十个文件",
+            lambda o: re.search(r"\d", o) is not None and
+            any(part in o.lower() for part in
+                ("get_test.py", "license", ".release", ".ci", "bytes",
+                 "kb", "mb", "文件")),
+            "bounded filesystem sizing",
+          ),
+          (
+            "natural_hardware_zh",
+            "总结 CPU、内存、磁盘和 GPU 情况",
+            lambda o: ("cpu" in o.lower() or "处理器" in o) and
+            ("mem" in o.lower() or "内存" in o) and
+            ("disk" in o.lower() or "磁盘" in o or "存储" in o),
+            "multi-source local hardware summary",
+          ),
+          (
+            "natural_container_zh",
+            "总结当前容器和镜像运行情况",
+            lambda o: any(part in o.lower() for part in
+                          ("docker", "container", "image", "容器", "镜像",
+                           "permission", "不可用", "未安装")),
+            "read-only container runtime summary",
+          ),
+          (
+            "natural_ssh_zh",
+            "检查 SSH 服务是否运行并说明监听端口",
+            lambda o: any(part in o.lower() for part in
+                          ("ssh", "sshd", ":22", "port 22", "端口")),
+            "service plus socket diagnosis",
+          ),
+        ])
     elif f.platform_name == "darwin":
-        cases.append((
+        cases.extend([(
             "performance_snapshot",
             "Report a one-shot system performance snapshot. Use the exact "
             "read-only command `top -l 1 -n 15` and return its output.",
             lambda o: "load avg" in o.lower()
             or "cpu usage" in o.lower(),
             "Harness admits bounded macOS top",
-        ))
+        ), (
+            "natural_ip_route_zh",
+            "说明这台 Mac 的 IP 地址、活跃网络接口和默认路由",
+            lambda o: re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", o)
+            is not None and any(part in o.lower() for part in
+                                ("default", "gateway", "en0", "route", "路由")),
+            "natural macOS network diagnosis",
+        ), (
+            "natural_services_zh",
+            "列出这台 Mac 当前加载的服务并简要说明",
+            lambda o: any(part in o.lower() for part in
+                          ("launchctl", "label", "pid", "service", "服务")),
+            "launchd service inventory",
+        ), (
+            "natural_security_zh",
+            "检查这台 Mac 的 SIP、Gatekeeper 和 FileVault 状态",
+            lambda o: any(part in o.lower() for part in
+                          ("sip", "system integrity", "gatekeeper", "filevault"))
+            and any(part in o.lower() for part in
+                    ("enabled", "disabled", "status", "开启", "关闭", "状态")),
+            "macOS security controls remain queryable",
+        ), (
+            "natural_storage_backup_zh",
+            "总结根磁盘空间以及 Time Machine 当前状态",
+            lambda o: any(part in o.lower() for part in
+                          ("filesystem", "capacity", "disk", "磁盘"))
+            and any(part in o.lower() for part in
+                    ("time machine", "tmutil", "backup", "备份")),
+            "storage plus backup status",
+        ), (
+            "natural_dns_zh",
+            "查看这台 Mac 当前 DNS 解析器配置并说明重点",
+            lambda o: any(part in o.lower() for part in
+                          ("dns", "resolver", "nameserver", "解析")),
+            "macOS resolver inventory",
+        ), (
+            "natural_power_zh",
+            "查看这台 Mac 的电源和电池状态",
+            lambda o: any(part in o.lower() for part in
+                          ("battery", "ac power", "power source", "电池", "电源",
+                           "no batteries")),
+            "bounded pmset power query",
+        )])
     elif f.platform_name == "windows":
-        cases.append((
+        cases.extend([(
             "performance_snapshot",
             "Report a one-shot process performance snapshot using Get-Process "
             "and return its output.",
             lambda o: bool(o.strip()),
             "Harness uses a Windows performance reader",
-        ))
+        ), (
+            "natural_ip_route_zh",
+            "说明这台 Windows 设备的 IP 地址、DNS 和默认路由",
+            lambda o: re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", o)
+            is not None and any(part in o.lower() for part in
+                                ("dns", "gateway", "route", "网关", "路由")),
+            "natural Windows network diagnosis",
+        ), (
+            "natural_services_zh",
+            "列出正在运行的 Windows 服务，最多显示前20项并说明",
+            lambda o: any(part in o.lower() for part in
+                          ("running", "service", "status", "运行", "服务")),
+            "bounded Windows service inventory",
+        ), (
+            "natural_events_zh",
+            "查看 Windows 系统最近20条事件并总结错误或警告",
+            lambda o: any(part in o.lower() for part in
+                          ("event", "error", "warning", "system", "事件", "错误",
+                           "警告", "no matching")),
+            "bounded event-log interpretation",
+        ), (
+            "natural_security_zh",
+            "总结 Windows 防火墙和 Defender 当前状态",
+            lambda o: any(part in o.lower() for part in
+                          ("firewall", "防火墙")) and
+            any(part in o.lower() for part in
+                ("defender", "antivirus", "realtime", "安全", "不可用")),
+            "Windows security status readers",
+        ), (
+            "natural_storage_zh",
+            "总结 Windows 磁盘、卷以及 BitLocker 状态",
+            lambda o: any(part in o.lower() for part in
+                          ("disk", "volume", "磁盘", "卷")) and
+            any(part in o.lower() for part in
+                ("bitlocker", "encrypted", "encryption", "加密", "不可用")),
+            "storage and encryption inventory",
+        ), (
+            "natural_tasks_zh",
+            "列出前20个 Windows 计划任务并说明当前状态",
+            lambda o: any(part in o.lower() for part in
+                          ("task", "scheduled", "ready", "running", "任务")),
+            "bounded scheduled-task inventory",
+        )])
     return cases
 
 
@@ -1534,6 +1826,12 @@ def _build_scratch() -> Path:
         "apple\nbanana\ncherry needle line\ndate\n",
         encoding="utf-8")
     (tmp / "empty.txt").write_text("", encoding="utf-8")
+    (tmp / "sample.nim").write_text(
+        'echo "nim-marker-73"\n', encoding="utf-8")
+    (tmp / "sample.py").write_text(
+        "PYTHON_MARKER_86 = True\n", encoding="utf-8")
+    (tmp / "notes.md").write_text(
+        "markdown-marker-19\n", encoding="utf-8")
     (tmp / "subdir").mkdir()
     (tmp / "subdir" / "inner.txt").write_text(
         "inside-subdir-content\n", encoding="utf-8")
@@ -1581,32 +1879,35 @@ def section_harness_queries(stats: Stats) -> None:
                        f"attempts=2; last_exit={r.returncode}; "
                        f"last={short!r}; failures={failures!r}")
 
-    # J-extra 11 max-rounds = 1 terminates cleanly
+    def extra_id(offset: int) -> str:
+        return f"J{len(table) + offset:02d}"
+
+    # Extra 1: max-rounds = 1 terminates cleanly.
     cm.set("max-rounds", "1")
     r = _run_query(
         "use at least three distinct shell commands to gather "
         "information and reply. include the word 'done'.",
         "--no-cache", timeout=120)
     if r.returncode in (0, 1, 2, 126):
-        stats.pass_("J11 max-rounds=1 terminates without crash",
+        stats.pass_(f"{extra_id(1)} max-rounds=1 terminates without crash",
                     detail=f"exit={r.returncode}")
     else:
-        stats.fail("J11 max-rounds=1", f"exit={r.returncode}")
+        stats.fail(f"{extra_id(1)} max-rounds=1", f"exit={r.returncode}")
 
-    # J-12 agent queries appended log entries
+    # Extra 2: agent queries append log entries.
     n_before = log_entries_count()
     cm.set("max-rounds", "3")
     _run_query("reply with the word 'log-probe'",
                "--no-cache", timeout=120)
     n_after = log_entries_count()
     if n_after > n_before:
-        stats.pass_(f"J12 agent query appended log "
+        stats.pass_(f"{extra_id(2)} agent query appended log "
                     f"({n_before} -> {n_after})")
     else:
-        stats.fail("J12 agent log append",
+        stats.fail(f"{extra_id(2)} agent log append",
                    f"before={n_before} after={n_after}")
 
-    # J-13 agent without hide-process shows intermediate rounds
+    # Extra 3: agent without hide-process shows intermediate rounds.
     r = _run_query("report the machine hostname in a single word",
                    "--no-cache", "--no-hide-process",
                    timeout=180, hide_process=False)
@@ -1614,28 +1915,29 @@ def section_harness_queries(stats: Stats) -> None:
     if r.ok and ("round" in merged
                  or "executing" in merged
                  or "$" in r.err_plain):
-        stats.pass_("J13 agent --no-hide-process shows progress")
+        stats.pass_(f"{extra_id(3)} agent --no-hide-process shows progress")
     else:
         stats.pass_(
-            "J13 agent --no-hide-process (progress markers "
+            f"{extra_id(3)} agent --no-hide-process (progress markers "
             "format depends on backend)",
             detail="accepted as soft-pass")
 
-    # J-14 agent tool-use with system-prompt injection
+    # Extra 4: agent tool-use with system-prompt injection.
     cm.set("system-prompt",
            "When listing files, use `ls -1` and only mention files, "
            "not directories.")
     r = _run_query(f"list files in '{scratch}' that contain letters",
                    "--no-cache", timeout=180)
     if r.ok and "alpha.txt" in r.out_plain:
-        stats.pass_("J14 system-prompt respected (alpha.txt present)")
+        stats.pass_(f"{extra_id(4)} system-prompt respected "
+                    "(alpha.txt present)")
     else:
-        stats.fail("J14 system-prompt agent",
+        stats.fail(f"{extra_id(4)} system-prompt agent",
                    f"ok={r.ok} out={r.out_plain[:120]!r} "
                    f"err={r.err_plain[-160:]!r}")
     cm.clear("system-prompt")
 
-    # J-15 command-pattern blocks read-command verbs.
+    # Extra 5: command-pattern blocks read-command verbs.
     #
     # Note: `get`'s command-pattern is a verb-level blocklist.  It
     # cannot prevent a sufficiently capable agent from switching
@@ -1655,26 +1957,27 @@ def section_harness_queries(stats: Stats) -> None:
         f"show me the full content of '{scratch / 'alpha.txt'}'",
         "--no-cache", timeout=180)
     if r.ok and "first-line-marker-42" not in r.out_plain:
-        stats.pass_("J15 command-pattern suppressed matching command")
+        stats.pass_(f"{extra_id(5)} command-pattern suppressed "
+                    "matching command")
     elif not r.ok:
-        stats.pass_("J15 command-pattern caused non-zero exit",
+        stats.pass_(f"{extra_id(5)} command-pattern caused non-zero exit",
                     detail=f"exit={r.returncode}")
     else:
         stats.pass_(
-            "J15 content leaked via alternative tool — soft-pass",
+            f"{extra_id(5)} content leaked via alternative tool — soft-pass",
             detail=("verb-blocklist cannot prevent agents from "
                     "choosing substitute read tools; this is a "
                     "documented limitation (README.md + man "
                     "page SAFETY section)"))
-    run_get("set", "command-pattern", "")  # temporarily disable for rest
+    run_get("set", "command-pattern", "")  # clear supplemental regex for rest
 
-    # J-16 restore command-pattern default
+    # Extra 6: restore semantic-policy-only command-pattern default.
     run_get("set", "command-pattern")
     v = get_config_field("command-pattern")
-    if "built-in" in v.lower():
-        stats.pass_("J16 command-pattern default restored")
+    if "semantic policy only" in v.lower():
+        stats.pass_(f"{extra_id(6)} command-pattern default restored")
     else:
-        stats.fail("J16 command-pattern restore", v[:80])
+        stats.fail(f"{extra_id(6)} command-pattern restore", v[:80])
 
     shutil.rmtree(scratch, ignore_errors=True)
 

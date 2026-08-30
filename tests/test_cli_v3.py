@@ -45,15 +45,25 @@ class GetV3CliTests(unittest.TestCase):
         cls.root = Path(tempfile.mkdtemp(prefix="get_v3_cli_"))
         cls.work = cls.root / "work"
         cls.work.mkdir()
+        (cls.work / "large-feedback.txt").write_text(
+            "A" * 20_000 + "final-marker\n",
+            encoding="utf-8",
+        )
         cls.config_root = Path(os.environ.get(
             "GET_V3_CONFIG_ROOT", str(cls.root / "config")))
+        cls.target_config_root = os.environ.get(
+            "GET_V3_TARGET_CONFIG_ROOT", str(cls.config_root))
         cls.host_config_root = Path(os.environ.get(
             "GET_V3_HOST_CONFIG_ROOT", str(cls.config_root)))
         cls.under_wine = os.environ.get("GET_V3_UNDER_WINE", "") == "1"
+        cls.target_work = (
+            "Z:" + str(cls.work).replace("/", "\\")
+            if cls.under_wine else str(cls.work)
+        )
         cls.env = os.environ.copy()
         cls.env["XDG_CONFIG_HOME"] = str(cls.config_root)
         if cls.target_os == "windows":
-            cls.env["APPDATA"] = str(cls.config_root)
+            cls.env["APPDATA"] = cls.target_config_root
         cls.env["NO_PROXY"] = "127.0.0.1,localhost"
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         cls.server_thread = threading.Thread(
@@ -167,6 +177,22 @@ class GetV3CliTests(unittest.TestCase):
         self.assertIn("read-only policy", result.stderr.lower())
         self.assertFalse((self.work / "never-run").exists())
 
+    def test_05a_dangerous_words_are_not_default_false_positives(self) -> None:
+        result = self.run_get("danger words are data", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "danger-word-rm-delete")
+
+        configured = self.run_get(
+            "set", "command-pattern", r"\b(rm|delete)\b")
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        try:
+            blocked = self.run_get("danger words are data", "--no-cache")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("forbidden pattern", blocked.stderr.lower())
+        finally:
+            restored = self.run_get("set", "command-pattern")
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+
     def test_05b_textual_tool_call_cannot_bypass_policy(self) -> None:
         result = self.run_get("qwen textual unsafe cli", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
@@ -196,6 +222,30 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "policy-recovered")
         self.assertFalse((self.work / "never-run").exists())
+
+    def test_05f_mixed_batch_executes_only_approved_calls(self) -> None:
+        marker = self.work / "never-run"
+        result = self.run_get("mixed policy batch cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "mixed-batch-ok")
+        self.assertFalse(marker.exists())
+
+    def test_05g_unknown_native_tool_recovers_without_execution(self) -> None:
+        marker = self.work / "never-run"
+        result = self.run_get("unknown native recovery cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "unknown-tool-recovered")
+        self.assertFalse(marker.exists())
+
+    def test_05h_duplicate_reader_is_not_executed_twice(self) -> None:
+        result = self.run_get("duplicate reader suppression cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "duplicate-suppressed-ok")
+
+    def test_05i_malformed_text_action_recovers_in_band(self) -> None:
+        result = self.run_get("malformed protocol recovery cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "protocol-recovered")
 
     def test_06_reviewer_revision_is_rechecked(self) -> None:
         result = self.run_get(
@@ -246,11 +296,18 @@ class GetV3CliTests(unittest.TestCase):
     def test_08_output_cap_stops_capture(self) -> None:
         self.assertEqual(
             self.run_get("set", "max-output-bytes", "100").returncode, 0)
-        result = self.run_get("large output cli", "--no-cache")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("truncated", result.stderr.lower())
-        self.assertEqual(
-            self.run_get("set", "max-output-bytes").returncode, 0)
+        try:
+            result = self.run_get("large output cli", "--no-cache")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("truncated", result.stderr.lower())
+        finally:
+            self.assertEqual(
+                self.run_get("set", "max-output-bytes").returncode, 0)
+
+    def test_08b_large_continuation_feedback_is_compacted(self) -> None:
+        result = self.run_get("large feedback cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "feedback-compact-ok")
 
     def test_09_http_proxy_uses_the_reusable_transport(self) -> None:
         ProxyHandler.request_count = 0
@@ -284,18 +341,20 @@ class GetV3CliTests(unittest.TestCase):
             self.run_get("set", "max-output-bytes", "100").returncode,
             0,
         )
-        second = self.run_get("large output cached cli")
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("truncated", second.stderr.lower())
-        self.assertEqual(
-            self.run_get("set", "max-output-bytes").returncode,
-            0,
-        )
+        try:
+            second = self.run_get("large output cached cli")
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("truncated", second.stderr.lower())
+        finally:
+            self.assertEqual(
+                self.run_get("set", "max-output-bytes").returncode,
+                0,
+            )
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process audit")
+    @unittest.skipUnless(os.name == "posix", "POSIX process audit")
     def test_11_ctrl_c_stops_the_active_process_tree(self) -> None:
-        if self.target_os != "linux":
-            self.skipTest("Linux target process audit")
+        if self.target_os not in ("linux", "macos"):
+            self.skipTest("POSIX target process audit")
         process = subprocess.Popen(
             [*self.command, "slow command interrupt", "--no-cache"],
             cwd=self.work,
@@ -308,14 +367,16 @@ class GetV3CliTests(unittest.TestCase):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline and child_pid == 0:
             found = subprocess.run(
-                ["ps", "-o", "pid=", "--ppid", str(process.pid)],
+                ["ps", "-axo", "pid=,ppid="],
                 capture_output=True,
                 text=True,
                 check=False,
             ).stdout.strip()
-            if found:
-                child_pid = int(found.splitlines()[0].strip())
-                break
+            for row in found.splitlines():
+                fields = row.split()
+                if len(fields) == 2 and int(fields[1]) == process.pid:
+                    child_pid = int(fields[0])
+                    break
             time.sleep(0.02)
         self.assertGreater(child_pid, 0)
         process.send_signal(signal.SIGINT)
@@ -326,10 +387,16 @@ class GetV3CliTests(unittest.TestCase):
             f"stdout={stdout!r} stderr={stderr!r}",
         )
         for _ in range(50):
-            if not Path(f"/proc/{child_pid}").exists():
+            exists = subprocess.run(
+                ["ps", "-p", str(child_pid), "-o", "pid="],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            if not exists:
                 break
             time.sleep(0.02)
-        self.assertFalse(Path(f"/proc/{child_pid}").exists())
+        self.assertFalse(exists)
 
     def test_12_text_only_request_ignores_a_cached_command(self) -> None:
         reference_query = "cache hash reference"
@@ -350,10 +417,11 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(pattern_result.returncode, 0, pattern_result.stderr)
         pattern_line = pattern_result.stdout.strip()
         prefix = "command-pattern = "
-        suffix = " (default: built-in)"
+        suffix = " (default)"
         self.assertTrue(pattern_line.startswith(prefix), pattern_line)
         self.assertTrue(pattern_line.endswith(suffix), pattern_line)
         pattern = pattern_line[len(prefix):-len(suffix)]
+        self.assertEqual(pattern, "(semantic policy only)")
 
         def nim_json_hash(values: list[str]) -> str:
             encoded = json.dumps(
@@ -374,7 +442,7 @@ class GetV3CliTests(unittest.TestCase):
             "answer directly"
         )
         global_hash = nim_json_hash([
-            "get-v3",
+            "get-v3.0.1-harness-policy-20260830",
             query,
             config["shell"],
             config["model"],
@@ -382,14 +450,14 @@ class GetV3CliTests(unittest.TestCase):
             config["harness"],
             config["toolProtocol"],
             "",
-            "built-in:" + pattern,
+            "semantic-policy-only",
             host_os,
             host_cpu,
         ])
         context_hash = nim_json_hash([
             "get-v3-context",
             global_hash,
-            str(self.work),
+            self.target_work,
         ])
         forged = dict(reference_entry)
         forged.update({"hash": context_hash, "query": query})
@@ -439,7 +507,11 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(payload["schemaVersion"], 3)
         self.assertEqual(payload["hashAlgorithm"], "sha256")
         stored_queries = {entry["query"] for entry in payload["entries"]}
-        self.assertTrue(set(queries).issubset(stored_queries))
+        missing_queries = sorted(set(queries) - stored_queries)
+        self.assertFalse(
+            missing_queries,
+            f"missing cache entries: {missing_queries}; results={results!r}",
+        )
         self.assertFalse(Path(str(cache_path) + ".lock").exists())
         self.assertFalse(list(cache_path.parent.glob("cache.json.tmp.*")))
         if self.target_os != "windows":

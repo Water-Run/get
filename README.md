@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a safe, read-only local inspection. Version 3.0 replaces the old instance/agent split with one typed harness that can answer directly, run one command, continue with observations, or execute independent checks in parallel.
+`get` turns a natural-language question into a safe, read-only local inspection. Version 3.0.1 replaces the old instance/agent split with one typed harness that can answer directly, run one command, continue with observations, or execute independent checks in parallel.
 
 ```bash
 get "IP address of this device"
@@ -22,7 +22,7 @@ get "current git branch and uncommitted files"
 - Lazy local context collection instead of eager shell-version and PATH-wide probes.
 - Real bounded parallel execution for independent read-only checks.
 - Per-command timeout, output cap, and cross-platform process-tree cancellation.
-- A mandatory allowlist-based read-only policy that cannot be disabled, plus startup-hook-free shells and a sanitized child environment. Regex, model review, and manual confirmation are additional layers.
+- A mandatory allowlist-based read-only policy that cannot be disabled, startup-hook-free shells, a sanitized executable path/environment, and native filesystem write denial on supported Linux/macOS hosts. Regex, model review, and manual confirmation are additional layers.
 - Production cache: SHA-256 identities, cross-process writers, atomic durable snapshots, last-good recovery, and bounded parsing. Cached commands still pass through the same safety policy.
 
 ## Installation
@@ -95,13 +95,13 @@ Every model-proposed, model-revised, or cached command follows the same gate:
 
 1. Validate the typed tool name and arguments.
 2. Apply the mandatory read-only policy.
-3. Apply `command-pattern` as an optional additional blocklist.
+3. Apply `command-pattern` only when the user configured an additional blocklist.
 4. Optionally run the second-model review (`double-check`).
 5. Re-run both deterministic checks if the reviewer changes the command.
 6. Optionally request manual confirmation.
 7. Execute with a deadline and output cap.
 
-The mandatory policy parses only simple commands and reader pipelines, then validates every executable and its state-changing options. Unknown syntax and executables fail closed. It blocks command substitution, chaining, regular-file output redirection, scripts and wrappers, inline interpreters, PowerShell splatting/script conversion, option abbreviations and glob-to-option injection, helper/config injection, mutating Git/container/cluster/package-manager operations, uploads, and unsafe short-option variants. A single literal-file `<` stdin redirect is accepted only for a small set of validated data readers; heredocs, here-strings, process substitution, descriptor duplication, expansion, multiple redirects, and read/write `<>` remain rejected. Shell aliases and null devices are checked per platform; only trusted supported shells can be configured. Child processes start without profile hooks and without loader, language-runtime, Git, pager, tracing, or tool-config injection variables. Cached and reviewer-rewritten commands pass through the identical gate.
+The mandatory policy parses simple commands, reader pipelines, and reader-only sequences, then validates every stage and every state-changing option. Unknown syntax and executables fail closed. It blocks command substitution, background/group execution, regular-file output redirection, scripts and wrappers, inline interpreters, PowerShell splatting/script conversion, option abbreviations and glob-to-option injection, helper/config injection, mutating Git/container/cluster/package-manager operations, uploads, and unsafe short-option variants. A single literal-file `<` stdin redirect is accepted only for a small set of validated data readers; heredocs, here-strings, process substitution, input-descriptor duplication, expansion, multiple input redirects, and read/write `<>` remain rejected. Output-descriptor duplication is limited to existing stdout/stderr. Shell aliases and null devices are checked per platform; only trusted supported shells can be configured. The shell and every bare reader resolve through a system-first PATH with the current workspace and temporary directories removed. Child processes start without profile hooks and without loader, language-runtime, Git, pager, tracing, or tool-config injection variables. Cached and reviewer-rewritten commands pass through the identical gate.
 
 The allowlist includes practical cross-platform inspection, not just trivial
 file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
@@ -112,9 +112,14 @@ AWK field selectors are accepted. `sed` is admitted for display-only address
 expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
 external program files, and command execution remain denied. This keeps normal
 diagnostics usable while validating dual-use tools by semantics rather than by
-executable name alone.
+executable name alone. Version 3.0.1 also admits bounded `free`, `sar`, `pidstat`, and
+traceroute diagnostics; home-directory `find`/`rg` with stable path expansion;
+tmux/cron/Secure Boot queries; macOS metadata/package queries; Windows service,
+boot, BitLocker, WSL, DNS, and network readers; and common Go/.NET/Rust/Swift/
+Java environment inspection. Their execute, write, install, export, live, and
+unbounded forms remain denied.
 
-For HTTP inspection, use `curl -q ...`; the leading `-q` prevents `.curlrc` from changing the operation, and only GET/HEAD with an explicit read protocol is accepted. `wget` is accepted only with `--no-config --no-hsts -O-`. Prefix unquoted POSIX globs with `./` or place `--` before them. `$HOME`, `$USER`, `$LOGNAME`, and `$PWD` are accepted only for pure terminal output. Clearing `command-pattern` disables only the supplemental regex; it never disables the mandatory policy.
+For HTTP inspection, use `curl -q ...`; the leading `-q` prevents `.curlrc` from changing the operation, and only GET/HEAD with an explicit read protocol is accepted. `wget` is accepted only with `--no-config --no-hsts -O-`. Prefix unquoted POSIX globs with `./` or place `--` before them. `$HOME`, `$USER`, `$LOGNAME`, and `$PWD` are accepted by side-effect-free readers; dual-use `find`, `fd`, `rg`, and Git path selection additionally require `~` or a quoted `"$HOME"`/`"$PWD"`. The v3 default is the syntax-aware semantic policy alone, so a dangerous word used as grep/rg/log data is not mistaken for execution. `command-pattern` remains available as an explicit organization-specific supplemental regex and can never disable the mandatory policy.
 
 `git status` and worktree-content `git diff` are deliberately rejected: repository-owned clean/textconv/filter configuration can execute helpers even for commands that appear read-only. Use `git branch --show-current`; `git diff-files --name-only --no-ext-diff --no-textconv` for modified tracked names; `git ls-files --others --exclude-standard` for untracked names; and `git diff --cached --no-ext-diff --no-textconv` for staged content. `git show` and patch-rendering `git log` also require both disabling flags.
 
@@ -125,7 +130,7 @@ get "inspect service status" --double-check
 get set manual-confirm true
 ```
 
-This policy is a fail-closed mutation-resistance gate under the documented semantics of trusted reader binaries; it is not a confidentiality boundary or an OS sandbox. An allowed reader can expose requested files, process/environment data, URLs, or command output to the configured model provider when the harness continues. The boundary includes the resolved binaries and absolute directories retained in `PATH`, the kernel, administrator/operator-controlled tool configuration, and the remote semantics of an allowed HTTP GET/HEAD. Reads may also update filesystem access metadata or tool/OS caches. A compromised binary, writable trusted path, hostile server, or compromised host is outside the guarantee. Review commands and use manual confirmation or an external sandbox in sensitive environments.
+This policy is a fail-closed mutation-resistance gate under the documented semantics of trusted reader binaries; it is not a confidentiality boundary. Linux uses bubblewrap and macOS uses Seatbelt for filesystem write denial when available, with a narrowly revalidated macOS compatibility path for Apple set-id readers; Windows retains the same semantic gate and process limits without an equivalent bundled OS sandbox. An allowed reader can expose requested files, process/environment data, URLs, or command output to the configured model provider when the harness continues. The boundary includes administrator- or operator-controlled tool directories retained after PATH hardening, the kernel, operator-controlled tool configuration, and the remote semantics of an allowed HTTP GET/HEAD. Reads may also update access metadata or incidental caches. A compromised trusted binary, hostile server, unavailable native sandbox, or compromised host is outside the guarantee. Review commands and use manual confirmation or an additional external sandbox in sensitive environments.
 
 ## Configuration
 
@@ -146,7 +151,7 @@ Run `get config` to display all settings, `get config --<option>` for one value,
 | `max-parallel` | `4` | Maximum concurrent tool calls |
 | `command-timeout` | `30` | Hard deadline per command, seconds |
 | `max-output-bytes` | `1048576` | Captured bytes per command |
-| `command-pattern` | built-in | Supplemental forbidden-command regex |
+| `command-pattern` | semantic policy only | Optional supplemental forbidden-command regex |
 | `system-prompt` | empty | Additional model instruction |
 | `shell` | `bash` / `powershell` | Command shell |
 | `log` | `true` | Store execution logs |
@@ -168,12 +173,12 @@ get set max-output-bytes 2097152
 get set max-parallel            # reset to 4
 ```
 
-`command-pattern` has three forms:
+`command-pattern` is opt-in and has three forms:
 
 ```bash
 get set command-pattern '\b(ssh|curl)\b'  # custom supplemental policy
-get set command-pattern                    # restore built-in pattern
-get set command-pattern ""                 # mandatory policy still remains
+get set command-pattern                    # restore semantic-only default
+get set command-pattern ""                 # clear an existing supplemental regex
 ```
 
 ## Per-query flags

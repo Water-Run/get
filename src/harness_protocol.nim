@@ -547,8 +547,76 @@ proc decodeTextAction*(content: string): HarnessAction =
 ##       elapsedMs: 1, timedOut: false, truncated: false,
 ##       policyRejected: false))
 ##     assert value.contains("\"exit_code\":0")
+func implObservationHint(observation: ToolObservation): string =
+  if observation.policyRejected:
+    return "No command ran. Revise only this call to a supported read-only " &
+      "command; do not discard successful sibling observations."
+  if observation.timedOut:
+    return "The bounded deadline stopped this reader. Do not repeat the same " &
+      "command; answer from existing evidence or use one cheaper reader."
+  if observation.truncated:
+    return "The output cap stopped collection. Do not repeat the same broad " &
+      "command; summarize the available prefix or use one narrower reader."
+
+  let words = observation.command.strip().splitWhitespace()
+  var executable =
+    if words.len > 0: toLowerAscii(words[0])
+    else: ""
+  let slash = max(executable.rfind('/'), executable.rfind('\\'))
+  if slash >= 0 and slash + 1 < executable.len:
+    executable = executable[slash + 1 .. ^1]
+  if executable.endsWith(".exe"):
+    executable.setLen(executable.len - 4)
+
+  case executable
+  of "grep", "egrep", "fgrep", "rg":
+    if observation.exitCode == 1:
+      return "Exit 1 means no lines matched. Answer that result; do not retry."
+  of "cmp":
+    if observation.exitCode == 0:
+      return "cmp exit 0 means the compared inputs are identical."
+    if observation.exitCode == 1:
+      return "cmp exit 1 means the compared inputs differ."
+  of "diff":
+    if observation.exitCode == 0:
+      return "diff exit 0 means no differences were found."
+    if observation.exitCode == 1:
+      return "diff exit 1 means differences were found; it is evidence, not " &
+        "a harness failure."
+  of "test", "[":
+    if observation.exitCode == 1:
+      return "The tested condition is false. State the corresponding absence " &
+        "or mismatch instead of repeating the test."
+  of "pgrep":
+    if observation.exitCode == 1:
+      return "No process matched this pgrep query."
+  of "ls", "stat":
+    if observation.exitCode != 0:
+      return "This path inspection was unavailable. Use its error text to " &
+        "distinguish missing, permission denied, or another cause; do not " &
+        "repeat the exact command."
+  of "which":
+    if observation.exitCode != 0:
+      return "The requested executable was not found on PATH."
+  of "command":
+    if words.len > 1 and words[1] == "-v" and observation.exitCode != 0:
+      return "The requested executable was not found on PATH."
+  else:
+    discard
+
+  if observation.exitCode == 0 and observation.output.strip().len == 0:
+    return "The reader succeeded and produced no stdout. Interpret that " &
+      "result instead of repeating the same command."
+  if observation.exitCode == 0:
+    return "Use this evidence. If it covers the requested fact or category, " &
+      "answer now; do not run an equivalent reader for the same fact."
+  if observation.exitCode != 0:
+    return "This finite reader returned non-zero evidence. Explain its output " &
+      "or status; if necessary use at most one simpler, different reader, and " &
+      "do not repeat the exact command."
+
 func observationJson*(observation: ToolObservation): string =
-  result = $(%*{
+  var node = %*{
     "call_id": observation.callId,
     "tool": observation.toolName,
     "command": observation.command,
@@ -558,4 +626,8 @@ func observationJson*(observation: ToolObservation): string =
     "timed_out": observation.timedOut,
     "truncated": observation.truncated,
     "policy_rejected": observation.policyRejected
-  })
+  }
+  let hint = implObservationHint(observation)
+  if hint.len > 0:
+    node["interpretation_hint"] = %hint
+  result = $node

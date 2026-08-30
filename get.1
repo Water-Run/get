@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-08-25" "get 3.0.0" "User Commands"
+.TH GET 1 "2026-08-30" "get 3.0.1" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -134,7 +134,7 @@ Show the application name.
 Show the introduction.
 .TP
 .B \-\-version
-Show version 3.0.0.
+Show version 3.0.1.
 .TP
 .B \-\-author
 Show the author.
@@ -148,7 +148,7 @@ Show the repository URL.
 .SS version
 .B get version
 .PP
-Displays version 3.0.0. The standard aliases
+Displays version 3.0.1. The standard aliases
 .B \-\-version
 and
 .B \-V
@@ -261,8 +261,8 @@ Per-command capture cap. Default: 1048576.
 .TP
 .BI "command\-pattern " regex
 Supplemental forbidden-command regex. Omitting the value restores the built-in
-pattern. An explicit empty string clears only this regex; the mandatory
-read-only policy remains active.
+semantic-policy-only default. An explicit empty string clears an existing
+supplemental regex; the mandatory read-only policy remains active.
 .TP
 .BI "system\-prompt " string
 Additional model instruction. Default: empty.
@@ -313,25 +313,29 @@ are not retried. Provider response bodies are limited to 8 MiB, and requests
 carrying bearer credentials do not follow redirects.
 .
 .SH SAFETY
-The non-configurable baseline accepts only a small grammar of simple commands
-and reader pipelines, then validates every executable and its state-changing
-options. Unknown syntax and executables fail closed. It rejects substitution,
-chaining, scripts and wrappers, regular-file output redirection,
+The non-configurable baseline accepts only a small grammar of simple commands,
+reader pipelines, and reader-only sequences, then validates every executable
+and its state-changing options. Unknown syntax and executables fail closed. It
+rejects substitution, background and grouped execution, scripts and wrappers,
+regular-file output redirection,
 inline interpreters, helper or config injection, mutating Git, container,
 cluster and package-manager operations, uploads, PowerShell splatting and
 script conversion, option abbreviations, glob-to-option injection, and unsafe
 short options.
 .PP
 A single literal-file input redirect is accepted only for validated data
-readers. Here-documents, here-strings, process substitution, descriptor
+readers. Here-documents, here-strings, process substitution, input-descriptor
 duplication, expansion, multiple input redirects, and read/write redirection
-remain rejected.
+remain rejected. Output-descriptor duplication is limited to existing
+stdout/stderr.
 .PP
 Shell aliases and null devices are checked per platform. Only supported shells
-from trusted executable paths can be configured. Shell profiles are disabled,
-and child environments remove loader, runtime, Git, pager, tracing, and
-tool-config injection variables. curl reads require leading -q; wget reads
-require --no-config, --no-hsts, and -O-.
+from trusted executable paths can be configured. The shell and every bare
+reader resolve through a system-first PATH with the current workspace and
+temporary directories removed. Shell profiles are disabled, and child
+environments remove loader, runtime, Git, pager, tracing, and tool-config
+injection variables. curl reads require leading -q; wget reads require
+--no-config, --no-hsts, and -O-.
 .PP
 Practical bounded diagnostics are supported across platforms: top requires
 -b and a finite -n count on Linux, or a finite -l count on macOS; Windows can
@@ -340,6 +344,13 @@ selectors and display-only sed address expressions are accepted. sed in-place
 mode, output commands, external program files, and command execution remain
 denied. On macOS, top -n 0 is accepted as a finite summary-only snapshot.
 .PP
+Additional exact or bounded readers cover free, sar, pidstat, traceroute, stable
+home/current-directory searches, tmux and cron queries, Secure Boot status,
+macOS metadata and package queries, Windows services, boot, BitLocker, WSL,
+DNS and network state, and common Go, .NET, Rust, Swift, Xcode, and Java
+environment inspection. Execute, write, install, export, live, and unbounded
+forms remain denied.
+.PP
 git status and worktree-content git diff are rejected because repository-owned
 clean, textconv, and filter configuration can execute helpers. Use git branch
 --show-current; git diff-files --name-only --no-ext-diff --no-textconv for
@@ -347,7 +358,10 @@ modified tracked names; git ls-files --others --exclude-standard for untracked
 names; and git diff --cached --no-ext-diff --no-textconv for staged content.
 git show and patch-rendering git log also require both disabling options.
 .PP
-The command-pattern is supplemental. It cannot disable the baseline.
+The syntax-aware semantic policy is the default authority, so a dangerous word
+used as search or log data is not confused with execution. command-pattern is
+an explicitly configured supplemental organization policy and cannot disable
+the baseline.
 If double-check revises a command, both deterministic layers run again before
 confirmation or execution. Cached commands use the identical gate.
 .PP
@@ -363,13 +377,18 @@ stops descendants as well; Windows uses taskkill /T for the child tree.
 .PP
 This deterministic command gate provides fail-closed mutation resistance under
 the documented semantics of trusted reader binaries; it is not a
-confidentiality boundary or an operating-system sandbox. Allowed readers can
-expose requested data to the configured model provider when the harness
-continues. The gate trusts resolved executables, absolute PATH entries, the
-kernel, operator-controlled tool configuration, and the remote semantics of
-allowed GET/HEAD requests. Reads may update access metadata or incidental
-caches. Use manual confirmation or an external sandbox in sensitive
-environments.
+confidentiality boundary. Linux uses bubblewrap and macOS uses Seatbelt for
+filesystem write denial when available, with a narrowly revalidated macOS
+compatibility path for Apple set-id readers. Windows retains the same semantic
+gate and process limits without an equivalent bundled OS sandbox. Allowed
+readers can expose requested data to the configured model provider when the
+harness continues. The boundary includes administrator-controlled system and
+user tool directories retained after PATH hardening, the kernel,
+operator-controlled tool configuration, and the remote semantics of allowed
+GET/HEAD requests. Reads may update access metadata or incidental caches. A
+compromised trusted binary, hostile server, unavailable native sandbox, or
+compromised host is outside the guarantee. Use manual confirmation or an
+additional external sandbox in sensitive environments.
 .
 .SH CACHE
 The v3 cache performs no classifier model call.

@@ -40,6 +40,7 @@ type
     username*: string       ## Current username.
     cwd*: string            ## Current working directory.
     localDate*: string      ## Local calendar date in YYYY-MM-DD form.
+    timeZone*: string       ## Named local timezone when cheaply discoverable.
     shell*: string          ## Configured shell name.
     shellVersion*: string   ## Shell --version first line.
     availableTools*: seq[string]  ## Tools found on PATH.
@@ -98,6 +99,37 @@ func getProbeHint*(name: string): string =
 # Private helpers
 # ---------------------------------------------------------------------------
 
+func implSafeTimezoneName(value: string): string =
+  let candidate = value.strip()
+  if candidate.len == 0 or candidate.len > 128 or candidate.startsWith(":"):
+    return ""
+  for character in candidate:
+    if character notin {
+      'A' .. 'Z', 'a' .. 'z', '0' .. '9', '/', '_', '-', '+'
+    }:
+      return ""
+  result = candidate
+
+proc implLocalTimezoneName(): string =
+  result = implSafeTimezoneName(getEnv("TZ", ""))
+  if result.len > 0:
+    return
+  when defined(posix):
+    try:
+      if symlinkExists("/etc/localtime"):
+        let target = expandSymlink("/etc/localtime")
+        let marker = "zoneinfo/"
+        let markerIndex = target.find(marker)
+        if markerIndex >= 0 and markerIndex + marker.len < target.len:
+          result = implSafeTimezoneName(
+            target[markerIndex + marker.len .. ^1])
+          if result.len > 0:
+            return
+      if fileExists("/etc/timezone"):
+        result = implSafeTimezoneName(readFile("/etc/timezone"))
+    except OSError, IOError:
+      result = ""
+
 ## Attempts to obtain the shell version string by running
 ## ``<shell> --version``.
 ##
@@ -155,6 +187,7 @@ proc collectFastSysInfo*(shell: string): SysInfo =
     username: getEnv("USER", getEnv("USERNAME", "")),
     cwd: getCurrentDir(),
     localDate: now().format("yyyy-MM-dd"),
+    timeZone: implLocalTimezoneName(),
     shell: shell,
     shellVersion: "",
     availableTools: @[]
@@ -177,6 +210,7 @@ proc collectSysInfo*(shell: string): SysInfo =
     username: "",
     cwd: getCurrentDir(),
     localDate: now().format("yyyy-MM-dd"),
+    timeZone: implLocalTimezoneName(),
     shell: shell,
     shellVersion: "",
     availableTools: @[]
@@ -225,6 +259,8 @@ func formatSysInfo*(info: SysInfo): string =
   lines.add(fmt"Working directory: {info.cwd}")
   if info.localDate.len > 0:
     lines.add(fmt"Local date: {info.localDate}")
+  if info.timeZone.len > 0:
+    lines.add(fmt"Timezone: {info.timeZone}")
   lines.add(fmt"Shell: {info.shell}")
   if info.shellVersion.len > 0:
     lines.add(

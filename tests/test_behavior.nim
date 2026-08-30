@@ -9,10 +9,10 @@ import ../src/sysinfo
 import ../src/utils
 
 suite "version metadata":
-  test "uses release version 3.0.0 consistently":
+  test "uses release version 3.0.1 consistently":
     const nimbleContent = staticRead("../get.nimble")
-    check APP_VERSION == "3.0.0"
-    check nimbleContent.contains("version       = \"3.0.0\"")
+    check APP_VERSION == "3.0.1"
+    check nimbleContent.contains("version       = \"3.0.1\"")
 
   test "pins the supported Windows OpenSSL 3 runtime":
     const buildConfig = staticRead("../config.nims")
@@ -167,8 +167,8 @@ suite "prompt guidance":
       defaultRunBudget(hkAuto), none(string), none(string))
     let sys = msgs[0].content
     check sys.contains("Get-ChildItem")
-    check sys.contains("without placeholders")
-    check sys.contains("emit only runnable commands")
-    check sys.contains("Inspect dynamic or machine-local facts")
+    check sys.contains("dynamic/local facts")
+    check sys.contains("runnable, placeholder-free commands")
+    check sys.contains("Only inspect/retrieve")
     check sys.contains("Resolve-Path ~")
     check not sys.contains("[Environment]::")

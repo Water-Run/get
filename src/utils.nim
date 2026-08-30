@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "3.0.0"
+const APP_VERSION* = "3.0.1"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -85,34 +85,13 @@ const MODEL_STRENGTH_WARNING* =
 # Constants — safety
 # ---------------------------------------------------------------------------
 
-## Default forbidden command pattern regex.  Commands matching
-## this pattern are rejected before execution.  The pattern uses
-## ``\b`` word boundaries to avoid false positives in paths or
-## arguments.
-##
-## ``md`` and ``rd`` are intentionally omitted: they are aliases
-## of ``mkdir``/``rmdir`` (already covered), but ``\bmd\b`` and
-## ``\brd\b`` produce false positives on file extensions such as
-## ``README.md``.  ``format`` is omitted because ``\bformat\b``
-## matches the ubiquitous ``--format`` flag used by many tools.
-##
-## Users may override this via ``get set command-pattern``.
-## Pass an empty string (``get set command-pattern ""``) to
-## disable the pattern entirely, or omit the value
-## (``get set command-pattern``) to restore this default.
-const DEFAULT_COMMAND_PATTERN* =
-  "\\b(rm|rmdir|del|erase" &
-  "|mv|move|cp|copy" &
-  "|mkdir|touch" &
-  "|chmod|chown|chgrp" &
-  "|mkfs|dd|fdisk" &
-  "|kill|killall|pkill" &
-  "|shutdown|reboot|halt|poweroff" &
-  "|passwd|useradd|userdel|usermod" &
-  "|groupadd|groupdel" &
-  "|Set-Content|New-Item|Remove-Item" &
-  "|Move-Item|Rename-Item" &
-  "|Clear-Content|Add-Content)\\b"
+## The v3 semantic command policy is the default deterministic boundary.
+## A raw whole-command keyword regex is deliberately not enabled by default:
+## it cannot distinguish executing ``rm`` from searching documentation for
+## the word ``rm`` and therefore caused substantial v2 false positives.
+## Users who need an organization-specific supplemental blocklist can still
+## configure one with ``get set command-pattern REGEX``.
+const DEFAULT_COMMAND_PATTERN* = ""
 
 ## Core dangerous command names used to validate whether a custom
 ## command-pattern adequately covers common destructive

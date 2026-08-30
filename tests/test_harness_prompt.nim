@@ -28,6 +28,7 @@ suite "compact v3 harness prompt":
       username: "user",
       cwd: "/workspace",
       localDate: "2026-08-24",
+      timeZone: "Asia/Shanghai",
       shell: "bash",
       shellVersion: "",
       availableTools: @[]
@@ -42,16 +43,23 @@ suite "compact v3 harness prompt":
       none(string)
     )
     check messages.len == 2
-    check messages[0].content.len < 1800
+    check messages[0].content.len < 2200
     check messages[0].content.contains("Prefer one terminal call")
     check messages[0].content.contains("complete requested answer")
     check messages[0].content.contains("summarize")
     check messages[0].content.contains("local_date=2026-08-24")
-    check messages[0].content.contains("Never use scripts, wrappers, inline code")
+    check messages[0].content.contains("timezone=Asia/Shanghai")
+    check messages[0].content.contains("never proxy egress")
+    check messages[0].content.contains("No scripts, wrappers, inline code")
     check messages[0].content.contains("top -b -n 1 | head -n 15 on Linux")
     check messages[0].content.contains("top -l 1 -n 15 on macOS")
-    check messages[0].content.contains("display-only sed -n")
+    check messages[0].content.contains("stdout-only sed")
     check messages[0].content.contains("pure AWK field selectors")
+    check messages[0].content.contains("short ;/&&/|| sequence")
+    check messages[0].content.contains("never find -exec")
+    check messages[0].content.contains("Git summaries, first batch")
+    check messages[0].content.contains("systemctl --failed --no-pager")
+    check messages[0].content.contains("launchctl list | head -n 21")
     check messages[0].content.contains("literal < file needs a data reader")
     check not messages[0].content.contains("Available tools:")
     check not messages[0].content.contains("<!-- CONTINUE -->")
@@ -76,6 +84,20 @@ suite "compact v3 harness prompt":
     check tool.name == "run_readonly_shell"
     check tool.parametersJson.contains("additionalProperties")
     check tool.parametersJson.contains("result_mode")
+
+  test "weather receives an explicit timezone fallback only when relevant":
+    var info = collectFastSysInfo("bash")
+    info.timeZone = "Asia/Shanghai"
+    let weather = buildHarnessMessages(
+      info, "今天天气", "bash", hkAuto, defaultRunBudget(hkAuto),
+      none(string), none(string))
+    check weather[1].content.contains("timezone Asia/Shanghai")
+    check weather[1].content.contains("if no place is named")
+    check weather[1].content.contains("curl -q -fsSL --max-time 15")
+    let ordinary = buildHarnessMessages(
+      info, "show cwd", "bash", hkAuto, defaultRunBudget(hkAuto),
+      none(string), none(string))
+    check ordinary[1].content == "show cwd"
 
   test "explicit no-tool intent is detected without quoted false positives":
     check explicitlyDisablesTools(

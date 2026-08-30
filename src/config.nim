@@ -344,11 +344,10 @@ func classifyModel*(model: string): ValueState =
 func classifyUrl*(url: string): ValueState =
   if url.len > 0: vsNeutral else: vsWarn
 
-## Builds the display text, semantic state, and optional
-## highlighted trailer for the command-pattern value.  The
-## default built-in pattern is dimmed with a highlighted
-## ``(default: built-in)`` trailer; a disabled pattern is
-## flagged amber; a custom pattern is shown in emphatic red.
+## Builds the display text, semantic state, and optional highlighted trailer
+## for command-pattern. The default is the mandatory semantic policy alone;
+## an explicitly cleared supplemental pattern has the same effective policy,
+## while a custom organization policy is shown in emphatic red.
 ##
 ## :param pattern: The configured command-pattern option.
 ## :returns: A tuple of (display text, state, trailer).
@@ -358,14 +357,14 @@ func classifyCommandPattern*(
          trailer: string] =
   if pattern.isNone:
     result = (
-      text: DEFAULT_COMMAND_PATTERN,
+      text: "(semantic policy only)",
       state: vsMuted,
-      trailer: "(default: built-in)")
+      trailer: "(default)")
   elif pattern.get.len == 0:
     result = (
-      text: "(disabled)",
-      state: vsWarn,
-      trailer: "")
+      text: "(semantic policy only)",
+      state: vsMuted,
+      trailer: "(supplemental regex cleared)")
   else:
     result = (
       text: pattern.get,
@@ -785,16 +784,16 @@ proc saveConfig*(cfg: Config) =
 ## Prints every configuration option to stdout.  The API key is
 ## stored with platform-specific encryption and cannot be
 ## retrieved; the display therefore only shows whether a key is
-## set.  When ``command-pattern`` is ``none`` (the default), the
-## full built-in regex is printed followed by "(default: built-in)"
-## so the user can see exactly what is active.  When it is set to
-## an empty string (disabled), "(disabled)" is shown.
+## set. When ``command-pattern`` is ``none`` (the default), the display says
+## that only the mandatory semantic policy is active. When it is explicitly
+## set to an empty string, the display says that the supplemental regex was
+## cleared while the same mandatory semantic policy remains active.
 ##
 ## In vivid mode each value is colourised according to its
 ## meaning via ``styleConfigValue``: the key placeholder is
 ## dimmed, booleans use a consistent green/grey pair, the
-## default command-pattern regex is dimmed with a highlighted
-## ``(default: built-in)`` trailer while a custom pattern is
+## semantic-policy-only default is dimmed with a highlighted
+## ``(default)`` trailer while a custom pattern is
 ## shown in emphatic red, and recognised values (known shells,
 ## strong models, in-range integers) are green with
 ## questionable ones in amber.
@@ -906,10 +905,10 @@ proc resetConfig*() =
 ##
 ## - ``value`` non-empty -> set to that value (custom pattern).
 ## - ``value`` empty, ``explicit = true`` -> set to ``some("")``
-##   (filtering disabled; triggered by
+##   (supplemental regex cleared; triggered by
 ##   ``get set command-pattern ""``).
 ## - ``value`` empty, ``explicit = false`` -> set to
-##   ``none(string)`` (restore built-in default; triggered by
+##   ``none(string)`` (restore the semantic-policy-only default; triggered by
 ##   ``get set command-pattern``).
 ##
 ## :param name: The kebab-case option name.

@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "release": "3.0.1",
+  "measured_on": "2026-08-30",
+  "fresh_v3_0_1_measurements": {
+    "startup": {
+      "method": "Monotonic perf_counter_ns; 30 warmups; interleaved version order; both processes pinned to CPU 0; stdout and stderr discarded",
+      "version": {
+        "v2.1": {
+          "n": 300,
+          "min_ms": 5.347355,
+          "median_ms": 8.700759,
+          "p95_ms": 10.149039,
+          "max_ms": 11.421061,
+          "mean_ms": 8.600483,
+          "stdev_ms": 0.909933
+        },
+        "v3.0.1": {
+          "n": 300,
+          "min_ms": 2.421222,
+          "median_ms": 3.232021,
+          "p95_ms": 4.355157,
+          "max_ms": 7.010631,
+          "mean_ms": 3.285244,
+          "stdev_ms": 0.607488
+        },
+        "latency_reduction_pct": 62.8536,
+        "speedup": 2.6920
+      },
+      "help": {
+        "v2.1": {
+          "n": 160,
+          "min_ms": 5.822763,
+          "median_ms": 9.172047,
+          "p95_ms": 10.842031,
+          "max_ms": 12.514729,
+          "mean_ms": 9.265278,
+          "stdev_ms": 0.879477
+        },
+        "v3.0.1": {
+          "n": 160,
+          "min_ms": 2.730266,
+          "median_ms": 3.562296,
+          "p95_ms": 4.859322,
+          "max_ms": 5.177008,
+          "mean_ms": 3.639773,
+          "stdev_ms": 0.509799
+        },
+        "latency_reduction_pct": 61.1614,
+        "speedup": 2.5748
+      }
+    },
+    "version_max_rss": {
+      "method": "GNU time -f %M; 30 interleaved independent processes per version",
+      "v2.1": {
+        "n": 30,
+        "min_kib": 5956,
+        "median_kib": 6188,
+        "p95_kib": 6308.0,
+        "max_kib": 6308
+      },
+      "v3.0.1": {
+        "n": 30,
+        "min_kib": 6128,
+        "median_kib": 6322,
+        "p95_kib": 6496.8,
+        "max_kib": 6504
+      },
+      "median_delta_kib": 134,
+      "median_change_pct": 2.1655
+    },
+    "policy": {
+      "deterministic_corpus": {
+        "realistic_safe": 535,
+        "targeted_attack": 713,
+        "generated_executable_obfuscation": 775,
+        "generated_shell_control": 1025,
+        "generated_long_option_abbreviation": 140,
+        "danger_word_false_positive": 164,
+        "generated_powershell": 31,
+        "total_decisions": 3383,
+        "linux_passed": 3383,
+        "windows_wine_passed": 3383,
+        "macos_passed": 3383
+      },
+      "throughput": {
+        "method": "Nim 2.2.6 release build pinned to CPU 9; 16-command mixed safe/attack workload; 1,600,000 decisions per run; CPU idle 95.32% before and 91.97% after; memory PSI full avg10 remained 0",
+        "runs_ns_per_decision": [3322.7, 3410.8, 3184.0, 3339.8, 3335.4],
+        "median_ns_per_decision": 3335.4,
+        "median_decisions_per_second": 299816
+      }
+    },
+    "stress": {
+      "concurrent_cache_writers": {
+        "waves": 8,
+        "writers_per_wave": 24,
+        "writes_total": 192,
+        "entries_preserved": 192,
+        "failures": 0,
+        "elapsed_ms": 677.847,
+        "schema_version": 3,
+        "hash_algorithm": "sha256",
+        "backup_valid_json": true,
+        "mode_octal": "0o600",
+        "stale_lock": false,
+        "temporary_files": 0
+      },
+      "command_deadline": {
+        "n": 20,
+        "expected_exit": 124,
+        "min_ms": 1055.070,
+        "median_ms": 1056.631,
+        "p95_ms": 1058.269,
+        "max_ms": 1059.212,
+        "mean_ms": 1056.821,
+        "all_under_1800ms": true,
+        "failures": 0
+      },
+      "output_cap": {
+        "n": 50,
+        "limit_bytes": 100,
+        "min_ms": 68.605,
+        "median_ms": 77.589,
+        "p95_ms": 87.611,
+        "max_ms": 89.769,
+        "mean_ms": 77.586,
+        "all_reported_truncated": true,
+        "failures": 0
+      }
+    },
+    "live_harness": {
+      "deepseek": {
+        "model": "deepseek-v4-flash",
+        "passed": 47,
+        "failed": 0,
+        "skipped": 0,
+        "elapsed_seconds": 220.74,
+        "max_rss_kib": 46964,
+        "swaps": 0
+      },
+      "qwen": {
+        "model": "qwen3.8-27b",
+        "endpoint": "DGX Spark through a local SSH tunnel",
+        "passed": 47,
+        "failed": 0,
+        "skipped": 0,
+        "elapsed_seconds": 433.46,
+        "max_rss_kib": 47076,
+        "swaps": 0
+      }
+    },
+    "platform_validation": {
+      "linux_x64": {
+        "nim_test_files": 12,
+        "nim_suites": 19,
+        "nim_tests": 122,
+        "policy_passed": 3383,
+        "cli_passed": 32,
+        "cli_failed": 0,
+        "offline_passed": 168,
+        "offline_failed": 0,
+        "offline_skipped": 126,
+        "release_compile_max_rss_kib": 262108,
+        "swaps": 0
+      },
+      "windows_x64_wine": {
+        "nim_test_files": 12,
+        "policy_passed": 3383,
+        "cli_applicable_passed": 31,
+        "cli_platform_skipped": 1,
+        "post_fix_offline_cache_log_passed": 21,
+        "post_fix_offline_cache_log_failed": 0,
+        "release_compile_max_rss_kib": 232284,
+        "swaps": 0
+      },
+      "macos_arm64_native": {
+        "nim_test_files": 12,
+        "nim_suites": 19,
+        "nim_tests": 122,
+        "policy_passed": 3383,
+        "cli_passed": 32,
+        "cli_failed": 0,
+        "offline_passed": 168,
+        "offline_failed": 0,
+        "offline_skipped": 113,
+        "release_compile_max_rss_bytes": 271400960,
+        "swaps": 0
+      }
+    },
+    "local_candidate_artifacts": {
+      "note": "Pre-CI validation artifacts. GitHub Actions rebuilds publishable payloads with Nim 2.2.10 and records their final hashes separately.",
+      "linux_x64": {
+        "compiler": "Nim 2.2.6",
+        "bytes": 2053936,
+        "sha256": "5d1d9fe9bc5a71a38f2512e128245fbd61874cf4dd9251188b9f93e64da92698"
+      },
+      "windows_x64_exe": {
+        "compiler": "Nim 2.2.6 MinGW cross-build",
+        "bytes": 2318336,
+        "sha256": "7c935f4e8c3e7efd27a3bb248b4b5324459ae4ff702c875012fc44d40225ed1f"
+      },
+      "macos_arm64": {
+        "compiler": "Nim 2.2.10 native Apple Silicon",
+        "bytes": 1769984,
+        "sha256": "5da3dd5fe3127bfbe14ef49e78d14bb16d04e27d33a32e805c0e9272061698dd"
+      }
+    },
+    "local_linux_binary_size_vs_v2_1": {
+      "v2_1_bytes": 1309192,
+      "v3_0_1_bytes": 2053936,
+      "change_pct": 56.89,
+      "tradeoff": "The increase includes the typed Harness, expanded semantic policy, native sandbox integration, hardened executor, cache durability, provider normalization, and TLS work."
+    }
+  },
+  "v3_harness_architecture_reference": {
+    "source": "benchmark-results-v3.0.0.json",
+    "scope": "Same v3 direct-first Harness architecture; retained as a historical architecture comparison and not presented as a fresh 3.0.1 measurement.",
+    "scenarios": {
+      "one_loopback_provider_response": {
+        "v2_1_median_ms": 1056.059,
+        "v3_median_ms": 3.042,
+        "latency_reduction_pct": 99.71,
+        "speedup": 347.141
+      },
+      "routine_command_40ms_provider_delay": {
+        "v2_1_median_ms": 2059.847,
+        "v3_median_ms": 45.760,
+        "latency_reduction_pct": 97.78,
+        "speedup": 45.015
+      },
+      "two_turn_continuation_40ms_per_request": {
+        "v2_1_median_ms": 3062.281,
+        "v3_median_ms": 127.231,
+        "latency_reduction_pct": 95.85,
+        "speedup": 24.069
+      },
+      "forced_command_cache_population": {
+        "v2_1_median_ms": 3061.818,
+        "v3_median_ms": 46.442,
+        "latency_reduction_pct": 98.48,
+        "speedup": 65.928
+      },
+      "cached_text_zero_provider_calls": {
+        "v2_1_median_ms": 3.381,
+        "v3_median_ms": 2.056,
+        "latency_reduction_pct": 39.20,
+        "speedup": 1.645
+      },
+      "four_120ms_tools_serial_vs_parallel": {
+        "serial_median_ms": 494.988,
+        "parallel_median_ms": 129.135,
+        "latency_reduction_pct": 73.91,
+        "speedup": 3.833
+      }
+    }
+  },
+  "environment": {
+    "startup_host": "Linux 7.1.10 x86_64 with glibc 2.43",
+    "cpu_count": 16,
+    "python": "3.14.7",
+    "startup_cpu_affinity": [0],
+    "resource_gate": "Before every compile or test: at least 8 GiB MemAvailable, memory PSI full avg10 below 1, load1 below logical CPU count, no residual compiler/test process, and at least 2 GiB available on /tmp. macOS required at least 25% system-wide memory free and 8 GiB disk available."
+  }
+}

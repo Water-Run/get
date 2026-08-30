@@ -25,6 +25,7 @@ import config
 import exec
 import harness_executor
 import harness_prompt
+import harness_protocol
 import harness_runtime
 import harness_types
 import llm
@@ -107,10 +108,10 @@ set options:
                        (positive integer, default: 30)
   max-output-bytes   captured bytes per command
                        (positive integer, default: 1048576)
-  command-pattern    forbidden command regex; omit value to
-                       restore the built-in default, use ""
-                       to disable only the supplemental regex
-                       (string, default: built-in supplemental blocklist)
+  command-pattern    optional supplemental forbidden regex;
+                       omit value to restore the semantic-only
+                       default, use "" to disable an existing regex
+                       (string, default: semantic policy only)
   system-prompt      custom system prompt
                        (string, default: empty)
   shell              shell executable
@@ -394,6 +395,17 @@ proc implApplyOverrides(
 func implLoadStyle(cfg: Config): StyleKind =
   result = toStyleKind(cfg.vivid)
 
+## Uses deterministic sampling for Qwen tool orchestration.  Qwen-compatible
+## serving stacks otherwise commonly default to a non-zero temperature, which
+## makes identical local-system queries vary between a valid tool call and a
+## fabricated tool name.  Other providers retain their own defaults because
+## some reasoning APIs reject an explicit temperature field.
+func implSamplingTemperature(model: string): Option[float] =
+  if toLowerAscii(model).contains("qwen"):
+    result = some(0.0)
+  else:
+    result = none(float)
+
 # ---------------------------------------------------------------------------
 # Private helpers — LLM call wrappers
 # ---------------------------------------------------------------------------
@@ -414,7 +426,8 @@ proc implLlmCall(
   let req = LlmRequest(
     model: cfg.model,
     messages: messages,
-    maxTokens: cfg.maxToken
+    maxTokens: cfg.maxToken,
+    temperature: implSamplingTemperature(cfg.model)
   )
   result = sendLlmRequest(
     req,
@@ -442,26 +455,19 @@ func implEffectiveShell(cfg: Config): string =
     raise newException(GetError,
       "configured shell is outside the supported trusted set")
 
-## Resolves the effective forbidden-command pattern.
+## Resolves the optional supplemental forbidden-command pattern.
 ##
 ## :param cfg: The loaded configuration.
-## :param sk: The active output style (for warnings).
-## :param hideProcess: Suppress warnings when true.
 ## :returns: The pattern string to use.
-proc implEffectivePattern(
-  cfg: Config,
-  sk: StyleKind,
-  hideProcess: bool
-): string =
+proc implEffectivePattern(cfg: Config): string =
   if cfg.commandPattern.isSome:
     let pat = cfg.commandPattern.get
     if pat.len == 0:
-      if not hideProcess:
-        styleWarning(sk,
-          "warning: command-pattern is empty — only the " &
-          "mandatory read-only policy remains active")
       return ""
     return pat
+  # v3's syntax-aware mandatory policy is authoritative by default. The old
+  # whole-command keyword regex confused dangerous executable names with
+  # ordinary search text and is now opt-in only.
   result = DEFAULT_COMMAND_PATTERN
 
 # ---------------------------------------------------------------------------
@@ -778,6 +784,7 @@ proc implHarnessFlow(
       model: cfg.model,
       messages: messages,
       maxTokens: cfg.maxToken,
+      temperature: implSamplingTemperature(cfg.model),
       tools:
         if useNative: @[shellToolDefinition()]
         else: @[],
@@ -807,32 +814,25 @@ proc implHarnessFlow(
       )
       result.providerRequests += 1
 
+  var priorToolObservations: seq[ToolObservation] = @[]
   let runTools: ToolBatchProc = proc(
     calls: seq[ToolCall],
     maxParallel: int
   ): seq[ToolObservation] =
-    var authorized = calls
-    var baselineReasons = newSeq[string](authorized.len)
-    var baselineRejected = false
-    for index in 0 ..< authorized.len:
-      if not cfg.hideProcess:
-        styleCommand(sk, "command", authorized[index].command)
-      let baseline = checkReadOnlyCommand(
-        authorized[index].command, shell)
-      if not baseline.allowed:
-        baselineReasons[index] = baseline.reason
-        baselineRejected = true
-    if baselineRejected:
-      result = newSeq[ToolObservation](authorized.len)
-      for index, call in authorized:
+    result = newSeq[ToolObservation](calls.len)
+    var authorized: seq[ToolCall] = @[]
+    var authorizedIndexes: seq[int] = @[]
+    var rejectedCount = 0
+    for index, call in calls:
+      if call.toolName != READ_ONLY_SHELL_TOOL or call.command.strip().len == 0:
+        rejectedCount += 1
         let detail =
-          if baselineReasons[index].len > 0:
-            "read-only policy rejected this command before execution: " &
-              baselineReasons[index] &
-              ". Propose a simpler allowlisted read-only command."
+          if call.toolName != READ_ONLY_SHELL_TOOL:
+            "provider proposed an unsupported tool; no command was executed. " &
+              "Use run_readonly_shell with one read-only command."
           else:
-            "command not executed because another call in this batch was " &
-              "rejected by the read-only policy. Propose a safe replacement."
+            "provider proposed invalid tool arguments; no command was " &
+              "executed. Use run_readonly_shell with a non-empty command."
         result[index] = ToolObservation(
           callId: call.id,
           toolName: call.toolName,
@@ -852,21 +852,85 @@ proc implHarnessFlow(
             126,
             cfg.logMaxEntries
           )
+        continue
+      var reused = false
+      for previous in priorToolObservations:
+        if previous.toolName == call.toolName and
+            previous.command.strip() == call.command.strip():
+          result[index] = previous
+          result[index].callId = call.id
+          result[index].elapsedMs = 0
+          result[index].output =
+            if previous.policyRejected:
+              "duplicate rejected proposal skipped; no command was executed. " &
+                "Use a different supported read-only reader. Earlier " &
+                "rejection: " & previous.output
+            elif previous.timedOut or previous.truncated:
+              "duplicate resource-limited reader skipped; no command was " &
+                "executed. Answer from existing evidence or use one cheaper " &
+                "reader."
+            else:
+              "duplicate reader skipped; no command was executed. Use the " &
+                "earlier observation for this exact command and answer now."
+          reused = true
+          break
+      if reused:
+        continue
       if not cfg.hideProcess:
+        styleCommand(sk, "command", call.command)
+      let baseline = checkReadOnlyCommand(
+        call.command, shell)
+      if not baseline.allowed:
+        rejectedCount += 1
+        let detail =
+          "read-only policy rejected this command before execution: " &
+            baseline.reason &
+            ". Propose a simpler allowlisted read-only command."
+        result[index] = ToolObservation(
+          callId: call.id,
+          toolName: call.toolName,
+          command: call.command,
+          output: detail,
+          exitCode: 126,
+          elapsedMs: 0,
+          timedOut: false,
+          truncated: false,
+          policyRejected: true
+        )
+        if cfg.log:
+          logExecution(
+            query,
+            call.command,
+            detail,
+            126,
+            cfg.logMaxEntries
+          )
+      else:
+        var checked = call
+        checked.command = implSafetyCheck(
+          checked.command,
+          query,
+          info,
+          cfg,
+          key,
+          sk,
+          effectivePattern
+        )
+        authorizedIndexes.add(index)
+        authorized.add(checked)
+    if rejectedCount > 0 and not cfg.hideProcess:
+      if authorized.len == 0:
         styleWarning(sk,
           "warning: read-only policy rejected the proposed tool batch; " &
             "requesting a safe revision")
+      else:
+        styleWarning(sk,
+          fmt"warning: read-only policy rejected {rejectedCount} unsafe " &
+            fmt"call(s); executing {authorized.len} approved call(s)")
+    if authorized.len == 0:
+      for observation in result:
+        priorToolObservations.add(observation)
       return
-    for index in 0 ..< authorized.len:
-      authorized[index].command = implSafetyCheck(
-        authorized[index].command,
-        query,
-        info,
-        cfg,
-        key,
-        sk,
-        effectivePattern
-      )
     if not cfg.hideProcess:
       styleProgress(sk,
         if authorized.len == 1:
@@ -874,13 +938,14 @@ proc implHarnessFlow(
         else:
           fmt"executing {authorized.len} calls " &
             fmt"(parallelism {maxParallel})...")
-    result = executeToolBatch(
+    let executed = executeToolBatch(
       authorized,
       shell,
       budget,
       maxParallel
     )
-    for index, observation in result:
+    for position, observation in executed:
+      result[authorizedIndexes[position]] = observation
       if cfg.log:
         logExecution(
           query,
@@ -890,7 +955,7 @@ proc implHarnessFlow(
           cfg.logMaxEntries
         )
       if not cfg.hideProcess and
-          authorized[index].resultMode == trmContinue:
+          authorized[position].resultMode == trmContinue:
         let preview =
           if observation.output.len > INTERMEDIATE_OUTPUT_PREVIEW_LEN:
             observation.output[0 ..< INTERMEDIATE_OUTPUT_PREVIEW_LEN] & "..."
@@ -898,6 +963,8 @@ proc implHarnessFlow(
             observation.output
         if preview.strip().len > 0:
           styleProgress(sk, preview.strip())
+    for observation in result:
+      priorToolObservations.add(observation)
 
   if not cfg.hideProcess:
     styleSeparator(sk, DIV_THIN)
@@ -1202,7 +1269,8 @@ proc implHandleIsOk() =
         role: "user",
         content: ISOK_USER_PROMPT)
     ],
-    maxTokens: ISOK_MAX_TOKENS
+    maxTokens: ISOK_MAX_TOKENS,
+    temperature: implSamplingTemperature(cfg.model)
   )
   let resp = sendLlmRequest(
     req,
@@ -1263,8 +1331,7 @@ proc implHandleQuery(
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()
   let info = collectFastSysInfo(shell)
-  let effectivePattern = implEffectivePattern(
-    cfg, sk, cfg.hideProcess)
+  let effectivePattern = implEffectivePattern(cfg)
   let toolsDisabled = explicitlyDisablesTools(query)
 
   # Build cache context.  When cache is disabled, all fields
@@ -1335,7 +1402,8 @@ proc implHandleQuery(
             checkedCommand,
             shell,
             max(cfg.commandTimeout, 0),
-            max(cfg.maxOutputBytes, 0)
+            max(cfg.maxOutputBytes, 0),
+            readOnlySandbox = true
           )
           let output = execRes.output.strip()
           if output.len > 0:

@@ -18,7 +18,7 @@ import utils
 
 ## Verifies versioned cache hashes across provider and context boundaries.
 suite "v3 cache identity":
-  test "provider and policy choices produce distinct global keys":
+  test "provider and effective policy choices produce stable global keys":
     let base = computeGlobalHashV3(
       "query", "bash", "model", "https://one.test/v1",
       "auto", "native", none(string), none(string))
@@ -38,7 +38,7 @@ suite "v3 cache identity":
       "a", "b\x1fc", "model", "https://one.test/v1",
       "auto", "native", none(string), none(string))
     check base != otherProvider
-    check base != clearedPattern
+    check base == clearedPattern
     check base != caseVariant
     check delimiterLeft != delimiterRight
     check base.len == 64

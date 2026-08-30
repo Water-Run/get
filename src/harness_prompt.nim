@@ -69,6 +69,19 @@ func implShellInstruction(shell: string): string =
   elif lower.contains("fish"):
     result = "fish: use fish syntax and avoid bash-only constructs."
 
+## Weather requests without a place need the already-discovered named timezone
+## made explicit at user-message priority. The note remains a fallback, so an
+## actual location in the user's request always wins.
+func implWeatherContext(query: string, timeZone: string): string =
+  if timeZone.len == 0:
+    return ""
+  let lower = toLowerAscii(query)
+  for marker in ["weather", "forecast", "天气", "天氣", "天気", "날씨"]:
+    if lower.contains(marker):
+      return "Host fallback: if no place is named, use timezone " & timeZone &
+        " as the location. For a web lookup use curl -q -fsSL --max-time 15 " &
+        "URL; do not add proxy or progress options."
+
 ## Builds the compact system instruction shared by native and fallback modes.
 ##
 ## :param info: Fast environment snapshot.
@@ -92,10 +105,15 @@ func implSystemPrompt(
       fmt"; local_date={info.localDate}"
     else:
       ""
+  let timezoneContext =
+    if info.timeZone.len > 0:
+      fmt"; timezone={info.timeZone}"
+    else:
+      ""
   var lines = @[
-    "You are get v3, a fast read-only command-line assistant.",
-    fmt"Environment: OS={info.os}; arch={info.arch}; cwd={info.cwd}; " &
-      fmt"shell={shell}{dateContext}."
+    "get v3: fast read-only assistant.",
+    fmt"Env: OS={info.os}; arch={info.arch}; cwd={info.cwd}; " &
+      fmt"shell={shell}{dateContext}{timezoneContext}."
   ]
   if toolsDisabled:
     lines.add(
@@ -103,40 +121,49 @@ func implSystemPrompt(
       "and follow the user's requested format; never emit a command or tool call.")
   else:
     lines.add(@[
-      "Answer directly unless local inspection is needed; then use " &
-        READ_ONLY_SHELL_TOOL & ".",
-      "Answer arithmetic, knowledge, translation, creative, yes/no, and " &
-        "'reply with' requests directly; never run true/false.",
-      "Inspect dynamic or machine-local facts; emit only runnable commands " &
-        "without placeholders.",
-      "Commands may only inspect/retrieve; never write, delete, install, " &
-        "configure, signal, or mutate.",
-      "Use one reader pipeline. Text: head/tail, display-only sed -n, or pure " &
-        "AWK field selectors. Performance: " &
+      "Answer static facts; inspect dynamic/local facts via " &
+        READ_ONLY_SHELL_TOOL & " with runnable, placeholder-free commands.",
+      "Only inspect/retrieve; no write/delete/install/config/signal/mutation " &
+        "or true/false.",
+      "One bounded plan; every pipeline/short ;/&&/|| sequence is " &
+        "observational. Text: head/tail, " &
+        "stdout-only sed, or pure AWK field selectors. Counts: use qualified " &
+        "globs+wc or find -printf/grep -o then sort|uniq -c; never " &
+        "find -exec. Performance: " &
         "top -b -n 1 | head -n 15 on Linux, top -l 1 -n 15 on macOS, " &
-        "or Get-Process | Select-Object -First 15 on PowerShell; never use an " &
-        "unbounded monitor.",
-      "Never use scripts, wrappers, inline code, substitution, " &
-        "chaining, loops, PowerShell splatting, output files, or advanced " &
-        "redirects. A literal < file needs a data reader; variables: only " &
+        "or Get-Process | Select-Object -First 15 on PowerShell; no unbounded " &
+        "monitors.",
+      "No scripts, wrappers, inline code; no substitution/loops/backgrounding/" &
+        "splatting/output files/advanced redirects; literal < file needs a data " &
+        "reader; variables: " &
         "$HOME, $USER, $LOGNAME, and $PWD.",
-      "Prefix unquoted globs with ./, or place -- before them.",
-      "For web reads, begin curl with -q; wget requires --no-config, --no-hsts, " &
-        "and -O-.",
-      "Git: never use status. diff-files --name-only, diff --cached, show, and " &
-        "patch log require --no-ext-diff --no-textconv.",
-      "Use return_raw only when output is the complete requested answer; use " &
-        "continue to explain, compare, summarize, or transform it.",
+      "Globs need ./ or --. Web: curl -q; wget --no-config --no-hsts -O-.",
+      "Weather without place: infer it from named timezone, never proxy egress; " &
+        "use local units.",
+      "Code composition: find -printf | sed | sort | uniq -c; " &
+        "skip .git/.ci/.release/build/dist/node_modules/__pycache__; return a " &
+        "compact breakdown.",
+      "Git summaries, first batch: branch -vv --no-color; staged via diff " &
+        "--cached, unstaged via diff-files (both --name-only --no-ext-diff " &
+        "--no-textconv); untracked via ls-files --others --exclude-standard | " &
+        "head -n 30; " &
+        "top dirs via " &
+        "cut -d/ -f1 | sort | uniq -c. Cap names+counts; never " &
+        "status or plain diff. Systemd: " &
+        "systemctl list-units or systemctl --failed --no-pager. macOS " &
+        "services: launchctl list | head -n 21, then answer.",
+      "return_raw only for complete requested answer output; continue to " &
+        "explain/compare/summarize composition/status.",
+      "grep/diff/cmp/test exit 1 is evidence, not a crash. On failure explain " &
+        "or try one simpler reader; don't repeat timed-out/truncated commands.",
       implStrategyInstruction(kind),
-      fmt"Hard limits: {budget.maxTurns} model turn(s), " &
-        fmt"{budget.maxToolCalls} tool call(s), " &
-        fmt"{budget.maxParallel} concurrent call(s).",
-      "Without native tools, emit one JSON action only: " &
+      fmt"Limits: {budget.maxTurns} turns, {budget.maxToolCalls} tools, " &
+        fmt"{budget.maxParallel} concurrent.",
+      "Without native tools emit one JSON action: " &
         "{\"type\":\"answer\",\"text\":\"...\"} or " &
         "{\"type\":\"tool_calls\",\"calls\":[{" &
-        "\"command\":\"...\",\"purpose\":\"...\"," &
-        "\"result_mode\":\"return_raw|continue\"}]}.",
-      "Do not wrap JSON in prose. Keep final answers concise."
+        "\"command\":\"...\",\"result_mode\":\"return_raw|continue\"}]}.",
+      "JSON only; be concise."
     ])
     let shellInstruction = implShellInstruction(shell)
     if shellInstruction.len > 0:
@@ -243,6 +270,10 @@ func buildHarnessMessages*(
   commandPattern: Option[string],
   toolsDisabled = false
 ): seq[LlmMessage] =
+  let weatherContext = implWeatherContext(query, info.timeZone)
+  let userContent =
+    if weatherContext.len > 0: query & "\n" & weatherContext
+    else: query
   result = @[
     LlmMessage(
       role: "system",
@@ -254,7 +285,7 @@ func buildHarnessMessages*(
     ),
     LlmMessage(
       role: "user",
-      content: query,
+      content: userContent,
       toolCallId: "",
       toolCallsJson: ""
     )
