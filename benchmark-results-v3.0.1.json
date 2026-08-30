@@ -128,14 +128,25 @@
         "failures": 0
       }
     },
+    "canonical_linux_payload": {
+      "github_actions_run": 33306378137,
+      "source_commit": "a349bd4e3a2b45b46cb5b14f7419ba23fe75a981",
+      "compiler": "Nim 2.2.10",
+      "bytes": 2236088,
+      "mode_octal": "0o755",
+      "sha256": "71d07ac4c9a14ec74551b64057c74aee9f488a2213e0c55da8820c512c21a1d1",
+      "same_file_used_for_both_provider_replays": true
+    },
     "live_harness": {
       "deepseek": {
         "model": "deepseek-v4-flash",
+        "endpoint": "https://api.deepseek.com",
         "passed": 47,
         "failed": 0,
         "skipped": 0,
-        "elapsed_seconds": 220.74,
-        "max_rss_kib": 46964,
+        "semantic_retries_used": 0,
+        "elapsed_seconds": 230.00,
+        "max_rss_kib": 46296,
         "swaps": 0
       },
       "qwen": {
@@ -144,8 +155,9 @@
         "passed": 47,
         "failed": 0,
         "skipped": 0,
-        "elapsed_seconds": 433.46,
-        "max_rss_kib": 47076,
+        "semantic_retries_used": 0,
+        "elapsed_seconds": 406.76,
+        "max_rss_kib": 46564,
         "swaps": 0
       }
     },

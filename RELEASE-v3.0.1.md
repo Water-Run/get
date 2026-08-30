@@ -1,9 +1,12 @@
 # get v3.0.1 release plan
 
-Status: final source candidate. Local Linux, Windows/Wine, native macOS,
-security, stress, DeepSeek, and DGX Qwen gates pass. Native Nim 2.2.10 CI,
-canonical-payload provider replay, checksum-bound assembly, archive installation,
-tagging, and publication are intentionally ordered after the source commit.
+Status: provider-validated release candidate. Source commit
+`a349bd4e3a2b45b46cb5b14f7419ba23fe75a981` is on `main`; Windows CI run
+33306374273 and the three native Nim 2.2.10 gates in no-assembly run
+33306378137 are green. The run's 2,236,088-byte Linux payload, SHA-256
+`71d07ac4c9a14ec74551b64057c74aee9f488a2213e0c55da8820c512c21a1d1`,
+passed both canonical provider replays. Pinned rebuild, checksum-bound assembly,
+archive installation, tagging, and publication remain ordered release gates.
 
 ## Release purpose
 
@@ -31,11 +34,12 @@ durability, resource-aware test orchestration, and cross-platform coverage.
 - [x] Executor stress passes 20/20 deadlines and 50/50 output caps.
 - [x] Local candidate: DeepSeek `deepseek-v4-flash` 47/47.
 - [x] Local candidate: DGX Qwen `qwen3.8-27b` 47/47.
-- [ ] Push the reviewed source commit to the sole `main` branch.
-- [ ] Native GitHub Actions Linux/Windows/macOS jobs pass with Nim 2.2.10.
-- [ ] Download the canonical Linux artifact and replay 47/47 with each provider.
-- [ ] Pin the exact canonical Linux SHA-256 and push that metadata-only update.
-- [ ] The second native CI run is green and reproduces the pinned Linux payload.
+- [x] Push the reviewed source commit to the sole `main` branch.
+- [x] Native GitHub Actions Linux/Windows/macOS jobs pass with Nim 2.2.10.
+- [x] Download one canonical Linux artifact and replay 47/47 independently with
+  DeepSeek and Qwen, without rebuilding between providers.
+- [x] Pin the exact canonical Linux SHA-256 in the metadata-only release commit.
+- [ ] The pinned native CI run is green and reproduces the validated Linux payload.
 - [ ] Dispatch checksum-bound assembly and verify the attested flat package.
 - [ ] Derive and independently install-test all three platform archives.
 - [ ] Install the packaged Linux archive on this system while preserving config.

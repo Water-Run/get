@@ -170,9 +170,12 @@ and that provenance distinction.
 - Offline comprehensive matrix: Linux 168 passed/0 failed/126 live-only
   skipped; Windows/Wine the same; macOS 168 passed/0 failed/113 platform/live
   skipped.
-- Live pre-canonical Harness: DeepSeek `deepseek-v4-flash` 47/47 and DGX Qwen
-  `qwen3.8-27b` 47/47, zero failures and zero skips. Qwen improved from an
-  earlier 41/47 compatibility run to 47/47: +6 cases, +12.8 percentage points.
+- Live canonical Harness: the exact 2,236,088-byte Nim 2.2.10 Linux CI payload
+  (`71d07ac4c9a14ec74551b64057c74aee9f488a2213e0c55da8820c512c21a1d1`)
+  passed DeepSeek `deepseek-v4-flash` 47/47 in 230.00 seconds and DGX Qwen
+  `qwen3.8-27b` 47/47 in 406.76 seconds, with zero failures, skips, semantic
+  retries, or swaps. Qwen improved from an earlier 41/47 compatibility run to
+  47/47: +6 cases, +12.8 percentage points.
 - Cache stress: 192/192 concurrent writes preserved across 8 waves × 24
   writers; valid primary and backup, schema 3/SHA-256, mode `0600`, no stale
   lock, and no temporary files; the writer phase took 677.847 ms.

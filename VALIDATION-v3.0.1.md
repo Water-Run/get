@@ -2,10 +2,12 @@
 
 Date: 2026-08-30 (Asia/Shanghai)
 
-Status: the final source candidate passes local Linux, Windows/Wine, native
-Apple Silicon, deterministic security, stress, and two-provider live Harness
-gates. Native GitHub Actions builds with Nim 2.2.10 and checksum-bound replay
-of the canonical Linux payload remain mandatory before a public tag or Release.
+Status: the source candidate passes local Linux, Windows/Wine, native Apple
+Silicon, deterministic security, stress, and two-provider live Harness gates.
+Windows CI run 33306374273 and all three native Nim 2.2.10 jobs in no-assembly
+run 33306378137 are green. That run's exact Linux payload passes both canonical
+provider replays. A pinned rebuild, checksum-bound assembly, archive tests, and
+installation remain mandatory before a public tag or Release.
 
 ## Candidate and evidence rules
 
@@ -24,6 +26,11 @@ of the canonical Linux payload remain mandatory before a public tag or Release.
   `5da3dd5fe3127bfbe14ef49e78d14bb16d04e27d33a32e805c0e9272061698dd`.
 - Publishable binaries are rebuilt by GitHub Actions with Nim 2.2.10. Local
   hashes above are validation provenance, not promised Release-asset hashes.
+- Canonical Linux CI payload from run 33306378137 and source commit
+  `a349bd4e3a2b45b46cb5b14f7419ba23fe75a981`: 2,236,088 bytes, SHA-256
+  `71d07ac4c9a14ec74551b64057c74aee9f488a2213e0c55da8820c512c21a1d1`.
+  This one downloaded file was used unchanged for both provider replays and is
+  pinned into the assembly gate.
 - A failure is never silently retried in deterministic gates. Live semantic
   checks report an evaluation attempt explicitly when the model first chooses
   an unusable but non-executed proposal.
@@ -227,13 +234,14 @@ release compile peaked at 262,108 KiB.
 
 ## Live provider validation
 
-The final local Linux candidate binary was exercised independently against two
-OpenAI-compatible providers with isolated configuration and `--stop-on-fail`:
+The exact canonical Nim 2.2.10 Linux CI payload identified above was exercised
+independently against two OpenAI-compatible providers with isolated
+configuration and `--stop-on-fail`:
 
 | Provider/model | Passed | Failed | Skipped | Elapsed | Max RSS | Swaps |
 |---|---:|---:|---:|---:|---:|---:|
-| DeepSeek `deepseek-v4-flash` | 47 | 0 | 0 | 220.74 s | 46,964 KiB | 0 |
-| DGX Qwen `qwen3.8-27b` | 47 | 0 | 0 | 433.46 s | 47,076 KiB | 0 |
+| DeepSeek `deepseek-v4-flash` | 47 | 0 | 0 | 230.00 s | 46,296 KiB | 0 |
+| DGX Qwen `qwen3.8-27b` | 47 | 0 | 0 | 406.76 s | 46,564 KiB | 0 |
 
 The 47 cases cover deterministic file facts plus realistic Chinese host tasks:
 IP address, weather derived from host timezone rather than proxy egress,
@@ -249,9 +257,17 @@ nonzero handling bring the final run to 47/47: six additional cases and
 12.8 percentage points. No Qwen-specific bypass of policy or execution was
 introduced; every parsed action converges on the same deterministic gate.
 
-The canonical Nim 2.2.10 Linux artifact must be replayed against both providers
-after the no-assembly CI run. Its SHA-256 is then pinned in the workflow; final
-assembly refuses a different Linux payload.
+Neither canonical replay needed its one permitted independent semantic retry.
+DeepSeek started with 10,726,880 KiB available memory, PSI full avg10 0.03, and
+load 3.56/16. Qwen started with 14,044,940 KiB available locally, PSI 0.16,
+load 3.97/16, plus 38,771,720 KiB available and PSI 0.00 on DGX Spark. Both
+reported zero task-local swaps. The Qwen SSH tunnel was bound to loopback,
+verified after use, and its exact task-owned nested process was terminated;
+the pre-existing model service was not changed.
+
+The workflow now pins this payload's SHA-256. Final assembly refuses a
+different Linux payload, so a nondeterministic or source-changing rebuild
+stops publication rather than silently substituting a binary.
 
 ## Cache and executor stress
 
@@ -313,12 +329,9 @@ kernel, operator-controlled tool configuration, remote GET/HEAD semantics, and
 access-time/incidental cache effects. A compromised reader, server, sandbox, or
 host is outside the guarantee.
 
-Before publishing:
-
-1. native Linux, Windows, and macOS GitHub Actions gates must be green;
-2. the exact canonical Linux payload must pass 47/47 with each provider;
-3. the workflow must pin that payload hash;
-4. checksum-bound assembly must pass;
-5. all three platform archives must be unpacked, checksum-verified, and
-   installer-tested;
-6. only then may `v3.0.1` be tagged and the GitHub Release published.
+Completed publication gates are the initial native Linux/Windows/macOS CI run,
+47/47 canonical replay with each provider, and the pinned Linux payload hash.
+Before publishing, the pinned commit's native jobs and checksum-bound assembly
+must pass; all three platform archives must then be unpacked,
+checksum-verified, and installer-tested. Only after those checks may `v3.0.1`
+be tagged and the GitHub Release published.
