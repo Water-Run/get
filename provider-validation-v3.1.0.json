@@ -1,9 +1,33 @@
 {
   "schema_version": 1,
   "version": "3.1.0",
-  "status": "pending",
-  "linux_payload_sha256": "",
-  "canonical_workflow_run": "",
-  "providers": {},
-  "qwen_replay": "not_run: historical local endpoint is unavailable; this release validates the currently configured DeepSeek provider"
+  "status": "passed",
+  "linux_payload_sha256": "09886915f4bfef39cb5f2c5d7f8c6bd657ed05f013ff6e305711da46a1eb37ed",
+  "canonical_workflow_run": "https://github.com/Water-Run/get/actions/runs/34077459271",
+  "canonical_source_commit": "6d3cd66913a9ed0dc520213c1a099e13a4c674be",
+  "suite_definitions": {
+    "harness": "44 section J checks plus 3 configuration/key restoration checks; total 47",
+    "regressions": "8 focused read-only, Markdown, review and connectivity scenarios using the current fish configuration"
+  },
+  "providers": {
+    "deepseek": {
+      "model": "deepseek-v4-flash",
+      "harness": {
+        "passed": 47,
+        "failed": 0,
+        "skipped": 0,
+        "expected": 47,
+        "semantic_retries": 0
+      },
+      "regressions": {
+        "expected": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "qwen_replay": "not_run: the historical local endpoint is unavailable; no prior Qwen result is asserted for v3.1.0",
+  "live_configuration_preserved": true,
+  "elapsed_seconds": 313.91
 }

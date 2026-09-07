@@ -20,7 +20,7 @@ env:
   NIM_VERSION: 2.2.10
   RELEASE_VERSION: 3.1.0
   # Refresh only after the no-assembly payload passes the recorded provider gates.
-  PROVIDER_VALIDATED_LINUX_SHA256: pending-v3.1.0-provider-replay
+  PROVIDER_VALIDATED_LINUX_SHA256: 09886915f4bfef39cb5f2c5d7f8c6bd657ed05f013ff6e305711da46a1eb37ed
 
 jobs:
   linux-amd64:

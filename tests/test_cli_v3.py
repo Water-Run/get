@@ -307,6 +307,7 @@ class GetV3CliTests(unittest.TestCase):
         if os.name != "posix" or self.target_os == "windows":
             self.skipTest("POSIX terminal rendering test")
         import pty
+        import select
 
         def terminal(*args: str, extra_env: dict[str, str] | None = None) -> str:
             master, slave = pty.openpty()
@@ -314,27 +315,42 @@ class GetV3CliTests(unittest.TestCase):
             env.pop("NO_COLOR", None)
             env.update(extra_env or {})
             try:
-                result = subprocess.run(
-                    [*self.command, *args], cwd=self.work, env=env,
-                    stdout=slave, stderr=subprocess.PIPE, timeout=15,
-                )
-                os.close(slave)
-                slave = -1
-                chunks = []
-                while True:
+                # Keep the slave open until output is drained: macOS may discard
+                # queued output when its last slave descriptor closes. Read while
+                # the child runs as well, so a full PTY buffer cannot block it.
+                with tempfile.TemporaryFile() as errors:
+                    process = subprocess.Popen(
+                        [*self.command, *args], cwd=self.work, env=env,
+                        stdout=slave, stderr=errors,
+                    )
+                    chunks = []
+                    deadline = time.monotonic() + 15
                     try:
-                        chunk = os.read(master, 8192)
-                    except OSError:
-                        break
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                        while True:
+                            finished = process.poll() is not None
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise subprocess.TimeoutExpired(process.args, 15)
+                            ready, _, _ = select.select(
+                                [master], [], [], 0 if finished else min(0.1, remaining))
+                            if ready:
+                                chunk = os.read(master, 8192)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                            elif finished:
+                                break
+                        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait()
+                    errors.seek(0)
+                    self.assertEqual(process.returncode, 0, errors.read())
                 return b"".join(chunks).decode("utf-8").replace("\r\n", "\n")
             finally:
                 os.close(master)
-                if slave >= 0:
-                    os.close(slave)
+                os.close(slave)
 
         query = "markdown answer without tools terminal"
         rendered = terminal(query, "--markdown", "--vivid", "--cache")
