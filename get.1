@@ -430,6 +430,14 @@ is required for ordinary HTTPS.
 Terminal proxy variables are respected by default. When system-proxy is true,
 enabled Windows Internet Settings take precedence. NO_PROXY/no_proxy bypasses
 either source. Credentials are redacted when a proxy URL is displayed.
+.PP
+NO_PROXY entries are comma-separated. Domains match themselves and their
+subdomains; IP literals match the exact address; a single * bypasses all proxies.
+An entry without a port applies to every port. A host:port entry applies only
+to that destination port, using HTTP 80 or HTTPS 443 when the URL omits it.
+IPv6 may use ::1 or [::1]; an IPv6 port requires brackets, as in [::1]:8080.
+Entries with empty, nonnumeric, or out-of-range ports (outside 1-65535) are
+ignored without broadening the bypass to the whole host.
 .
 .SH FILES
 .TP

@@ -119,22 +119,86 @@ func implChooseProxy(
     return (url: terminalProxy, source: "terminal")
   result = (url: "", source: "")
 
-## Returns whether NO_PROXY bypasses the target host.
-proc implNoProxyMatch(targetHost: string): bool =
+## Parses a literal TCP port without accepting signs, spaces, or overflow.
+##
+## :param value: Decimal port text from a URL or NO_PROXY entry.
+## :returns: A port in 1..65535, or none for an invalid value.
+func implProxyPort(value: string): Option[int] =
+  if value.len == 0:
+    return none(int)
+  var port = 0
+  for character in value:
+    if character notin {'0' .. '9'}:
+      return none(int)
+    port = port * 10 + ord(character) - ord('0')
+    if port > 65_535:
+      return none(int)
+  result = if port > 0: some(port) else: none(int)
+
+## Parses an IP literal locally, without resolving hostnames through DNS.
+##
+## :param host: Unbracketed host text to classify.
+## :returns: The address, or none when the text is not an IP literal.
+func implProxyAddress(host: string): Option[IpAddress] =
+  try:
+    result = some(parseIpAddress(host))
+  except ValueError:
+    result = none(IpAddress)
+
+## Checks NO_PROXY against a target host and its effective destination port.
+##
+## Bare hosts apply to all ports; a qualified entry must match the port too.
+## IPv6 port qualifiers require brackets so address colons stay unambiguous.
+## Invalid entries are ignored rather than widened to unrestricted hosts.
+##
+## :param targetHost: Lowercase, unbracketed destination host.
+## :param targetPort: Explicit or scheme-default port, if valid and known.
+## :returns: Whether an entry bypasses the proxy for this destination.
+proc implNoProxyMatch(targetHost: string, targetPort: Option[int]): bool =
   let noProxy = getEnv("NO_PROXY", getEnv("no_proxy", ""))
   if noProxy.len == 0 or targetHost.len == 0:
     return false
+  let targetAddress = implProxyAddress(targetHost)
   for rawEntry in noProxy.split(','):
-    var entry = toLowerAscii(rawEntry.strip())
+    let entry = toLowerAscii(rawEntry.strip())
     if entry == "*":
       return true
-    if entry.startsWith("."):
-      entry = entry[1 .. ^1]
-    let colon = entry.rfind(':')
-    if colon > 0 and entry.count(':') == 1:
-      entry = entry[0 ..< colon]
-    if entry.len > 0 and
-        (targetHost == entry or targetHost.endsWith("." & entry)):
+    var host = entry
+    var port = none(int)
+    if entry.startsWith("["):
+      let closing = entry.find(']')
+      if closing <= 1:
+        continue
+      host = entry[1 ..< closing]
+      if not host.contains(':'):
+        continue
+      if closing + 1 < entry.len:
+        if entry[closing + 1] != ':':
+          continue
+        port = implProxyPort(entry[closing + 2 .. ^1])
+        if port.isNone:
+          continue
+    elif entry.count(':') == 1:
+      let colon = entry.find(':')
+      host = entry[0 ..< colon]
+      port = implProxyPort(entry[colon + 1 .. ^1])
+      if port.isNone:
+        continue
+    if port.isSome and port != targetPort:
+      continue
+    if host.startsWith("."):
+      host = host[1 .. ^1]
+    if host.len == 0:
+      continue
+    let address = implProxyAddress(host)
+    if address.isSome:
+      if targetAddress.isSome and address.get == targetAddress.get:
+        return true
+      continue
+    if targetAddress.isSome or host.contains(':') or
+        host.contains('[') or host.contains(']'):
+      continue
+    if targetHost == host or targetHost.endsWith("." & host):
       return true
   result = false
 
@@ -230,13 +294,20 @@ proc implDetectProxy(
 ): tuple[url: string, source: string] =
   var targetHost = ""
   var targetScheme = ""
+  var targetPort = none(int)
   try:
     let target = parseUri(targetUrl)
     targetHost = toLowerAscii(target.hostname)
     targetScheme = toLowerAscii(target.scheme)
+    if target.port.len > 0:
+      targetPort = implProxyPort(target.port)
+    elif targetScheme == "http":
+      targetPort = some(80)
+    elif targetScheme == "https":
+      targetPort = some(443)
   except ValueError:
     discard
-  if implNoProxyMatch(targetHost):
+  if implNoProxyMatch(targetHost, targetPort):
     return (url: "", source: "")
 
   let terminalProxy = implTerminalProxy(targetScheme)

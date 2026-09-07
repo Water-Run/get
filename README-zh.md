@@ -177,6 +177,8 @@ get set command-pattern ""                 # 清除已有附加正则
 
 默认读取终端中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。Windows 上启用 `system-proxy=true` 后，已开启的 Internet Settings 优先；`NO_PROXY` 会绕过两类代理来源。
 
+`NO_PROXY` / `no_proxy` 使用逗号分隔条目：域名匹配本身及其子域名，IP 地址按地址精确匹配，`*` 绕过所有代理。未指定端口的条目适用于所有端口；`example.com:443` 仅匹配目标端口 443，URL 省略端口时按 HTTP 80、HTTPS 443 判断。IPv6 可写为 `::1` 或 `[::1]`，限定端口时使用 `[::1]:8080`。端口为空、非数字或不在 1–65535 范围内的条目会被忽略，不会扩大为整台主机绕过代理。
+
 ## Markdown 输出
 
 ```bash

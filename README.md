@@ -201,6 +201,8 @@ get set command-pattern ""                 # clear an existing supplemental rege
 
 Terminal `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` variables are honored by default. On Windows, `system-proxy=true` makes enabled Internet Settings take precedence; `NO_PROXY` bypasses either source.
 
+`NO_PROXY` / `no_proxy` accepts comma-separated entries: domains match themselves and their subdomains, IP literals match the exact address, and `*` bypasses all proxies. Entries without a port apply to every port; `example.com:443` applies only to destination port 443, with HTTP 80 and HTTPS 443 used when the URL omits a port. IPv6 may use `::1` or `[::1]`; a port requires brackets, as in `[::1]:8080`. Entries with empty, nonnumeric, or out-of-range ports (outside 1–65535) are ignored instead of bypassing the proxy for the whole host.
+
 ## Markdown output
 
 Use `get set markdown true` (default), `get set markdown false`, or per-query

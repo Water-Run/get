@@ -417,14 +417,14 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "feedback-compact-ok")
 
-    def test_09_http_proxy_uses_the_reusable_transport(self) -> None:
-        ProxyHandler.request_count = 0
-        proxy_url = f"http://127.0.0.1:{self.proxy_port}"
+    def proxy_environment(self, no_proxy: str = "") -> dict[str, str]:
+        """Select only the local mock proxy and the requested bypass rules."""
+
         proxy_env = {
-            "HTTP_PROXY": proxy_url,
+            "HTTP_PROXY": f"http://127.0.0.1:{self.proxy_port}",
             "HTTPS_PROXY": "",
             "ALL_PROXY": "",
-            "NO_PROXY": "",
+            "NO_PROXY": no_proxy,
         }
         if self.target_os != "windows":
             proxy_env.update({
@@ -433,14 +433,40 @@ class GetV3CliTests(unittest.TestCase):
                 "all_proxy": "",
                 "no_proxy": "",
             })
+        return proxy_env
+
+    def test_09_http_proxy_uses_the_reusable_transport(self) -> None:
+        ProxyHandler.request_count = 0
         result = self.run_get(
             "proxy cli",
             "--no-cache",
-            env_override=proxy_env,
+            env_override=self.proxy_environment(),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "native-ok")
         self.assertGreater(ProxyHandler.request_count, 0)
+
+    def test_09b_no_proxy_port_limits_actual_proxy_bypass(self) -> None:
+        provider_port = self.server.server_address[1]
+        other_port = 1 if provider_port != 1 else 2
+        for entry, expected_proxy_requests in [
+            (f"127.0.0.1:{provider_port}", 0),
+            (f"127.0.0.1:{other_port}", 1),
+            ("127.0.0.1:invalid", 1),
+        ]:
+            with self.subTest(no_proxy=entry):
+                before = ProxyHandler.request_count
+                result = self.run_get(
+                    "proxy cli",
+                    "--no-cache",
+                    env_override=self.proxy_environment(entry),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "native-ok")
+                self.assertEqual(
+                    ProxyHandler.request_count - before,
+                    expected_proxy_requests,
+                )
 
     def test_10_cached_command_retains_output_cap(self) -> None:
         first = self.run_get("large output cached cli")
