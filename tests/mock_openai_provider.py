@@ -11,6 +11,14 @@ from urllib.parse import urlsplit
 
 
 ADVERSARIAL_COMMANDS = {
+    "escaped-double-quote": 'echo "\\\""; touch never-run #"',
+    "ambiguous-glob": "rg -e -- *",
+    "nft-second-command": "nft list ruleset ';' add table inet never_run",
+    "tmux-second-command": "tmux list-sessions ';' run-shell 'touch never-run'",
+    "yq-split": "yq -s never-run . input.yml",
+    "rpm-macro": "rpm -qE '%{lua:os.execute(\"touch never-run\")}'",
+    "rpm-predefine": "rpm -qa --predefine '_dbpath never-run'",
+    "ip-abbreviation": "ip l s lo down",
     "quoted-name": "r''m -f never-run",
     "redirection": "printf unsafe > never-run",
     "shell-wrapper": "sh -c 'touch never-run'",
@@ -82,13 +90,17 @@ class Handler(BaseHTTPRequestHandler):
             if message.get("role") == "system"
         ).lower()
         has_tools = bool(body.get("tools"))
-        is_windows = "os=windows" in system_text
+        is_windows = "os=windows" in system_text or "os: windows" in system_text
         is_macos = "os=macos" in system_text or "os=darwin" in system_text
         is_cmd = "cmd.exe:" in system_text
 
         def output(text: str) -> str:
             """Return a deterministic command for the requested test shell."""
             return f"echo {text}" if is_windows else f"printf {text}"
+
+        if "reply with exactly the word 'ok'" in user_text:
+            self._completion(content="not ok" if body.get("model") == "mock-not-ok" else "ok")
+            return
 
         if "transient transport" in user_text \
                 and Handler.transient_failures < 3:
@@ -111,9 +123,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._completion(content="UNSAFE: command changes state.")
             elif "force unsafe review" in system_text:
                 self._completion(content="```sh\nrm -rf ./never-run\n```")
+            elif "invalid review verdict" in system_text:
+                self._completion(content="I cannot decide.")
             else:
                 self._completion(
                     content=f"```sh\n{output('reviewed-ok')}\n```")
+            return
+        if "markdown answer" in user_text:
+            self._completion(content="# Report\n\n- **ready**\n\n```sh\nprintf example\n```")
+            return
+        if "markdown raw" in user_text:
+            self._tool_completion([(
+                "raw-markdown", "type answer.md" if is_cmd else
+                "Get-Content answer.md" if is_windows else "cat answer.md",
+                "return_raw",
+            )])
             return
         if "fallback" in user_text and has_tools:
             self._write(400, {"error": {"message": "unknown field tools"}})

@@ -73,6 +73,9 @@ const DEFAULT_LOG_MAX_ENTRIES* = 1000
 ## Default vivid mode flag.
 const DEFAULT_VIVID* = true
 
+## Render model Markdown when stdout is an interactive terminal.
+const DEFAULT_MARKDOWN* = true
+
 ## Default maximum number of model turns in one harness run.
 const DEFAULT_MAX_ROUNDS* = 3
 
@@ -143,6 +146,7 @@ type
     cacheMaxEntries*: int            ## Max cached entries.
     logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
+    markdown*: bool                  ## Render model answers in interactive terminals.
     maxRounds*: int                  ## Max model turns per harness run.
     maxToolCalls*: int               ## Max tool calls per harness run.
     maxParallel*: int                ## Max concurrent tool calls.
@@ -508,6 +512,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheMaxEntries": cfg.cacheMaxEntries,
     "logMaxEntries":   cfg.logMaxEntries,
     "vivid":           cfg.vivid,
+    "markdown":        cfg.markdown,
     "maxRounds":       cfg.maxRounds,
     "maxToolCalls":    cfg.maxToolCalls,
     "maxParallel":     cfg.maxParallel,
@@ -588,6 +593,7 @@ proc implJsonToConfig(
     logMaxEntries: node{"logMaxEntries"}.getInt(
       defaults.logMaxEntries),
     vivid: node{"vivid"}.getBool(defaults.vivid),
+    markdown: node{"markdown"}.getBool(defaults.markdown),
     maxRounds:
       if storedMaxRounds in 1 .. MAX_HARNESS_ROUNDS:
         storedMaxRounds
@@ -658,6 +664,7 @@ func defaultConfig*(): Config =
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
     vivid:           DEFAULT_VIVID,
+    markdown:        DEFAULT_MARKDOWN,
     maxRounds:       DEFAULT_MAX_ROUNDS,
     maxToolCalls:    DEFAULT_MAX_TOOL_CALLS,
     maxParallel:     DEFAULT_MAX_PARALLEL,
@@ -702,11 +709,9 @@ proc saveKey*(key: Option[string]) =
   let value = key.get
   when defined(windows):
     let encrypted = implEncryptDpapi(value)
-    writeFile(path, encrypted)
+    writePrivateFile(path, encrypted)
   else:
-    writeFile(path, value)
-    setFilePermissions(path,
-      {fpUserRead, fpUserWrite})
+    writePrivateFile(path, value)
 
 ## Loads the API key from platform-specific secure storage.
 ##
@@ -775,7 +780,7 @@ proc loadConfig*(): Config =
 proc saveConfig*(cfg: Config) =
   let path = getConfigFilePath()
   let node = implConfigToJson(cfg)
-  writeFile(path, pretty(node, 2) & "\n")
+  writePrivateFile(path, pretty(node, 2) & "\n")
 
 # ---------------------------------------------------------------------------
 # Public API — display
@@ -878,6 +883,8 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     classifyInt(cfg.logMaxEntries, 1, 100_000))
   styleConfigValue(sk, "vivid", $cfg.vivid,
     classifyBool(cfg.vivid))
+  styleConfigValue(sk, "markdown", $cfg.markdown,
+    classifyBool(cfg.markdown))
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -1023,6 +1030,9 @@ proc setConfigOption*(
   of "vivid":
     cfg.vivid = implParseBool(
       value, name, DEFAULT_VIVID)
+  of "markdown":
+    cfg.markdown = implParseBool(
+      value, name, DEFAULT_MARKDOWN)
   of "max-rounds":
     cfg.maxRounds = implParsePositiveInt(
       value, name, DEFAULT_MAX_ROUNDS,

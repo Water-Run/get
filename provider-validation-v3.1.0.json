@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "version": "3.1.0",
+  "status": "pending",
+  "linux_payload_sha256": "",
+  "canonical_workflow_run": "",
+  "providers": {},
+  "qwen_replay": "not_run: historical local endpoint is unavailable; this release validates the currently configured DeepSeek provider"
+}

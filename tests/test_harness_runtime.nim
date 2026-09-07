@@ -52,6 +52,46 @@ func initialMessages(): seq[LlmMessage] =
 
 ## Verifies all strategy transitions over injected boundaries.
 suite "unified harness runtime":
+  test "reviewed commands retain the proposal identity without hiding execution":
+    let model: ModelTurnProc = proc(messages: seq[LlmMessage],
+        enableNativeTools, allowParallel: bool): LlmResponse =
+      LlmResponse(content: "{\"type\":\"tool_calls\",\"calls\":[{\"command\":\"pwd\"}]}")
+    let revised: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      result = @[fakeObservation(calls[0])]
+      result[0].proposedCommand = calls[0].command
+      result[0].command = "uname"
+      result[0].output = "Linux"
+    let options = HarnessRunOptions(kind: hkDirect, protocol: tpkNative,
+      budget: defaultRunBudget(hkDirect))
+    let value = runHarness(initialMessages(), options, model, revised)
+    check value.finalCommand == "uname"
+    check value.observations[0].command == "uname"
+    check value.output == "Linux"
+    let mismatch: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      result = @[fakeObservation(calls[0])]
+      result[0].command = "uname"
+    expect GetError:
+      discard runHarness(initialMessages(), options, model, mismatch)
+
+  test "text-only answers may contain code without invoking an executor":
+    const answer = "# Example\n```sh\nprintf sample\n```"
+    let model: ModelTurnProc = proc(messages: seq[LlmMessage],
+        enableNativeTools, allowParallel: bool): LlmResponse =
+      check not enableNativeTools
+      LlmResponse(content: answer)
+    let forbidden: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      check false
+    for protocol in [tpkAuto, tpkNative, tpkLegacy]:
+      let value = runHarness(initialMessages(),
+        HarnessRunOptions(kind: hkAuto, protocol: protocol,
+          budget: defaultRunBudget(hkAuto), toolsDisabled: true), model, forbidden)
+      check value.output == answer
+      check value.metrics.toolCalls == 0
+      check value.metrics.modelTurns == 1
+
   test "native terminal call completes in one model turn":
     var modelCalls = 0
     let model: ModelTurnProc = proc(

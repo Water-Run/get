@@ -31,7 +31,8 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[strformat, strutils]
+import std/[os, strformat, strutils, terminal]
+import markdown_render
 
 # ---------------------------------------------------------------------------
 # Types
@@ -427,9 +428,8 @@ proc clearSpinner*() =
 # Public API — result output
 # ---------------------------------------------------------------------------
 
-## Writes the final result to stdout as plain text.  The result
-## text is always echoed verbatim; no external rendering is
-## performed because v3 ships no terminal renderer binaries.
+## Writes a final result, optionally rendering model Markdown on a terminal.
+## Pipes, redirected output, and raw command results retain their original text.
 ##
 ## :param kind: The active output style.
 ## :param text: The result text to display.
@@ -439,9 +439,13 @@ proc clearSpinner*() =
 ##     discard
 proc styleResult*(
   kind: StyleKind,
-  text: string
+  text: string,
+  markdown: bool = false
 ) =
-  echo text
+  if markdown and stdout.isatty() and getEnv("TERM") != "dumb":
+    echo renderMarkdown(text, kind == skVivid and not existsEnv("NO_COLOR"))
+  else:
+    echo text
 
 # ---------------------------------------------------------------------------
 # Public API — unified styled output helpers

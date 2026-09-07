@@ -45,6 +45,7 @@ class GetV3CliTests(unittest.TestCase):
         cls.root = Path(tempfile.mkdtemp(prefix="get_v3_cli_"))
         cls.work = cls.root / "work"
         cls.work.mkdir()
+        (cls.work / "answer.md").write_text("# raw\n**literal**\n", encoding="utf-8")
         (cls.work / "large-feedback.txt").write_text(
             "A" * 20_000 + "final-marker\n",
             encoding="utf-8",
@@ -201,6 +202,10 @@ class GetV3CliTests(unittest.TestCase):
 
     def test_05c_adversarial_commands_fail_closed(self) -> None:
         for case_name in ADVERSARIAL_COMMANDS:
+            if self.target_os == "windows" and case_name in {
+                "escaped-double-quote", "ambiguous-glob",
+            }:
+                continue  # These depend on POSIX quote/glob expansion.
             with self.subTest(case_name=case_name):
                 result = self.run_get(
                     f"adversarial policy {case_name}", "--no-cache")
@@ -259,6 +264,93 @@ class GetV3CliTests(unittest.TestCase):
             "review rejects punctuation", "--double-check", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("deemed unsafe", result.stderr.lower())
+
+    def test_06b1_safe_review_rewrite_executes_and_caches_the_actual_command(self) -> None:
+        query = "safe review rewrite cli"
+        result = self.run_get(query, "--double-check", "--cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "reviewed-ok")
+        cached = self.run_get(query, "--no-double-check", "--cache")
+        self.assertEqual(cached.returncode, 0, cached.stderr)
+        self.assertEqual(cached.stdout.strip(), "reviewed-ok")
+
+    def test_06b2_invalid_review_does_not_approve_a_command(self) -> None:
+        result = self.run_get("invalid review verdict", "--double-check", "--no-cache")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no explicit command approval", result.stderr)
+
+    def test_07_connectivity_probe_requires_an_exact_acknowledgment(self) -> None:
+        ready = self.run_get("isok")
+        self.assertEqual(ready.returncode, 0, ready.stderr)
+        self.assertEqual(self.run_get("set", "model", "mock-not-ok").returncode, 0)
+        try:
+            failed = self.run_get("isok")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("not ok", failed.stderr)
+        finally:
+            self.assertEqual(self.run_get("set", "model", "mock").returncode, 0)
+
+    def test_07a_markdown_config_round_trip_and_pipe_preservation(self) -> None:
+        for setting in ["false", "true"]:
+            self.assertEqual(self.run_get("set", "markdown", setting).returncode, 0)
+            self.assertIn(setting, self.run_get("config", "--markdown").stdout)
+        self.assertNotEqual(self.run_get("set", "markdown", "invalid").returncode, 0)
+        result = self.run_get("markdown answer without tools", "--markdown", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "# Report\n\n- **ready**\n\n```sh\nprintf example\n```\n")
+        self.assertNotIn("\x1b", result.stdout)
+        reset = self.run_get("set", "markdown")
+        self.assertEqual(reset.returncode, 0, reset.stderr)
+        self.assertIn("true", self.run_get("config", "--markdown").stdout)
+
+    def test_07b_markdown_terminal_cache_and_raw_command_boundaries(self) -> None:
+        if os.name != "posix" or self.target_os == "windows":
+            self.skipTest("POSIX terminal rendering test")
+        import pty
+
+        def terminal(*args: str, extra_env: dict[str, str] | None = None) -> str:
+            master, slave = pty.openpty()
+            env = {**self.env, "TERM": "xterm-256color"}
+            env.pop("NO_COLOR", None)
+            env.update(extra_env or {})
+            try:
+                result = subprocess.run(
+                    [*self.command, *args], cwd=self.work, env=env,
+                    stdout=slave, stderr=subprocess.PIPE, timeout=15,
+                )
+                os.close(slave)
+                slave = -1
+                chunks = []
+                while True:
+                    try:
+                        chunk = os.read(master, 8192)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return b"".join(chunks).decode("utf-8").replace("\r\n", "\n")
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+
+        query = "markdown answer without tools terminal"
+        rendered = terminal(query, "--markdown", "--vivid", "--cache")
+        self.assertIn("\x1b[1m\x1b[36mReport", rendered)
+        self.assertNotIn("```", rendered)
+        source = terminal(query, "--no-markdown", "--cache")
+        self.assertIn("# Report", source)
+        self.assertIn("```sh", source)
+        plain = terminal(query, "--markdown", "--cache", extra_env={"NO_COLOR": "1"})
+        self.assertNotIn("\x1b", plain)
+        self.assertIn("• ready", plain)
+        self.assertNotIn("# Report", plain)
+        raw = terminal("markdown raw", "--markdown", "--cache")
+        self.assertEqual(raw, "# raw\n**literal**\n")
+        cached_raw = terminal("markdown raw", "--markdown", "--cache")
+        self.assertEqual(cached_raw, raw)
 
     def test_06c_transient_transport_is_retried_three_times(self) -> None:
         Handler.transient_failures = 0

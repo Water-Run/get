@@ -42,6 +42,7 @@ nimble.paths
 build/
 dist/
 .release/
+.ci/
 
 # Logs / temp
 *.log
@@ -76,8 +77,12 @@ desktop.ini
 
 # Root-level generated binaries
 /get
+/get-macos-arm64
 /test
 /*.exe
+/tests/test_*
+!/tests/test_*.nim
+!/tests/test_*.py
 
 # Documentation generated files
 docs/*.html

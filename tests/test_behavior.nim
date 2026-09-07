@@ -9,10 +9,10 @@ import ../src/sysinfo
 import ../src/utils
 
 suite "version metadata":
-  test "uses release version 3.0.1 consistently":
+  test "uses release version 3.1.0 consistently":
     const nimbleContent = staticRead("../get.nimble")
-    check APP_VERSION == "3.0.1"
-    check nimbleContent.contains("version       = \"3.0.1\"")
+    check APP_VERSION == "3.1.0"
+    check nimbleContent.contains("version       = \"3.1.0\"")
 
   test "pins the supported Windows OpenSSL 3 runtime":
     const buildConfig = staticRead("../config.nims")

@@ -118,7 +118,7 @@ func implSystemPrompt(
   if toolsDisabled:
     lines.add(
       "No tools are available for this request. Answer directly from reasoning " &
-      "and follow the user's requested format; never emit a command or tool call.")
+      "and follow the user's requested format; never execute commands or emit tool calls.")
   else:
     lines.add(@[
       "Answer static facts; inspect dynamic/local facts via " &
@@ -127,7 +127,7 @@ func implSystemPrompt(
         "or true/false.",
       "One bounded plan; every pipeline/short ;/&&/|| sequence is " &
         "observational. Text: head/tail, " &
-        "stdout-only sed, or pure AWK field selectors. Counts: use qualified " &
+        "stdout-only sed, or pure AWK field selectors. Counts: qualified " &
         "globs+wc or find -printf/grep -o then sort|uniq -c; never " &
         "find -exec. Performance: " &
         "top -b -n 1 | head -n 15 on Linux, top -l 1 -n 15 on macOS, " &
@@ -140,9 +140,8 @@ func implSystemPrompt(
       "Globs need ./ or --. Web: curl -q; wget --no-config --no-hsts -O-.",
       "Weather without place: infer it from named timezone, never proxy egress; " &
         "use local units.",
-      "Code composition: find -printf | sed | sort | uniq -c; " &
-        "skip .git/.ci/.release/build/dist/node_modules/__pycache__; return a " &
-        "compact breakdown.",
+      "Composition: find -printf | sed | sort | uniq -c; " &
+        "skip .git/.ci/.release/build/dist/node_modules/__pycache__.",
       "Git summaries, first batch: branch -vv --no-color; staged via diff " &
         "--cached, unstaged via diff-files (both --name-only --no-ext-diff " &
         "--no-textconv); untracked via ls-files --others --exclude-standard | " &
@@ -163,7 +162,7 @@ func implSystemPrompt(
         "{\"type\":\"answer\",\"text\":\"...\"} or " &
         "{\"type\":\"tool_calls\",\"calls\":[{" &
         "\"command\":\"...\",\"result_mode\":\"return_raw|continue\"}]}.",
-      "JSON only; be concise."
+      "JSON only. Answer text may use Markdown and code examples."
     ])
     let shellInstruction = implShellInstruction(shell)
     if shellInstruction.len > 0:

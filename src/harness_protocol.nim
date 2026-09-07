@@ -496,13 +496,37 @@ proc parseStructuredAction*(
 ##       "```sh\nuname -a\n```\n<!-- FINAL -->")
 ##     assert action.kind == hakToolCalls
 ##     assert action.calls[0].resultMode == trmReturnRaw
-proc decodeTextAction*(content: string): HarnessAction =
+proc decodeTextAction*(
+  content: string,
+  allowBareCodeTools: bool = true
+): HarnessAction =
+  let upper = content.toUpperAscii()
+  let hasLegacyMarker = upper.contains("<!-- CONTINUE -->") or
+    upper.contains("<!-- INTERPRET -->") or upper.contains("<!-- FINAL -->")
+  if not allowBareCodeTools and not hasLegacyMarker and
+      content.strip().startsWith("```"):
+    let candidate = implStripJsonFence(content)
+    # JSON examples in ordinary answers are data too. An explicit action
+    # discriminator still enters the strict protocol and cannot run as text.
+    try:
+      let node = parseJson(candidate)
+      let actionType = if node.kind == JObject: node{"type"} else: nil
+      let explicitAction = not actionType.isNil and actionType.kind == JString and
+        actionType.getStr().toLowerAscii() in
+          ["answer", "refuse", "refusal", "tool", "tool_calls"]
+      if node.kind != JObject or
+          (not explicitAction and not (node.len == 1 and node.hasKey("text"))):
+        return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
+    except JsonParsingError:
+      return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
   let structured = parseStructuredAction(content)
   if structured.isSome:
     return structured.get
   let bracketCall = implParseBracketToolAction(content)
   if bracketCall.isSome:
     return bracketCall.get
+  if not allowBareCodeTools and not hasLegacyMarker:
+    return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
   let legacy = extractAgentAction(content)
   case legacy.action
   of aaAnswer:
@@ -628,6 +652,8 @@ func observationJson*(observation: ToolObservation): string =
     "policy_rejected": observation.policyRejected
   }
   let hint = implObservationHint(observation)
+  if observation.proposedCommand.len > 0:
+    node["proposed_command"] = %observation.proposedCommand
   if hint.len > 0:
     node["interpretation_hint"] = %hint
   result = $node

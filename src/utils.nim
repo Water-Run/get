@@ -17,7 +17,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[os, options, strformat, strutils]
+import std/[os, options, strformat, strutils, tempfiles]
 
 import regex
 
@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "3.0.1"
+const APP_VERSION* = "3.1.0"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -151,6 +151,23 @@ proc getAppConfigDir*(): string =
   result = getConfigDir() / APP_NAME
   if not dirExists(result):
     createDir(result)
+
+proc writePrivateFile*(path: string, content: string) =
+  ## Create a private, exclusive temporary file before writing any secret,
+  ## then replace the destination without truncating it or following symlinks.
+  let (file, temporary) = createTempFile(".get-write-", ".tmp", parentDir(path))
+  var closed = false
+  try:
+    when defined(posix):
+      setFilePermissions(temporary, {fpUserRead, fpUserWrite})
+    file.write(content)
+    file.flushFile()
+    file.close()
+    closed = true
+    moveFile(temporary, path)
+  finally:
+    if not closed: file.close()
+    discard tryRemoveFile(temporary)
 
 ## Returns the absolute path to the configuration JSON file.
 ##

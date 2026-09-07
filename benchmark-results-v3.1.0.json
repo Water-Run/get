@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "release": "3.1.0",
+  "date": "2026-09-07",
+  "benchmark_status": "not_run",
+  "notes": "This release measures functional and safety behavior. No fresh performance comparison is claimed; v3.0.1 benchmark data remains historical.",
+  "historical_reference": "https://github.com/Water-Run/get/blob/v3.0.1/benchmark-results-v3.0.1.json"
+}

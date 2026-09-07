@@ -75,6 +75,8 @@ query flags (per-invocation overrides):
   --no-system-proxy            use terminal proxy environment only
   --vivid                      enable vivid output mode
   --no-vivid                   plain text output mode
+  --markdown                   render model Markdown in an interactive terminal
+  --no-markdown                display original Markdown source
   --model <name>               override LLM model
   --timeout <seconds>          override request timeout
 
@@ -132,7 +134,9 @@ set options:
   log-max-entries    max log entries retained
                        (integer or false, default: 1000)
   vivid              vivid output mode with colours and animation
-                       (true/false, default: true)
+                        (true/false, default: true)
+  markdown           render model answers in interactive terminals
+                        (true/false, default: true; pipes keep source text)
 
   Request, cache, and log limits accept 'false'. Harness and command
   safety limits require a positive integer.
@@ -193,6 +197,7 @@ type
     hideProcess*: Option[bool]   ## Override hide-process.
     systemProxy*: Option[bool]   ## Override system-proxy.
     vivid*: Option[bool]         ## Override vivid mode.
+    markdown*: Option[bool]      ## Override model Markdown rendering.
     model*: Option[string]       ## Override model name.
     timeout*: Option[int]        ## Override timeout seconds.
 
@@ -264,6 +269,7 @@ func implParseQueryArgs(
     hideProcess: none(bool),
     systemProxy: none(bool),
     vivid: none(bool),
+    markdown: none(bool),
     model: none(string),
     timeout: none(int)
   )
@@ -321,6 +327,10 @@ func implParseQueryArgs(
       ov.vivid = some(true)
     of "--no-vivid":
       ov.vivid = some(false)
+    of "--markdown":
+      ov.markdown = some(true)
+    of "--no-markdown":
+      ov.markdown = some(false)
     of "--model":
       if i + 1 >= args.len:
         raise newException(GetError,
@@ -379,6 +389,8 @@ proc implApplyOverrides(
     cfg.systemProxy = ov.systemProxy.get
   if ov.vivid.isSome:
     cfg.vivid = ov.vivid.get
+  if ov.markdown.isSome:
+    cfg.markdown = ov.markdown.get
   if ov.model.isSome:
     cfg.model = ov.model.get
   if ov.timeout.isSome:
@@ -552,7 +564,8 @@ proc implDoubleCheck(
   if revised.isSome:
     result = revised.get
   else:
-    result = command
+    raise newException(GetError,
+      "safety review returned no explicit command approval")
 
 ## Runs all safety layers on a command: forbidden-command
 ## pattern, double-check review, and manual confirmation.
@@ -700,6 +713,7 @@ proc implStoreHarnessCache(
       query: query,
       command: "",
       output: value.output,
+      isMarkdown: value.termination == htAnswer,
       timestamp: epochTime().int64
     )
     shouldStore = true
@@ -856,7 +870,9 @@ proc implHarnessFlow(
       var reused = false
       for previous in priorToolObservations:
         if previous.toolName == call.toolName and
-            previous.command.strip() == call.command.strip():
+            (if previous.proposedCommand.len > 0:
+               previous.proposedCommand.strip()
+             else: previous.command.strip()) == call.command.strip():
           result[index] = previous
           result[index].callId = call.id
           result[index].elapsedMs = 0
@@ -944,7 +960,11 @@ proc implHarnessFlow(
       budget,
       maxParallel
     )
-    for position, observation in executed:
+    for position, executedObservation in executed:
+      var observation = executedObservation
+      let proposal = calls[authorizedIndexes[position]]
+      if observation.command != proposal.command:
+        observation.proposedCommand = proposal.command
       result[authorizedIndexes[position]] = observation
       if cfg.log:
         logExecution(
@@ -984,7 +1004,8 @@ proc implHarnessFlow(
     styleSeparator(sk, DIV_SECTION)
   if value.output.len > 0:
     if value.exitCode == 0:
-      styleResult(sk, value.output)
+      styleResult(sk, value.output,
+        markdown = cfg.markdown and value.termination == htAnswer)
     else:
       styleError(sk, value.output)
   if cfg.log and value.observations.len == 0:
@@ -1149,6 +1170,9 @@ proc implHandleConfig(args: seq[string]) =
     of "vivid":
       styleConfigValue(sk, "vivid", $cfg.vivid,
         classifyBool(cfg.vivid))
+    of "markdown":
+      styleConfigValue(sk, "markdown", $cfg.markdown,
+        classifyBool(cfg.markdown))
     else:
       implUsageError(
         fmt"unknown config option '{optName}'")
@@ -1286,8 +1310,7 @@ proc implHandleIsOk() =
     styleError(sk,
       "unexpected response: (empty)")
     quit(1)
-  elif answer == "ok" or
-      (answer.contains("ok") and answer.len < 10):
+  elif answer == "ok":
     styleSuccess(sk, "ok")
   else:
     styleError(sk,
@@ -1374,7 +1397,8 @@ proc implHandleQuery(
             else:
               "(cached: context result)"
           styleProgress(sk, label)
-        styleResult(sk, hit.get.output)
+        styleResult(sk, hit.get.output,
+          markdown = cfg.markdown and hit.get.isMarkdown)
         return
       of cmCommand:
         # Commands written by an older prompt cannot bypass an explicit

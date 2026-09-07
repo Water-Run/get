@@ -19,6 +19,23 @@ import harness_types
 
 ## Verifies all provider-independent action decoding paths.
 suite "harness action protocol":
+  test "native answers preserve code examples and keep explicit actions typed":
+    for source in [
+      "# Example\n```sh\nrm -rf example\n```",
+      "```json\n{\"name\":\"example\"}\n```",
+      "```json\n{\"type\":\"object\",\"properties\":{}}\n```",
+      "```json\n[1, 2, 3]\n```",
+      "```python\n{'name': 'example'}\n```",
+      "```sh\nprintf ready\n```"
+    ]:
+      let value = decodeTextAction(source, allowBareCodeTools = false)
+      check value.kind == hakAnswer
+      check value.text == source
+    let action = decodeTextAction(
+      "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"command\":\"pwd\"}]}\n```",
+      allowBareCodeTools = false)
+    check action.kind == hakToolCalls
+
   test "parses a structured answer":
     let parsed = parseStructuredAction(
       "{\"type\":\"answer\",\"text\":\"Linux\"}")

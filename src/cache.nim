@@ -38,7 +38,7 @@ const CACHE_SCHEMA_VERSION* = 3
 ## Semantic identity of the built-in Harness, prompt, protocol, and mandatory
 ## read-only policy. Bump this when a behavior change could make a cached result
 ## or command incompatible even though the JSON schema itself remains v3.
-const CACHE_IDENTITY_REVISION* = "get-v3.0.1-harness-policy-20260830"
+const CACHE_IDENTITY_REVISION* = "get-v3-harness-policy-20260907"
 
 ## Hard input bound protecting startup from an unexpectedly large cache file.
 const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024
@@ -107,6 +107,7 @@ type
     query*: string        ## Original user query text.
     command*: string      ## Generated shell command for cmCommand.
     output*: string       ## Final output for cmResult.
+    isMarkdown*: bool     ## Model answer, rendered only at terminal display time.
     timestamp*: int64     ## Unix epoch seconds when created.
 
 ## In-memory representation of the v3 cache file.
@@ -227,6 +228,7 @@ proc implParseEntry(
       query: node{"query"}.getStr(""),
       command: node{"command"}.getStr(""),
       output: node{"output"}.getStr(""),
+      isMarkdown: node{"isMarkdown"}.getBool(false),
       timestamp: node{"timestamp"}.getBiggestInt(0).int64
     )
     if implValidEntry(entry, nowEpoch):
@@ -482,6 +484,7 @@ proc implEncodeCache(store: CacheStore): string =
       "query": entry.query,
       "command": entry.command,
       "output": entry.output,
+      "isMarkdown": entry.isMarkdown,
       "timestamp": entry.timestamp
     })
   let root = %*{

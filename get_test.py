@@ -6,7 +6,7 @@ get_test.py -- Comprehensive end-to-end test suite for the `get` CLI.
 Sections cover configuration, safety, cache, and live harness behavior.
 
     A  info_help          -- version / help / get get / intro / license
-    B  boolean_options    -- 7 booleans x {true,false,default}
+    B  boolean_options    -- boolean settings x {true,false,default}
     C  integer_options    -- disableable values plus hard Harness limits
     D  string_options     -- url / model / system-prompt set/clear/reset
     E  command_pattern    -- semantic-only / custom / dangerous / reset
@@ -57,7 +57,7 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 BOOL_OPTIONS = [
     "manual-confirm", "double-check", "instance", "log",
-    "hide-process", "system-proxy", "cache", "vivid",
+    "hide-process", "system-proxy", "cache", "vivid", "markdown",
 ]
 
 DISABLABLE_INT_OPTIONS_DEFAULTS = {

@@ -1516,6 +1516,51 @@ suite "mandatory read-only command policy":
     check not checkReadOnlyCommand(
       "curl -q gopher\\://127.0.0.1/_PING", "bash").allowed
 
+  test "quoted escapes cannot hide commands or option injection":
+    check not checkReadOnlyCommand("echo \"\\\"\"; touch marker #\"").allowed
+    for shell in ["bash", "sh", "zsh", "fish"]:
+      check not checkReadOnlyCommand(
+        "echo \"\\\"\"; touch marker #\"", shell).allowed
+      check checkReadOnlyCommand(
+        "printf '%s' \"a\\\"b\"", shell).allowed
+      check checkReadOnlyCommand(
+        "printf '%s' \"literal \\$HOME\"", shell).allowed
+      check not checkReadOnlyCommand("rg -e -- *", shell).allowed
+      check not checkReadOnlyCommand("sort -k -- *", shell).allowed
+      check checkReadOnlyCommand("rg -- pattern ./file*", shell).allowed
+    check not checkReadOnlyCommand(
+      "echo '\\''; touch marker #'", "fish").allowed
+    check checkReadOnlyCommand("echo 'it\\'s data'", "fish").allowed
+
+  test "rejects helper and file-writing options in apparent readers":
+    for command in [
+      "git blame file.txt", "git blame --no-textconv file.txt",
+      "git blame --no-textconv -L HEAD -- file.txt",
+      "git blame --no-textconv --contents other HEAD -- file.txt",
+      "git --help status", "yq -s output . input.yml",
+      "yq -ps=output . input.yml", "lsof -Db/tmp/device-cache",
+      "nft list ruleset ';' add table inet marker",
+      "tmux list-sessions ';' run-shell 'touch marker'",
+      "tmux list-panes -F 'data;' run-shell 'touch marker'",
+      "nft -af rules.nft list ruleset",
+      "rpm -qE '%{lua:os.execute(\"touch marker\")}'",
+      "rpm -qa --define '_query_all_fmt injected'", "rpm -q --load macros",
+      "rpm -qa --predefine '_dbpath injected'",
+      "rpm -q --specfile package.spec", "ip l s lo down",
+      "ip a a 192.0.2.1/32 dev lo", "ip netns a marker",
+      "printf x > /dev/NULL", "curl -q -o /dev/NULL https://example.com"
+    ]:
+      checkpoint(command)
+      check not checkReadOnlyCommand(command, "bash").allowed
+    for command in [
+      "git blame --no-textconv HEAD -- file.txt", "nft -j list ruleset",
+      "tmux list-panes -F '#{pane_id};#{session_name}'",
+      "yq '.name' input.yml", "lsof -p 123", "git branch -l 'feature*'",
+      "ip a", "ip -br addr", "ip route get 127.0.0.1", "rpm -qi bash"
+    ]:
+      checkpoint(command)
+      check checkReadOnlyCommand(command, "bash").allowed
+
   test "admits only literal-file stdin redirection for data readers":
     for command in [
       "wc -l < input.txt",
@@ -1584,6 +1629,11 @@ suite "mandatory read-only command policy":
     check checkReadOnlyCommand("printf x > /dev/null", "bash").allowed
     check not checkReadOnlyCommand("echo x > /dev/null", "cmd").allowed
     check checkReadOnlyCommand("echo x > nul", "cmd").allowed
+    check checkReadOnlyCommand("Write-Output x > $null", "pwsh").allowed
+    when defined(windows):
+      check checkReadOnlyCommand("Write-Output x > nul", "pwsh").allowed
+    else:
+      check not checkReadOnlyCommand("Write-Output x > nul", "pwsh").allowed
     check not checkReadOnlyCommand("sc query spooler", "powershell").allowed
     check checkReadOnlyCommand("sc.exe query spooler", "powershell").allowed
     check not checkReadOnlyCommand("ping -t 127.0.0.1", "cmd").allowed

@@ -372,6 +372,32 @@ suite "bounded command execution":
       check value.elapsedMs < 1800
       check value.exitCode != 0
 
+    test "stdin readers receive EOF without consuming the deadline":
+      let value = executeCommandBounded("cat", "bash", 2, 1024)
+      check value.exitCode == 0
+      check value.output == ""
+      check not value.timedOut
+      check value.elapsedMs < 1000
+
+    test "closing output early retains the configured deadline":
+      let value = executeCommandBounded(
+        "exec 1>&- 2>&-; sleep 10", "bash", 2, 1024)
+      check value.timedOut
+      check value.elapsedMs >= 1900
+      check value.elapsedMs < 2800
+
+    test "deadline kills descendants even after their shell exits on TERM":
+      let root = getTempDir() / ("get-v3-descendant-" & $getCurrentProcessId())
+      createDir(root)
+      let marker = root / "survived"
+      defer: removeDir(root)
+      let value = executeCommandBounded(
+        "sh -c 'trap \"\" TERM; sleep 2; touch \"" & marker &
+          "\"' & wait", "bash", 1, 1024)
+      check value.timedOut
+      sleep(1300)
+      check not fileExists(marker)
+
     when defined(linux):
       test "native sandbox preserves the command deadline":
         if readOnlySandboxAvailableForTest():

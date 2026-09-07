@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-`get` 把自然语言问题转换为安全、只读的本地检查。3.0.1 将旧版 instance/agent 两条执行链统一为一个类型化 Harness：它可以直接回答、执行一条命令、根据观察继续推理，也可以并行执行互不依赖的检查。
+`get` 把自然语言问题转换为安全、只读的本地检查。3.1.0 增加终端 Markdown 渲染并修复只读策略，继续使用统一的类型化 Harness：它可以直接回答、执行一条命令、根据观察继续推理，也可以并行执行互不依赖的检查。
 
 ```bash
 get "这台设备的 IP 地址"
@@ -138,6 +138,7 @@ get set manual-confirm true
 | `cache-max-entries` | `1000` | 缓存上限；`false` 表示不限 |
 | `log-max-entries` | `1000` | 日志上限；`false` 表示不限 |
 | `vivid` | `true` | ANSI 色彩和进度动画 |
+| `markdown` | `true` | 在交互终端渲染模型回答的 Markdown；管道保留原文 |
 | `instance` | `false` | v2 兼容别名，对应 `harness=direct` |
 
 Harness 与命令安全上限必须是正整数，不能关闭。省略值可恢复默认：
@@ -169,11 +170,28 @@ get set command-pattern ""                 # 清除已有附加正则
 --hide-process / --no-hide-process
 --system-proxy / --no-system-proxy
 --vivid / --no-vivid
+--markdown / --no-markdown
 --model <名称>
 --timeout <秒>
 ```
 
 默认读取终端中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`。Windows 上启用 `system-proxy=true` 后，已开启的 Internet Settings 优先；`NO_PROXY` 会绕过两类代理来源。
+
+## Markdown 输出
+
+```bash
+get set markdown true         # 开启（默认）；省略值也恢复默认
+get set markdown false        # 显示 Markdown 源文本
+get config --markdown
+get "汇总项目结构" --markdown
+get "汇总项目结构" --no-markdown
+```
+
+内置渲染器支持标题、强调、列表、引用、代码块、链接和表格（含中文列宽），无需外部渲染程序。`vivid=false` 或 `NO_COLOR` 关闭渲染颜色，但保留排版。输出重定向、管道和 `TERM=dumb` 保留源文本。命令原始输出始终按原文显示；缓存保存未渲染文本，切换配置后不必重新请求模型。
+
+`auto` / `native` 中，普通回答里的代码块作为示例显示；旧版裸代码块命令仅在显式 `legacy` 模式启用。显式类型化工具动作和旧版动作标记仍经过安全门，且不能绕过“不调用工具”的请求。
+
+本轮只读修复还覆盖引号转义、通配符参数注入、RPM 宏执行、nft/tmux 嵌入命令及 `ip` 修改动作缩写。`git blame` 必须使用 `git blame --no-textconv HEAD -- 文件` 等明确版本查询，避免工作树 clean filter；工作树状态仍使用前述 `diff-files` 等查询。审查范围与验证结果见 [v3 审查记录](CODE_REVIEW-v3.md)。
 
 ## 缓存
 
@@ -214,9 +232,11 @@ get cache --unset "系统版本"
 
 ```bash
 nim c -d:release -o:get src/get.nim
-python get_test.py --key dummy --skip-llm
+GET_V3_BINARY="$PWD/get" python tests/test_cli_v3.py -v
+PATH="$PWD:$PATH" python get_test.py --key dummy --skip-llm
 ```
 
 `tests/` 中的测试覆盖协议解析、原生工具载荷、状态迁移、配置迁移、强制安全策略、受限执行和真实并行执行。
+开发测试应先构建并显式选择二进制；仓库历史二进制与 PATH 中已安装的 `get` 可能不是当前源码版本。构建和测试临时产物统一放入已忽略的 `.ci/` 或 `build/`。
 
 `get` 使用 AGPL-3.0-or-later 许可证。源码：[github.com/Water-Run/get](https://github.com/Water-Run/get)。

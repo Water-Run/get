@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a safe, read-only local inspection. Version 3.0.1 replaces the old instance/agent split with one typed harness that can answer directly, run one command, continue with observations, or execute independent checks in parallel.
+`get` turns a natural-language question into a safe, read-only local inspection. Version 3.1.0 adds terminal Markdown rendering and read-only policy fixes to one typed harness that can answer directly, run one command, continue with observations, or execute independent checks in parallel.
 
 ```bash
 get "IP address of this device"
@@ -162,6 +162,7 @@ Run `get config` to display all settings, `get config --<option>` for one value,
 | `cache-max-entries` | `1000` | Cache cap; `false` disables the cap |
 | `log-max-entries` | `1000` | Log cap; `false` disables the cap |
 | `vivid` | `true` | ANSI colors and progress animation |
+| `markdown` | `true` | Render model Markdown in interactive terminals; pipes retain source text |
 | `instance` | `false` | v2 alias for `harness=direct` |
 
 Harness and command safety limits require positive integers and cannot be disabled. Omit a value to reset it:
@@ -193,11 +194,35 @@ get set command-pattern ""                 # clear an existing supplemental rege
 --hide-process / --no-hide-process
 --system-proxy / --no-system-proxy
 --vivid / --no-vivid
+--markdown / --no-markdown
 --model <name>
 --timeout <seconds>
 ```
 
 Terminal `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` variables are honored by default. On Windows, `system-proxy=true` makes enabled Internet Settings take precedence; `NO_PROXY` bypasses either source.
+
+## Markdown output
+
+Use `get set markdown true` (default), `get set markdown false`, or per-query
+`--markdown` / `--no-markdown`. Inspect it with `get config --markdown`;
+omitting the value resets the default.
+
+The built-in renderer handles headings, emphasis, lists, quotes, code fences,
+links, and tables with Chinese column widths. It requires no external program.
+`vivid=false` or `NO_COLOR` disables rendering colors while retaining layout.
+Pipes, redirected output, and `TERM=dumb` retain the Markdown source. Raw
+command output is never interpreted as Markdown. Cached answers keep their
+source text and respect the current rendering setting.
+
+In `auto` / `native`, unmarked code fences in answers are examples. Bare
+v2 command fences require explicit `legacy` mode. Typed tool actions and
+explicit legacy action markers still pass the safety gate and cannot bypass
+a request that disables tools.
+
+The current review also closes quoting, glob-option injection, RPM macro,
+nft/tmux embedded-command, and abbreviated `ip` mutation paths. Use an explicit
+revision for blame, such as `git blame --no-textconv HEAD -- file`, to avoid
+working-tree clean filters. See [the v3 review record](CODE_REVIEW-v3.md).
 
 ## Cache behavior
 
@@ -241,8 +266,12 @@ Requires Nim 2.2.8 or newer; release CI uses Nim 2.2.10.
 
 ```bash
 nim c -d:release -o:get src/get.nim
-python get_test.py --key dummy --skip-llm
+GET_V3_BINARY="$PWD/get" python tests/test_cli_v3.py -v
+PATH="$PWD:$PATH" python get_test.py --key dummy --skip-llm
 ```
+
+Always select the newly built binary explicitly: historical executables in the
+working tree or on PATH may belong to a different release.
 
 Focused tests under `tests/` cover protocol parsing, native tool payloads, state transitions, configuration migration, mandatory policy, bounded execution, and real parallel execution.
 

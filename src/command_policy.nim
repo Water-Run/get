@@ -584,13 +584,18 @@ func implIsNullDevice(target: string, shell: string): bool =
   let normalized = toLowerAscii(target)
   let lowerShell = toLowerAscii(shell)
   if lowerShell.contains("powershell") or lowerShell.contains("pwsh"):
-    return normalized in ["$null", "nul"]
+    if normalized == "$null":
+      return true
+    when defined(windows):
+      return normalized == "nul"
+    else:
+      return false  # PowerShell on POSIX creates a real file named nul.
   if lowerShell.contains("cmd"):
     return normalized == "nul"
-  result = normalized == "/dev/null"
+  result = target == "/dev/null"
 
 func implIsNullSink(target: string, shell: string): bool =
-  result = toLowerAscii(target) in ["&1", "&2"] or
+  result = target in ["&1", "&2"] or
     implIsNullDevice(target, shell)
 
 ## Parses simple commands, pipelines, and compound sequences whose every
@@ -614,11 +619,12 @@ func implParseCommand(command: string, shell: string): ParsedCommand =
   let powerShell = toLowerAscii(shell).contains("powershell") or
     toLowerAscii(shell).contains("pwsh")
   let posixEscapes = shell.len > 0 and not cmdShell and not powerShell
+  let fishShell = toLowerAscii(shell).contains("fish")
 
   template finishToken() =
     if tokenStarted:
       stage.add(token)
-      if token == "--":
+      if implIsSafeOptionTerminator(stage, stage.high):
         stageOptionsEnded = true
       token = ""
       tokenStarted = false
@@ -644,8 +650,30 @@ func implParseCommand(command: string, shell: string): ParsedCommand =
 
   while index < command.len:
     let current = command[index]
+    if shell.len == 0 and current == '\\' and index + 1 < command.len and
+        command[index + 1] in {'\'', '"'}:
+      reject("quoted escapes require an explicit shell for unambiguous validation")
     if quote != '\0':
-      if current == quote:
+      # Match the shell's quote rules before looking for a closing quote.
+      # Otherwise an escaped quote can hide an actual command separator.
+      if current == '\\' and posixEscapes and
+          (quote == '"' or (quote == '\'' and fishShell)):
+        if index + 1 >= command.len:
+          reject("unterminated quoted shell escape")
+        let next = command[index + 1]
+        let escapes =
+          if quote == '\'': next in {'\\', '\''}
+          elif fishShell: next in {'\\', '"', '$', '\n'}
+          else: next in {'\\', '"', '$', '`', '\n'}
+        if escapes:
+          if next == '\n':
+            reject("quoted line continuations are not supported")
+          token.add(next)
+          tokenStarted = true
+          index += 2
+          continue
+        token.add(current)
+      elif current == quote:
         quote = '\0'
       elif quote == '"' and current == '$':
         let variableLength = implSafeVariableLength(command, index)
@@ -727,7 +755,7 @@ func implParseCommand(command: string, shell: string): ParsedCommand =
         index += 1
       if targetStart == index:
         reject("output redirection is missing a target")
-      let target = toLowerAscii(command[targetStart ..< index])
+      let target = command[targetStart ..< index]
       if not implIsNullSink(target, shell):
         reject("output redirection may modify a file")
       continue
@@ -757,6 +785,11 @@ func implParseCommand(command: string, shell: string): ParsedCommand =
       while index < command.len:
         let targetCharacter = command[index]
         if targetQuote != '\0':
+          if targetCharacter == '\\' and fishShell and targetQuote == '\'' and
+              index + 1 < command.len and command[index + 1] in {'\\', '\''}:
+            targetStarted = true
+            index += 2
+            continue
           if targetCharacter == targetQuote:
             targetQuote = '\0'
           elif targetCharacter in {'\r', '\n', '\0'}:
@@ -1156,6 +1189,8 @@ func implValidateFiniteReader(
         return implReject("tail follow mode is unbounded; request a finite tail")
   of "lsof":
     for token in tokens:
+      if token.startsWith("-D"):
+        return implReject("lsof device-cache options can write a file")
       if token.startsWith("+r") or token.startsWith("-r"):
         return implReject("lsof repeat mode is unbounded")
   of "findmnt":
@@ -2332,6 +2367,10 @@ func implValidateTmux(tokens: seq[string]): CommandPolicyDecision =
   if tokens.len < 2:
     return implReject("tmux query is missing a subcommand")
   for token in tokens:
+    # tmux splits an individual or trailing semicolon, while interior
+    # semicolons in a format value remain ordinary data.
+    if token.endsWith(";") or token.contains('\n') or token.contains('\r'):
+      return implReject("tmux command sequences are not permitted")
     if token.contains("#("):
       return implReject("tmux format shell commands are not permitted")
   var index = 1
@@ -2710,18 +2749,41 @@ func implValidateNetworkReader(
     if implHasForbiddenOption(tokens, ["--batch", "--force"] ) or
         implHasToken(tokens, ["-b", "-batch", "-force"]):
       return implReject("ip batch mode can execute mutating commands")
-    for token in tokens:
-      let lower = toLowerAscii(token)
-      if lower == "monitor":
-        return implReject("ip monitor mode is unbounded")
-      for action in [
-        "add", "append", "change", "delete", "replace", "set", "flush",
-        "save", "restore", "exec", "xfrm"
-      ]:
-        # iproute2 accepts unique command abbreviations, such as `se` for
-        # `set`; values longer than the action cannot match this condition.
-        if lower.len >= 2 and action.startsWith(lower):
-          return implReject("ip action can change network state")
+    var index = 1
+    while index < tokens.len and tokens[index].startsWith("-"):
+      let option = toLowerAscii(tokens[index])
+      if option in ["-n", "-netns", "-netnamespace", "-family", "-f"]:
+        if index + 1 >= tokens.len:
+          return implReject("ip query option is missing its value")
+        index += 2
+      elif option in [
+          "-4", "-6", "-0", "-br", "-brief", "-d", "-details",
+          "-s", "-stats", "-statistics", "-h", "-human", "-human-readable",
+          "-o", "-oneline", "-j", "-json", "-p", "-pretty",
+          "-r", "-resolve", "-c", "-color", "-c=never", "-color=never",
+          "-version", "-v"]:
+        index += 1
+      else:
+        return implReject("ip global option is outside the query allowlist")
+    if index >= tokens.len:
+      return implAllow()
+    let objectName = toLowerAscii(tokens[index])
+    if objectName notin [
+        "address", "addr", "a", "link", "l", "route", "r", "rule",
+        "neighbor", "neighbour", "neigh", "n", "maddress", "maddr",
+        "mroute", "tunnel", "tuntap", "netns", "vrf", "netconf",
+        "token", "tcpmetrics", "nexthop"]:
+      return implReject("ip object is outside the query allowlist")
+    index += 1
+    if index < tokens.len and toLowerAscii(tokens[index]) notin [
+        "show", "list", "lst", "get", "help"]:
+      return implReject(
+        "ip requires an explicit show/list/get action; mutation abbreviations are rejected")
+    # netns/tunnel and other namespaces interpret get differently. Keep get
+    # only for the documented route lookup (which has no mutation semantics).
+    if index < tokens.len and toLowerAscii(tokens[index]) == "get" and
+        objectName notin ["route", "r"]:
+      return implReject("ip get is limited to route lookups")
   of "ipconfig":
     if tokens.len == 1:
       return implAllow()
@@ -3344,12 +3406,18 @@ func implValidateFirewallReader(
     var index = 1
     while index < tokens.len:
       let token = tokens[index]
-      if token in ["-d", "--debug", "-D", "--define", "-I", "--includepath"]:
-        index += 2
-        continue
+      if token.contains(';') or token.contains('\n') or token.contains('\r') or
+          token.contains('{') or token.contains('}'):
+        return implReject("nft embedded command syntax is not permitted")
+      if token.startsWith("-") and token notin [
+          "-a", "--handle", "-n", "--numeric", "-j", "--json",
+          "-s", "--stateless", "-t", "--terse", "-y", "--numeric-priority",
+          "-p", "--numeric-protocol", "-N", "--reversedns",
+          "-S", "--service", "-u", "--guid"]:
+        return implReject("nft option is outside the query allowlist")
       if not token.startsWith("-"):
-        action = toLowerAscii(token)
-        break
+        if action.len == 0:
+          action = toLowerAscii(token)
       index += 1
     if action notin ["list", "get", "describe"]:
       return implReject("nft is allowed only for list/get/describe queries")
@@ -3634,7 +3702,7 @@ func implValidateGit(tokens: seq[string]): CommandPolicyDecision =
   while index < tokens.len and tokens[index].startsWith("-"):
     let original = tokens[index]
     let lower = toLowerAscii(tokens[index])
-    if lower in ["--version", "--help"]:
+    if lower == "--version" or (lower == "--help" and tokens.len == 2):
       return implAllow()
     if original == "-c" or lower in ["--config-env", "--exec-path"] or
         original.startsWith("-c=") or lower.startsWith("--config-env="):
@@ -3650,6 +3718,23 @@ func implValidateGit(tokens: seq[string]): CommandPolicyDecision =
     return implReject("git query is missing a subcommand")
   let subcommand = toLowerAscii(tokens[index])
   let args = if index + 1 < tokens.len: tokens[index + 1 .. ^1] else: @[]
+  if subcommand == "blame":
+    # Without an explicit revision blame reads the working tree and applies
+    # clean filters, even when external diff/textconv is disabled.
+    let separator = args.find("--")
+    if separator < 1 or separator + 2 != args.len or
+        args[separator - 1].startsWith("-") or
+        not implHasOption(args, ["--no-textconv"]):
+      return implReject(
+        "git blame requires --no-textconv REV -- FILE; worktree blame can run filters")
+    if implHasForbiddenOption(args, ["--contents", "--reverse"]):
+      return implReject("git blame worktree/contents mode can run filters")
+    # A revision after a value-taking option may actually be its value.
+    if separator >= 2 and args[separator - 2].startsWith("-") and
+        args[separator - 2] notin [
+          "--no-textconv", "-p", "--porcelain", "--line-porcelain",
+          "--incremental", "-l", "-t", "-s", "-e", "--show-email", "-w"]:
+      return implReject("git blame requires an unambiguous explicit revision")
   if implHasForbiddenOption(args, [
     "--output", "--ext-diff", "--textconv", "--filters",
     "--open-files-in-pager"
@@ -4037,11 +4122,16 @@ func implValidatePackageQuery(
     if implHasForbiddenOption(tokens, [
       "--eval", "--pipe", "--setperms", "--setugids", "--restore",
       "--rebuilddb", "--initdb", "--import", "--install", "--upgrade",
-      "--freshen", "--erase", "--verify"
+      "--freshen", "--erase", "--verify", "--define", "--predefine", "--undefine",
+      "--macros", "--rcfile", "--load", "--specfile"
     ]) or implHasToken(tokens, ["-i", "-U", "-F", "-e"]) or
         (tokens.len > 1 and tokens[1].startsWith("-V")):
       return implReject(
         "rpm action can execute package scripts, macros, or modify packages")
+    for token in tokens:
+      if token.startsWith("-") and not token.startsWith("--") and
+          (token.contains('E') or token.contains('D')):
+        return implReject("rpm macro evaluation/definition can execute code")
   else:
     discard
   let action = toLowerAscii(tokens[1])
@@ -4912,8 +5002,8 @@ func implValidateStage(
       return implReject("yq in-place mode can modify files")
     for token in tokens:
       if token.startsWith("-") and not token.startsWith("--") and
-          token.contains('i'):
-        return implReject("yq in-place mode can modify files")
+          (token.contains('i') or token.contains('s')):
+        return implReject("yq in-place/split mode can modify files")
     return implAllow()
   of "date": return implValidateDate(tokens)
   of "hostname": return implValidateHostname(tokens)

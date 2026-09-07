@@ -28,11 +28,18 @@ suite "v3 configuration":
     check value.harness == "auto"
     check value.toolProtocol == "auto"
     check not value.doubleCheck
+    check value.markdown
     check value.maxRounds == 3
     check value.maxToolCalls == 8
     check value.maxParallel == 4
     check value.commandTimeout == 30
     check value.maxOutputBytes == 1_048_576
+
+  test "Markdown defaults migrate and explicit values are respected":
+    check parseConfigForTest("{}").markdown
+    check parseConfigForTest("{\"markdown\":true}").markdown
+    check not parseConfigForTest("{\"markdown\":false}").markdown
+    check parseConfigForTest("{\"markdown\":\"false\"}").markdown
 
   test "migrates an enabled v2 instance flag to direct":
     let value = parseConfigForTest(

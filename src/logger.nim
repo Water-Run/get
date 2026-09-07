@@ -13,7 +13,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[strformat, strutils, times, os]
+import std/[json, strformat, strutils, times, os]
 
 import style
 import utils
@@ -36,10 +36,15 @@ const LOG_ENTRY_SEPARATOR = "\n\n"
 ##
 ## :param content: The full log file content.
 ## :returns: The number of entries detected.
+func implIsEntryStart(line: string): bool =
+  result = line.len >= 29 and line[0] == '[' and
+    line[5] == '-' and line[8] == '-' and line[11] == ' ' and
+    line[14] == ':' and line[17] == ':' and line[20 .. 28] == "] query: "
+
 func implCountEntries(content: string): int =
   result = 0
   for line in content.splitLines():
-    if line.contains("] query: "):
+    if implIsEntryStart(line):
       result += 1
 
 ## Trims the log content so that at most maxEntries remain.
@@ -53,11 +58,15 @@ func implTrimEntries(
 ): string =
   if maxEntries <= 0:
     return content
-  let blocks = content.split(LOG_ENTRY_SEPARATOR)
   var entries: seq[string] = @[]
-  for b in blocks:
-    if b.strip().len > 0:
-      entries.add(b)
+  var entry = ""
+  for line in content.splitLines():
+    if implIsEntryStart(line) and entry.len > 0:
+      entries.add(entry.strip(trailing = true, leading = false))
+      entry = ""
+    entry.add(line & "\n")
+  if entry.strip().len > 0:
+    entries.add(entry.strip(trailing = true, leading = false))
   if entries.len <= maxEntries:
     return content
   let kept =
@@ -98,13 +107,19 @@ proc logExecution*(
     var f: File
     if not open(f, path, fmAppend):
       return
-    f.writeLine(fmt"[{ts}] query: {query}")
-    f.writeLine(fmt"[{ts}] command: {command}")
-    f.writeLine(fmt"[{ts}] exit: {exitCode}")
-    if preview.len > 0:
-      f.writeLine(fmt"[{ts}] output: {preview}")
-    f.writeLine("")
-    f.close()
+    try:
+      when defined(posix):
+        setFilePermissions(path, {fpUserRead, fpUserWrite})
+      # JSON strings preserve multiline values without introducing false
+      # entry separators or forged log headers during retention trimming.
+      f.writeLine(fmt"[{ts}] query: " & $(%query))
+      f.writeLine(fmt"[{ts}] command: " & $(%command))
+      f.writeLine(fmt"[{ts}] exit: {exitCode}")
+      if preview.len > 0:
+        f.writeLine(fmt"[{ts}] output: " & $(%preview))
+      f.writeLine("")
+    finally:
+      f.close()
     if maxEntries > 0:
       let content = readFile(path)
       let count = implCountEntries(content)

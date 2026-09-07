@@ -77,7 +77,10 @@ proc implEmit(options: HarnessRunOptions, event: HarnessEvent) =
 ## :param response: Parsed provider response.
 ## :returns: Validated typed action.
 ## :raises: HarnessProtocolError: If native arguments or fallback text is invalid.
-proc implDecodeResponse(response: LlmResponse): HarnessAction =
+proc implDecodeResponse(
+  response: LlmResponse,
+  allowBareCodeTools: bool
+): HarnessAction =
   if response.toolCalls.len > 0:
     var calls: seq[ToolCall] = @[]
     for nativeCall in response.toolCalls:
@@ -106,7 +109,7 @@ proc implDecodeResponse(response: LlmResponse): HarnessAction =
       calls: calls
     )
   try:
-    result = decodeTextAction(response.content)
+    result = decodeTextAction(response.content, allowBareCodeTools)
   except ValueError as error:
     raise newException(HarnessProtocolError, error.msg)
 
@@ -330,7 +333,8 @@ proc runHarness*(
 
     var action: HarnessAction
     try:
-      action = implDecodeResponse(response)
+      action = implDecodeResponse(response,
+        options.protocol == tpkLegacy and not options.toolsDisabled)
     except HarnessProtocolError:
       # A malformed textual action cannot be associated with a native tool
       # response, but it is also inert: no executor has seen it.  Auto/loop/
@@ -474,7 +478,9 @@ proc runHarness*(
         let call = action.calls[index]
         if observation.callId != call.id or
             observation.toolName != call.toolName or
-            observation.command != call.command:
+            (if observation.proposedCommand.len > 0:
+               observation.proposedCommand != call.command
+             else: observation.command != call.command):
           raise newException(GetError,
             "tool executor returned an observation that does not match " &
               "its proposed call")
@@ -511,7 +517,7 @@ proc runHarness*(
         let value = HarnessResult(
           output: implFormatRawOutput(batch),
           exitCode: implBatchExitCode(batch),
-          finalCommand: action.calls[^1].command,
+          finalCommand: batch[^1].command,
           observations: observations,
           metrics: metrics,
           termination: htRawToolResult,
@@ -538,7 +544,7 @@ proc runHarness*(
           exitCode:
             if batchCode == 0: 1
             else: batchCode,
-          finalCommand: action.calls[^1].command,
+          finalCommand: batch[^1].command,
           observations: observations,
           metrics: metrics,
           termination: htBudgetExhausted,

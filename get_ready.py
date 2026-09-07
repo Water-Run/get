@@ -520,6 +520,7 @@ def configure_advanced(binary: Path) -> None:
         ("manual-confirm", "n"),
         ("cache", "y"),
         ("vivid", "y"),
+        ("markdown", "y"),
     ):
         enabled = ask_yes_no(f"Enable {option}?", default=default)
         run_get(binary, "set", option, str(enabled).lower())

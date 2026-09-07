@@ -198,12 +198,10 @@ proc implTerminateProcessTree(process: Process) {.gcsafe.} =
     # could not establish the requested process group.
     discard posix.kill(Pid(process.processID), SIGTERM)
     sleep(50)
-    try:
-      if process.running():
-        discard posix.kill(groupId, SIGKILL)
-        discard posix.kill(Pid(process.processID), SIGKILL)
-    except OSError, ValueError:
-      discard
+    # The leader may exit on TERM while a descendant ignores it. Kill the
+    # group before reaping the leader, so those descendants cannot survive.
+    discard posix.kill(groupId, SIGKILL)
+    discard posix.kill(Pid(process.processID), SIGKILL)
   else:
     try:
       var killer: Process
@@ -453,6 +451,8 @@ proc implSanitizedEnvironment(): StringTableRef =
         result[key] = implSanitizedExecutablePath(value)
       else:
         result[key] = value
+  if not result.hasKey("PATH"):
+    result["PATH"] = implSanitizedExecutablePath("")
   when defined(posix):
     let absoluteHome = implNormalizedExecutableDirectory(
       result.getOrDefault("HOME", ""))
@@ -1239,6 +1239,9 @@ proc executeCommandBounded*(
   var truncated = false
   var buffer: array[8192, char]
   try:
+    # This API supplies no interactive input. Readers of stdin must see EOF
+    # instead of waiting for a parent pipe that is never written to.
+    p.inputStream.close()
     when defined(posix):
       let outputFd = cint(p.outputHandle)
       let deadline = started + initDuration(seconds = timeoutSec)
@@ -1279,7 +1282,17 @@ proc executeCommandBounded*(
             implTerminateProcessTree(p)
             break
         elif count == 0:
-          exitCode = p.peekExitCode()
+          # Closing stdout is not process completion. Continue enforcing the
+          # same deadline instead of applying waitForExit's separate timeout.
+          while true:
+            exitCode = p.peekExitCode()
+            if exitCode != -1:
+              break
+            if timeoutSec > 0 and getMonoTime() >= deadline:
+              didTimeOut = true
+              implTerminateProcessTree(p)
+              break
+            sleep(10)
           break
         elif errno == EINTR or errno == EAGAIN:
           continue
@@ -1308,6 +1321,8 @@ proc executeCommandBounded*(
       didTimeOut = timedOut.load()
     if exitCode == -1:
       try:
+        if not didTimeOut and not truncated:
+          implTerminateProcessTree(p)
         exitCode = p.waitForExit(1000)
       except OSError, ValueError:
         exitCode = -1

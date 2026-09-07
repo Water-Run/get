@@ -88,6 +88,7 @@ type
     callId*: string       ## Identifier of the originating tool call.
     toolName*: string     ## Name of the tool that produced the observation.
     command*: string      ## Exact command that was executed.
+    proposedCommand*: string ## Original proposal when safety review rewrote it.
     output*: string       ## Captured, size-bounded combined output.
     exitCode*: int        ## Child-process exit code.
     elapsedMs*: int64     ## Tool wall-clock duration in milliseconds.

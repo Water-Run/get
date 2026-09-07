@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-08-30" "get 3.0.1" "User Commands"
+.TH GET 1 "2026-09-07" "get 3.1.0" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -134,7 +134,7 @@ Show the application name.
 Show the introduction.
 .TP
 .B \-\-version
-Show version 3.0.1.
+Show version 3.1.0.
 .TP
 .B \-\-author
 Show the author.
@@ -148,7 +148,7 @@ Show the repository URL.
 .SS version
 .B get version
 .PP
-Displays version 3.0.1. The standard aliases
+Displays version 3.1.0. The standard aliases
 .B \-\-version
 and
 .B \-V
@@ -208,6 +208,12 @@ Enable ANSI styling.
 .TP
 .B \-\-no\-vivid
 Use plain text.
+.TP
+.B \-\-markdown
+Render model Markdown in an interactive terminal.
+.TP
+.B \-\-no\-markdown
+Display the original Markdown source.
 .TP
 .BI \-\-model " name"
 Override the model.
@@ -293,6 +299,12 @@ Log entry cap. Default: 1000.
 .TP
 .BI "vivid " bool
 ANSI styling and animation. Default: true.
+.TP
+.BI "markdown " bool
+Render model answers in interactive terminals. Default: true.
+Pipes, redirected output, TERM=dumb, and raw command output retain source text.
+NO_COLOR or vivid=false disables renderer colors, while preserving layout.
+Cached answers are rendered using the current setting.
 .TP
 .BI "instance " bool
 v2 compatibility alias. true selects direct; false selects auto when stored.
