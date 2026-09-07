@@ -21,6 +21,7 @@ when defined(windows):
   import std/base64
 
 import harness_types
+import file_lock
 import style
 import utils
 
@@ -700,7 +701,7 @@ when defined(getTest):
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc saveKey*(key: Option[string]) =
+proc implSaveKeyUnlocked(key: Option[string]) =
   let path = getKeyFilePath()
   if key.isNone:
     if fileExists(path):
@@ -713,6 +714,15 @@ proc saveKey*(key: Option[string]) =
   else:
     writePrivateFile(path, value)
 
+proc implSettingsLockPath(): string =
+  result = getAppConfigDir() / ".settings.lock"
+
+proc saveKey*(key: Option[string]) =
+  ## Serialize key updates with config setters and reset.
+  let lock = acquireFileLock(implSettingsLockPath())
+  defer: releaseFileLock(lock)
+  implSaveKeyUnlocked(key)
+
 ## Loads the API key from platform-specific secure storage.
 ##
 ## :returns: The stored key, or none if absent.
@@ -720,7 +730,7 @@ proc saveKey*(key: Option[string]) =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc loadKey*(): Option[string] =
+proc implLoadKeyUnlocked(): Option[string] =
   let path = getKeyFilePath()
   if not fileExists(path):
     return none(string)
@@ -738,6 +748,12 @@ proc loadKey*(): Option[string] =
   else:
     result = some(content)
 
+proc loadKey*(): Option[string] =
+  when defined(windows):
+    let lock = acquireFileLock(implSettingsLockPath())
+    defer: releaseFileLock(lock)
+  result = implLoadKeyUnlocked()
+
 # ---------------------------------------------------------------------------
 # Public API — config persistence
 # ---------------------------------------------------------------------------
@@ -750,7 +766,7 @@ proc loadKey*(): Option[string] =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc loadConfig*(): Config =
+proc implLoadConfigUnlocked(): Config =
   let path = getConfigFilePath()
   if not fileExists(path):
     return defaultConfig()
@@ -770,6 +786,13 @@ proc loadConfig*(): Config =
       " using defaults")
     result = defaults
 
+proc loadConfig*(): Config =
+  # Readers also cooperate so Windows replacement never races an open reader.
+  when defined(windows):
+    let lock = acquireFileLock(implSettingsLockPath())
+    defer: releaseFileLock(lock)
+  result = implLoadConfigUnlocked()
+
 ## Writes the configuration to disk as pretty-printed JSON.
 ##
 ## :param cfg: The configuration to persist.
@@ -777,10 +800,15 @@ proc loadConfig*(): Config =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc saveConfig*(cfg: Config) =
+proc implSaveConfigUnlocked(cfg: Config) =
   let path = getConfigFilePath()
   let node = implConfigToJson(cfg)
   writePrivateFile(path, pretty(node, 2) & "\n")
+
+proc saveConfig*(cfg: Config) =
+  let lock = acquireFileLock(implSettingsLockPath())
+  defer: releaseFileLock(lock)
+  implSaveConfigUnlocked(cfg)
 
 # ---------------------------------------------------------------------------
 # Public API — display
@@ -897,8 +925,10 @@ proc displayConfig*(sk: StyleKind = skSimp) =
 ##   runnableExamples:
 ##     discard
 proc resetConfig*() =
-  saveConfig(defaultConfig())
-  saveKey(none(string))
+  let lock = acquireFileLock(implSettingsLockPath())
+  defer: releaseFileLock(lock)
+  implSaveConfigUnlocked(defaultConfig())
+  implSaveKeyUnlocked(none(string))
 
 # ---------------------------------------------------------------------------
 # Public API — set by name
@@ -939,7 +969,9 @@ proc setConfigOption*(
       saveKey(some(value))
     return
 
-  var cfg = loadConfig()
+  let lock = acquireFileLock(implSettingsLockPath())
+  defer: releaseFileLock(lock)
+  var cfg = implLoadConfigUnlocked()
   case name
   of "url":
     cfg.url = value
@@ -1056,7 +1088,7 @@ proc setConfigOption*(
   else:
     raise newException(GetError,
       fmt"unknown option '{name}'")
-  saveConfig(cfg)
+  implSaveConfigUnlocked(cfg)
 
 # ---------------------------------------------------------------------------
 # Public API — readiness check
