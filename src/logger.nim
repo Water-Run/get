@@ -13,8 +13,9 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[json, strformat, strutils, times, os]
+import std/[deques, json, strformat, strutils, times, os]
 
+import file_lock
 import style
 import utils
 
@@ -32,47 +33,38 @@ const LOG_ENTRY_SEPARATOR = "\n\n"
 # Private helpers
 # ---------------------------------------------------------------------------
 
-## Counts the number of log entries in the file.
-##
-## :param content: The full log file content.
-## :returns: The number of entries detected.
+## Recognizes a timestamped entry header, including the historical format.
 func implIsEntryStart(line: string): bool =
   result = line.len >= 29 and line[0] == '[' and
     line[5] == '-' and line[8] == '-' and line[11] == ' ' and
     line[14] == ':' and line[17] == ':' and line[20 .. 28] == "] query: "
 
-func implCountEntries(content: string): int =
+proc implCountEntries(path: string): int =
+  ## Count incrementally so log inspection and cleaning use bounded memory.
   result = 0
-  for line in content.splitLines():
+  for line in lines(path):
     if implIsEntryStart(line):
       result += 1
 
-## Trims the log content so that at most maxEntries remain.
-##
-## :param content: The full log file content.
-## :param maxEntries: Maximum entries to retain.
-## :returns: The trimmed content.
-func implTrimEntries(
-  content: string,
-  maxEntries: int
-): string =
-  if maxEntries <= 0:
-    return content
-  var entries: seq[string] = @[]
+proc implReadTail(path: string, keep: int): string =
+  ## Keep only the requested tail while scanning historical multiline logs.
+  if keep <= 0 or not fileExists(path):
+    return ""
+  var entries = initDeque[string]()
   var entry = ""
-  for line in content.splitLines():
+  for line in lines(path):
     if implIsEntryStart(line) and entry.len > 0:
-      entries.add(entry.strip(trailing = true, leading = false))
+      entries.addLast(entry.strip(trailing = true, leading = false))
+      if entries.len > keep:
+        discard entries.popFirst()
       entry = ""
     entry.add(line & "\n")
   if entry.strip().len > 0:
-    entries.add(entry.strip(trailing = true, leading = false))
-  if entries.len <= maxEntries:
-    return content
-  let kept =
-    entries[entries.len - maxEntries .. ^1]
-  result = kept.join(LOG_ENTRY_SEPARATOR) &
-    LOG_ENTRY_SEPARATOR
+    entries.addLast(entry.strip(trailing = true, leading = false))
+    if entries.len > keep:
+      discard entries.popFirst()
+  for retained in entries:
+    result.add(retained & LOG_ENTRY_SEPARATOR)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -98,35 +90,35 @@ proc logExecution*(
 ) =
   try:
     let path = getLogFilePath()
+    let lock = acquireFileLock(path & ".lock")
+    defer: releaseFileLock(lock)
     let ts = now().format("yyyy-MM-dd HH:mm:ss")
     let preview =
       if output.len > MAX_LOG_OUTPUT_LEN:
         output[0 ..< MAX_LOG_OUTPUT_LEN] & "..."
       else:
         output
-    var f: File
-    if not open(f, path, fmAppend):
-      return
-    try:
-      when defined(posix):
-        setFilePermissions(path, {fpUserRead, fpUserWrite})
-      # JSON strings preserve multiline values without introducing false
-      # entry separators or forged log headers during retention trimming.
-      f.writeLine(fmt"[{ts}] query: " & $(%query))
-      f.writeLine(fmt"[{ts}] command: " & $(%command))
-      f.writeLine(fmt"[{ts}] exit: {exitCode}")
-      if preview.len > 0:
-        f.writeLine(fmt"[{ts}] output: " & $(%preview))
-      f.writeLine("")
-    finally:
-      f.close()
+    # Write one complete entry inside the same critical section as retention.
+    var entry = fmt"[{ts}] query: " & $(%query) & "\n" &
+      fmt"[{ts}] command: " & $(%command) & "\n" &
+      fmt"[{ts}] exit: {exitCode}" & "\n"
+    if preview.len > 0:
+      entry.add(fmt"[{ts}] output: " & $(%preview) & "\n")
+    entry.add("\n")
     if maxEntries > 0:
-      let content = readFile(path)
-      let count = implCountEntries(content)
-      if count > maxEntries:
-        let trimmed = implTrimEntries(
-          content, maxEntries)
-        writeFile(path, trimmed)
+      writePrivateFile(path, implReadTail(path, maxEntries - 1) & entry)
+    elif not fileExists(path):
+      writePrivateFile(path, entry)
+    else:
+      var f: File
+      if not open(f, path, fmAppend):
+        return
+      try:
+        when defined(posix):
+          setFilePermissions(path, {fpUserRead, fpUserWrite})
+        f.write(entry)
+      finally:
+        f.close()
   except CatchableError:
     discard
 
@@ -142,9 +134,10 @@ proc cleanLog*(): int =
   if not fileExists(path):
     return 0
   try:
-    let content = readFile(path)
-    result = implCountEntries(content)
-    writeFile(path, "")
+    let lock = acquireFileLock(path & ".lock")
+    defer: releaseFileLock(lock)
+    result = implCountEntries(path)
+    writePrivateFile(path, "")
   except CatchableError:
     result = 0
 
@@ -170,8 +163,9 @@ proc displayLogInfo*(
     formatIntOrDisable(maxEntries))
   styleKeyValue(sk, "file", path)
   if fileExists(path):
-    let content = readFile(path)
-    let entries = implCountEntries(content)
+    let lock = acquireFileLock(path & ".lock")
+    defer: releaseFileLock(lock)
+    let entries = implCountEntries(path)
     styleKeyValue(sk, "entries", $entries)
     let size = getFileSize(path)
     let sizeStr =
