@@ -800,6 +800,45 @@ suite "unified harness runtime":
     check value.output.contains("output:date")
     check value.termination == htBudgetExhausted
 
+  test "oversized native batches use the remaining budget and answer":
+    var modelCalls = 0
+    var executedCalls = 0
+    let model: ModelTurnProc = proc(messages: seq[LlmMessage],
+        enableNativeTools, allowParallel: bool): LlmResponse =
+      modelCalls += 1
+      if modelCalls == 1:
+        return LlmResponse(toolCalls: @[
+          LlmToolCall(id: "allowed", name: READ_ONLY_SHELL_TOOL,
+            arguments: "{\"command\":\"pwd\",\"result_mode\":\"continue\"}"),
+          LlmToolCall(id: "skipped", name: READ_ONLY_SHELL_TOOL,
+            arguments: "{\"command\":\"uname\",\"result_mode\":\"continue\"}")],
+          toolCallsJson: "[]")
+      check not enableNativeTools
+      check not allowParallel
+      check messages[^3].toolCallId == "allowed"
+      check messages[^3].content.contains("output:pwd")
+      check messages[^2].toolCallId == "skipped"
+      check messages[^2].content.contains("not executed")
+      return LlmResponse(content: "Answer from the first observation.")
+    let tools: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      check calls.len == 1
+      check calls[0].id == "allowed"
+      executedCalls += calls.len
+      return @[fakeObservation(calls[0])]
+    var budget = defaultRunBudget(hkAuto)
+    budget.maxTurns = 1
+    budget.maxToolCalls = 1
+    let value = runHarness(initialMessages(),
+      HarnessRunOptions(kind: hkAuto, protocol: tpkNative, budget: budget),
+      model, tools)
+    check value.exitCode == 0
+    check executedCalls == 1
+    check value.metrics.toolCalls == 1
+    check value.metrics.modelTurns == 2
+    check value.observations.len == 2
+    check value.observations[1].exitCode == 125
+
   test "parallel strategy passes its concurrency allowance":
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],

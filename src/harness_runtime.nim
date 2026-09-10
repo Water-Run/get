@@ -321,7 +321,9 @@ proc runHarness*(
     ))
     let enableNative =
       not options.toolsDisabled and not finalizing and options.protocol != tpkJson
-    let allowParallel = options.kind in {hkAuto, hkParallel}
+    let allowParallel = options.kind in {hkAuto, hkParallel} and
+      options.budget.maxParallel > 1 and
+      options.budget.maxToolCalls - metrics.toolCalls > 1
     var response: LlmResponse
     try:
       response = modelTurn(messages, enableNative, allowParallel and not finalizing)
@@ -456,11 +458,12 @@ proc runHarness*(
       if options.kind == hkDirect and action.calls.len > 1:
         raise newException(HarnessProtocolError,
           "direct harness permits one tool call")
-      if metrics.toolCalls + action.calls.len > options.budget.maxToolCalls:
+      let remainingCalls = options.budget.maxToolCalls - metrics.toolCalls
+      if remainingCalls <= 0:
         finishOnly = true
         continue
-
-      for call in action.calls:
+      let selectedCalls = action.calls[0 ..< min(action.calls.len, remainingCalls)]
+      for call in selectedCalls:
         implEmit(options, HarnessEvent(
           kind: hekToolStarted,
           turn: turn,
@@ -470,11 +473,11 @@ proc runHarness*(
         ))
       let parallelism =
         if options.kind in {hkAuto, hkParallel}:
-          min(options.budget.maxParallel, action.calls.len)
+          min(options.budget.maxParallel, selectedCalls.len)
         else:
           1
-      let batch = runTools(action.calls, parallelism)
-      if batch.len != action.calls.len:
+      var batch = runTools(selectedCalls, parallelism)
+      if batch.len != selectedCalls.len:
         raise newException(GetError,
           "tool executor returned an incomplete observation batch")
       for index, observation in batch:
@@ -487,7 +490,15 @@ proc runHarness*(
           raise newException(GetError,
             "tool executor returned an observation that does not match " &
               "its proposed call")
-      metrics.toolCalls += action.calls.len
+      metrics.toolCalls += selectedCalls.len
+      # Every native proposal still receives a matching observation. Calls
+      # outside the budget are inert; do not discard the useful permitted prefix.
+      for index in selectedCalls.len ..< action.calls.len:
+        let call = action.calls[index]
+        batch.add(ToolObservation(callId: call.id, toolName: call.toolName,
+          command: call.command, output:
+            "Tool budget reached: this proposal was not executed. Answer from " &
+            "the available observations.", exitCode: 125))
       for observation in batch:
         observations.add(observation)
         implEmit(options, HarnessEvent(

@@ -12,6 +12,7 @@
 | Git 文件名查询要求多余参数 | 历史会话中的 diff-files --name-only 被拒绝 | 元数据查询不再强求 diff 渲染禁用参数；git show REV:PATH 可直接读取版本中的代码；读取工作树并可能触发 clean filter 的路径仍有独立限制 |
 | 系统设置读取与变更混为一谈 | 当前工具列表缺少 GNOME 设置读取 | 支持 gsettings 查询、dconf read/list/dump、gnome-extensions list/info/version；不会为开发重载或修改桌面扩展 |
 | 有证据却没有答案 | 最后一轮执行工具后直接返回预算耗尽和命令噪声 | auto/loop/parallel 在观察后作答；独立收尾轮禁用工具；收尾失败时给出有界的已有证据及非零状态 |
+| 工具批次稍超剩余额度就整批丢弃 | 真实模型在一次工具预算回放中未取得任何证据 | 执行额度内的前几项；超额项回传未执行状态并保留原生调用 ID，随后作答；余量只有一次时关闭并行提案 |
 | 是否解释由中英文关键词列表决定 | runtime 匹配“组成”“情况”“summary”等字样 | 删除问句关键词路由；direct 显式保留一次调用及原始输出语义 |
 | 根据模型名称判断强弱、改变采样 | utils 中品牌/版本/后缀规则；配置着色；弱模型提示；Qwen 名称采样分支 | 全部删除。模型标识原样传递，非空即中性显示；不另建 Flash 白名单 |
 | 旧 Markdown 代码块与 HTML 标记触发命令 | v2 extractAgentAction、extractOutputMode 及兼容解码 | 删除旧执行协议；所有代码示例和旧标记均为回答文本；旧 legacy 配置值迁移为 json |

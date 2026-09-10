@@ -120,8 +120,14 @@ class Handler(BaseHTTPRequestHandler):
             "mixed policy batch", "large feedback cli", "duplicate reader suppression",
             "continue"))
         if successful and "budget finalization" in user_text:
-            self._completion(content="budget-answer-ok" if not has_tools
-                             else "budget-incorrectly-exposes-tools")
+            completed = (not has_tools and len(observations) == 2 and
+                         any(item.get("exit_code") == 125 for item in observations))
+            self._completion(content="budget-answer-ok" if completed
+                             else "budget-proposal-accounting-incorrect")
+            return
+        if "budget finalization" in user_text and not observations:
+            self._tool_completion([("budget-first", output("evidence"), "continue"),
+                                   ("budget-skipped", output("not-needed"), "continue")])
             return
         if successful and not special:
             self._completion(content="\n".join(item["output"] for item in successful))
