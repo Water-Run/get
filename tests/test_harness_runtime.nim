@@ -84,7 +84,7 @@ suite "unified harness runtime":
     let forbidden: ToolBatchProc = proc(calls: seq[ToolCall],
         maxParallel: int): seq[ToolObservation] =
       check false
-    for protocol in [tpkAuto, tpkNative, tpkLegacy]:
+    for protocol in [tpkAuto, tpkNative, tpkJson]:
       let value = runHarness(initialMessages(),
         HarnessRunOptions(kind: hkAuto, protocol: protocol,
           budget: defaultRunBudget(hkAuto), toolsDisabled: true), model, forbidden)
@@ -92,7 +92,7 @@ suite "unified harness runtime":
       check value.metrics.toolCalls == 0
       check value.metrics.modelTurns == 1
 
-  test "native terminal call completes in one model turn":
+  test "direct terminal call completes in one model turn":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],
@@ -102,7 +102,7 @@ suite "unified harness runtime":
       modelCalls += 1
       check messages.len == 2
       check enableNativeTools
-      check allowParallel
+      check not allowParallel
       result = LlmResponse(
         content: "",
         tokensUsed: 11,
@@ -126,9 +126,9 @@ suite "unified harness runtime":
     let value = runHarness(
       initialMessages(),
       HarnessRunOptions(
-        kind: hkAuto,
+        kind: hkDirect,
         protocol: tpkNative,
-        budget: defaultRunBudget(hkAuto),
+        budget: defaultRunBudget(hkDirect),
         eventSink: nil
       ),
       model,
@@ -476,7 +476,7 @@ suite "unified harness runtime":
     check not value.observations[0].policyRejected
     check value.termination == htAnswer
 
-  test "auto strategy does not repeat a raw timeout":
+  test "direct strategy reports a raw timeout":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],
@@ -522,9 +522,9 @@ suite "unified harness runtime":
     let value = runHarness(
       initialMessages(),
       HarnessRunOptions(
-        kind: hkAuto,
+        kind: hkDirect,
         protocol: tpkNative,
-        budget: defaultRunBudget(hkAuto),
+        budget: defaultRunBudget(hkDirect),
         eventSink: nil
       ),
       model,
@@ -536,7 +536,7 @@ suite "unified harness runtime":
     check value.observations.len == 1
     check value.termination == htRawToolResult
 
-  test "summary intent overrides an accidental raw tool result":
+  test "auto summarizes observations without query keyword routing":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],
@@ -580,7 +580,7 @@ suite "unified harness runtime":
       observation.output = repeat("A", 20_000) & "最终标记"
       result = @[observation]
     var messages = initialMessages()
-    messages[1].content = "总结目录的代码组成"
+    messages[1].content = "这个项目"
     let value = runHarness(
       messages,
       HarnessRunOptions(
@@ -599,7 +599,7 @@ suite "unified harness runtime":
     check value.observations[0].output.len > 20_000
     check value.termination == htAnswer
 
-  test "evidence intent overrides an accidental raw exit-status result":
+  test "auto interprets an exit-status observation":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],
@@ -660,7 +660,7 @@ suite "unified harness runtime":
     check value.exitCode == 0
     check value.termination == htAnswer
 
-  test "identical-file intent interprets a silent cmp success":
+  test "auto interprets a silent cmp success":
     var modelCalls = 0
     let model: ModelTurnProc = proc(
       messages: seq[LlmMessage],
@@ -747,7 +747,7 @@ suite "unified harness runtime":
       initialMessages(),
       HarnessRunOptions(
         kind: hkDirect,
-        protocol: tpkLegacy,
+        protocol: tpkJson,
         budget: defaultRunBudget(hkDirect),
         eventSink: nil
       ),
@@ -787,13 +787,15 @@ suite "unified harness runtime":
       initialMessages(),
       HarnessRunOptions(
         kind: hkLoop,
-        protocol: tpkLegacy,
+        protocol: tpkJson,
         budget: budget,
         eventSink: nil
       ),
       model,
       tools
     )
+    check value.metrics.modelTurns == 2
+    check value.metrics.toolCalls == 1
     check value.exitCode == 1
     check value.output.contains("output:date")
     check value.termination == htBudgetExhausted
@@ -806,6 +808,8 @@ suite "unified harness runtime":
     ): LlmResponse =
       discard messages
       discard enableNativeTools
+      if messages.len > 2:
+        return LlmResponse(content: "parallel observations received")
       check allowParallel
       result = LlmResponse(
         content: "{\"type\":\"tool_calls\",\"calls\":[" &
@@ -830,7 +834,7 @@ suite "unified harness runtime":
       initialMessages(),
       HarnessRunOptions(
         kind: hkParallel,
-        protocol: tpkLegacy,
+        protocol: tpkJson,
         budget: defaultRunBudget(hkParallel),
         eventSink: nil
       ),
@@ -838,8 +842,7 @@ suite "unified harness runtime":
       tools
     )
     check value.observations.len == 2
-    check value.output.contains("[a] pwd")
-    check value.output.contains("[b] uname")
+    check value.output == "parallel observations received"
 
   test "executor observations must match their proposed calls":
     let model: ModelTurnProc = proc(
@@ -871,7 +874,7 @@ suite "unified harness runtime":
         initialMessages(),
         HarnessRunOptions(
           kind: hkAuto,
-          protocol: tpkLegacy,
+          protocol: tpkJson,
           budget: defaultRunBudget(hkAuto),
           eventSink: nil
         ),
@@ -906,7 +909,7 @@ suite "unified harness runtime":
       initialMessages(),
       HarnessRunOptions(
         kind: hkAuto,
-        protocol: tpkLegacy,
+        protocol: tpkJson,
         budget: defaultRunBudget(hkAuto),
         eventSink: nil
       ),
@@ -958,7 +961,7 @@ suite "unified harness runtime":
       initialMessages(),
       HarnessRunOptions(
         kind: hkAuto,
-        protocol: tpkLegacy,
+        protocol: tpkJson,
         budget: defaultRunBudget(hkAuto),
         eventSink: nil
       ),
@@ -1001,7 +1004,7 @@ suite "unified harness runtime":
         initialMessages(),
         HarnessRunOptions(
           kind: hkDirect,
-          protocol: tpkLegacy,
+          protocol: tpkJson,
           budget: defaultRunBudget(hkDirect),
           eventSink: nil
         ),
@@ -1079,7 +1082,7 @@ suite "unified harness runtime":
         initialMessages(),
         HarnessRunOptions(
           kind: hkAuto,
-          protocol: tpkLegacy,
+          protocol: tpkJson,
           budget: defaultRunBudget(hkAuto),
           toolsDisabled: true,
           eventSink: nil

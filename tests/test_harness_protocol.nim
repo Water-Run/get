@@ -28,12 +28,11 @@ suite "harness action protocol":
       "```python\n{'name': 'example'}\n```",
       "```sh\nprintf ready\n```"
     ]:
-      let value = decodeTextAction(source, allowBareCodeTools = false)
+      let value = decodeTextAction(source)
       check value.kind == hakAnswer
       check value.text == source
     let action = decodeTextAction(
-      "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"command\":\"pwd\"}]}\n```",
-      allowBareCodeTools = false)
+      "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"command\":\"pwd\"}]}\n```")
     check action.kind == hakToolCalls
 
   test "parses a structured answer":
@@ -49,14 +48,15 @@ suite "harness action protocol":
     check parsed.isSome
     check parsed.get.text == "ok"
 
-  test "parses an exact Qwen bare-text answer object":
-    let action = decodeTextAction("{\"text\":\"56088\"}")
-    check action.kind == hakAnswer
-    check action.text == "56088"
-
-    expect ValueError:
-      discard decodeTextAction(
-        "{\"text\":\"pwd\",\"command\":\"pwd\"}")
+  test "ordinary JSON objects are preserved as answer data":
+    for source in ["{\"text\":\"56088\"}",
+        "{\"text\":\"pwd\",\"command\":\"pwd\"}",
+        "{\"type\":\"object\",\"properties\":{}}",
+        "{\"rs\":2,\"py\":3,\"nim\":1}"]:
+      let action = decodeTextAction(source)
+      check action.kind == hakAnswer
+      check action.text == source
+      check action.calls.len == 0
 
   test "parses independent parallel calls":
     let action = parseStructuredAction("""
@@ -91,18 +91,13 @@ suite "harness action protocol":
     check call.command == "pwd"
     check call.resultMode == trmReturnRaw
 
-  test "converts legacy final command":
-    let action = decodeTextAction(
-      "```sh\nuname -a\n```\n<!-- FINAL -->")
-    check action.kind == hakToolCalls
-    check action.calls.len == 1
-    check action.calls[0].command == "uname -a"
-    check action.calls[0].resultMode == trmReturnRaw
-
-  test "converts legacy continuation":
-    let action = decodeTextAction(
-      "```sh\ngit branch --show-current\n```\n<!-- CONTINUE -->")
-    check action.calls[0].resultMode == trmContinue
+  test "old Markdown commands and action markers are inert answer text":
+    for source in ["```sh\npwd\n```\n<!-- FINAL -->",
+        "```sh\npwd\n```\n<!-- CONTINUE -->", "<!-- INTERPRET -->"]:
+      let action = decodeTextAction(source)
+      check action.kind == hakAnswer
+      check action.text == source
+      check action.calls.len == 0
 
   test "parses a Qwen textual tool call":
     let action = decodeTextAction(
@@ -185,10 +180,6 @@ suite "harness action protocol":
 
   test "non-JSON content is not a structured action":
     check parseStructuredAction("hello").isNone
-
-  test "rejects a bare legacy protocol marker":
-    expect ValueError:
-      discard decodeTextAction("<!-- INTERPRET -->")
 
   test "adds precise model hints for silent finite readers":
     let identical = observationJson(ToolObservation(

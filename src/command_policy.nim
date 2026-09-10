@@ -16,6 +16,7 @@
 {.experimental: "strictFuncs".}
 
 import std/strutils
+import awk_policy
 
 type
   CommandPolicyDecision* = object
@@ -1831,124 +1832,6 @@ func implValidateTop(tokens: seq[string]): CommandPolicyDecision =
     "top requires a bounded non-interactive snapshot: use -b -n 1 on " &
     "Linux or -l 1 on macOS, with recognized read-only options")
 
-func implSafeAwkPrintExpression(expression: string): bool =
-  if expression.len == 0:
-    return true
-  for item in expression.split(','):
-    if item in ["NR", "NF", "$0", "$NF"]:
-      continue
-    if item.startsWith("$") and item.len > 1 and
-        implPositiveAtMost(item[1 .. ^1], 10_000):
-      continue
-    if item.len >= 2 and item[0] == '"' and item[^1] == '"':
-      var safeLiteral = true
-      for index in 1 ..< item.len - 1:
-        if item[index] notin {
-          'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_', '-', '.', '/', ':',
-          '(', ')', '[', ']', '+', '='
-        }:
-          safeLiteral = false
-          break
-      if safeLiteral:
-        continue
-    return false
-  result = true
-
-func implSafeAwkField(value: string): bool =
-  if value in ["NR", "NF", "$0", "$NF"]:
-    return true
-  result = value.startsWith("$") and value.len > 1 and
-    implPositiveAtMost(value[1 .. ^1], 10_000)
-
-func implSafeAwkScalar(value: string): bool =
-  if implSafeAwkField(value):
-    return true
-  let numericStart =
-    if value.len > 0 and value[0] in {'+', '-'}: 1
-    else: 0
-  if numericStart < value.len and
-      implDecimalAtMost(value[numericStart .. ^1], 1_000_000_000):
-    return true
-  # Reuse the deliberately small quoted-literal grammar accepted by print.
-  result = implSafeAwkPrintExpression(value)
-
-func implSafeAwkCondition(condition: string): bool =
-  if condition.len == 0:
-    return true
-  if condition in ["NR", "NF"]:
-    return true
-  var regexStart = 0
-  if condition.startsWith("!"):
-    regexStart = 1
-  if condition.len - regexStart >= 2 and
-      condition[regexStart] == '/' and condition[^1] == '/':
-    var escaped = false
-    var safeRegex = true
-    for index in regexStart + 1 ..< condition.len - 1:
-      if escaped:
-        escaped = false
-      elif condition[index] == '\\':
-        escaped = true
-      elif condition[index] == '/':
-        safeRegex = false
-        break
-    if safeRegex and not escaped:
-      return true
-  for operation in ["==", "!=", ">=", "<=", ">", "<"]:
-    for field in ["NR", "NF"]:
-      let prefix = field & operation
-      if condition.startsWith(prefix):
-        return implUnsignedAtMost(
-          condition[prefix.len .. ^1], 1_000_000_000)
-    let separator = condition.find(operation)
-    if separator > 0 and separator + operation.len < condition.len and
-        implSafeAwkField(condition[0 ..< separator]) and
-        implSafeAwkScalar(condition[separator + operation.len .. ^1]):
-      return true
-  result = false
-
-## Supports common pure selectors without admitting AWK's system(), getline,
-## file redirection, pipes, program files, extension loading, or general code.
-func implSafeAwkProgram(raw: string): bool =
-  let program = raw.replace(" ", "").replace("\t", "")
-  if program.len == 0 or program.len > 512 or program.contains('\n') or
-      program.contains('\r'):
-    return false
-  # A lone numeric or /regex/ pattern is AWK's built-in, side-effect-free
-  # record filter (its implicit action is ``print $0``).
-  if implSafeAwkCondition(program):
-    return true
-  if not program.endsWith("}"):
-    return false
-  var cursor = 0
-  var rules = 0
-  while cursor < program.len:
-    if program[cursor] == ';':
-      cursor += 1
-      if cursor >= program.len:
-        return false
-    let bodyStart = program.find('{', cursor)
-    if bodyStart < cursor or
-        not implSafeAwkCondition(program[cursor ..< bodyStart]):
-      return false
-    let bodyEnd = program.find('}', bodyStart + 1)
-    if bodyEnd < 0 or program.find('{', bodyStart + 1) in
-        bodyStart + 1 ..< bodyEnd:
-      return false
-    var body = program[bodyStart + 1 ..< bodyEnd]
-    if not body.startsWith("print"):
-      return false
-    body = body[5 .. ^1]
-    if body.endsWith(";exit"):
-      body = body[0 ..< body.len - 5]
-    if not implSafeAwkPrintExpression(body):
-      return false
-    rules += 1
-    if rules > 8:
-      return false
-    cursor = bodyEnd + 1
-  result = rules > 0
-
 func implValidateAwk(tokens: seq[string]): CommandPolicyDecision =
   var index = 1
   while index < tokens.len:
@@ -1976,8 +1859,8 @@ func implValidateAwk(tokens: seq[string]): CommandPolicyDecision =
     if token.startsWith("-"):
       return implReject("awk option can load or execute an external program")
     break
-  if index >= tokens.len or not implSafeAwkProgram(tokens[index]):
-    return implReject("awk program is outside the pure selector subset")
+  if index >= tokens.len or not safeAwkProgram(tokens[index]):
+    return implReject("awk program can execute helpers, alter input sources, or write files")
   index += 1
   while index < tokens.len:
     if tokens[index] != "-" and tokens[index].startsWith("-"):
@@ -3764,6 +3647,8 @@ func implValidateGit(tokens: seq[string]): CommandPolicyDecision =
     return implReject(
       "git patch output requires --no-ext-diff and --no-textconv")
   if subcommand == "show":
+    if args.len == 1 and not args[0].startsWith("-") and args[0].contains(':'):
+      return implAllow() # A blob lookup does not enter the diff machinery.
     let noPatch = implHasOption(args, ["--no-patch"]) or "-s" in args
     if (not noPatch or implGitRendersDiff(args)) and (
         not implHasOption(args, ["--no-ext-diff"]) or
@@ -3814,10 +3699,6 @@ func implValidateGit(tokens: seq[string]): CommandPolicyDecision =
       if (arg.startsWith("-p") or arg.startsWith("-U") or arg == "-u" or
           arg == "-W") and not arg.startsWith("--"):
         return implReject("git diff-files patch rendering is not permitted")
-    if not implHasOption(args, ["--no-ext-diff"]) or
-        not implHasOption(args, ["--no-textconv"]):
-      return implReject(
-        "git diff-files requires --no-ext-diff and --no-textconv")
     if not implHasOption(args, ["--name-only", "--name-status", "--raw"]):
       return implReject("git diff-files is limited to metadata-only output")
     return implAllow()
@@ -4911,6 +4792,11 @@ func implValidateStage(
   if name.len == 0:
     return implReject("relative or untrusted executable path is not permitted")
 
+  if name == "env":
+    if tokens.len == 1 or (tokens.len == 2 and tokens[1] in
+        ["-0", "--null", "--help", "--version"]):
+      return implAllow()
+    return implReject("env supports environment inspection, not command wrapping")
   let lowerShell = toLowerAscii(shell)
   if name == "sc" and
       (lowerShell.contains("powershell") or lowerShell.contains("pwsh")) and
@@ -4973,11 +4859,28 @@ func implValidateStage(
     if name == "set":
       return implReject("bare set is PowerShell's write-capable Set-Variable alias")
   elif name == "set" and not lowerShell.contains("cmd"):
-    return implReject("set is allowed only as a cmd.exe environment query")
+    if tokens.len == 1 or (lowerShell.contains("fish") and tokens.len == 2 and
+        tokens[1] in ["--show", "-S", "--names", "-n"]):
+      return implAllow()
+    return implReject("set supports environment inspection without assignments")
 
   if name in SIMPLE_READ_ONLY_COMMANDS or name in POWERSHELL_READ_ONLY_COMMANDS:
     return implAllow()
   case name
+  of "gsettings":
+    if tokens.len >= 2 and tokens[1] in ["get", "range", "list-schemas",
+        "list-relocatable-schemas", "list-keys", "list-children",
+        "list-recursively", "describe", "writable"]:
+      return implAllow()
+    return implReject("gsettings requires a query subcommand")
+  of "dconf":
+    if tokens.len == 3 and tokens[1] in ["read", "list", "dump"]:
+      return implAllow()
+    return implReject("dconf requires read, list, or dump")
+  of "gnome-extensions":
+    if tokens.len >= 2 and tokens[1] in ["list", "info", "version"]:
+      return implAllow()
+    return implReject("gnome-extensions requires list, info, or version")
   of "find": return implValidateFind(tokens)
   of "fd", "fdfind": return implValidateFd(tokens)
   of "rg": return implValidateRg(tokens)

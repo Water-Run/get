@@ -8,7 +8,7 @@
 ##
 ## This module validates provider-native tool arguments and structured JSON
 ## actions before they enter the harness state machine.  It also contains the
-## isolated v2 Markdown compatibility decoder, allowing the runtime itself to
+## explicit structured text decoder, allowing the runtime itself to
 ## operate exclusively on typed actions.
 
 {.experimental: "strictFuncs".}
@@ -16,7 +16,6 @@
 import std/[json, options, strformat, strutils]
 
 import harness_types
-import utils
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -390,8 +389,8 @@ proc parseNativeToolCall*(
 
 ## Parses a strict JSON action returned as assistant text.
 ##
-## Unknown non-JSON text returns none so the caller can use the isolated legacy
-## decoder.  JSON that claims to be an action but violates the schema raises an
+## Non-action content returns none so the caller can preserve answer data.
+## JSON that claims to be an action but violates the schema raises an
 ## error instead of silently falling through to shell-text parsing.
 ##
 ## :param content: Raw assistant content.
@@ -420,19 +419,14 @@ proc parseStructuredAction*(
   if node.kind != JObject:
     raise newException(ValueError,
       "structured action must be a JSON object")
-  # Some Qwen-compatible templates omit the discriminator for a direct
-  # answer and emit only {"text":"..."}.  Accept that single-field shape as
-  # an answer; keeping the object exact prevents an omitted `type` from
-  # weakening validation of tool-like payloads.
-  if node{"type"}.isNil and node.len == 1 and
-      not node{"text"}.isNil:
-    return some(HarnessAction(
-      kind: hakAnswer,
-      text: implRequiredString(node, "text"),
-      calls: @[]
-    ))
-  let actionType = toLowerAscii(
-    implRequiredString(node, "type"))
+  # Only an explicit action discriminator selects the tool protocol. JSON
+  # requested as answer data (including JSON Schema) is preserved verbatim.
+  let typeNode = node{"type"}
+  if typeNode.isNil or typeNode.kind != JString:
+    return none(HarnessAction)
+  let actionType = toLowerAscii(typeNode.getStr())
+  if actionType notin ["answer", "refuse", "refusal", "tool", "tool_calls"]:
+    return none(HarnessAction)
   case actionType
   of "answer":
     let answer =
@@ -480,42 +474,19 @@ proc parseStructuredAction*(
     raise newException(ValueError,
       fmt"unsupported structured action type '{actionType}'")
 
-## Decodes assistant text into a typed action with v2 compatibility.
-##
-## Structured JSON is preferred.  When absent, the function converts the old
-## fenced-command protocol into the same ToolCall representation, keeping all
-## Markdown compatibility outside the runtime state machine.
-##
-## :param content: Raw assistant response content.
-## :returns: A provider-independent HarnessAction.
-## :raises: ValueError: If a structured action is malformed.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let action = decodeTextAction(
-##       "```sh\nuname -a\n```\n<!-- FINAL -->")
-##     assert action.kind == hakToolCalls
-##     assert action.calls[0].resultMode == trmReturnRaw
-proc decodeTextAction*(
-  content: string,
-  allowBareCodeTools: bool = true
-): HarnessAction =
-  let upper = content.toUpperAscii()
-  let hasLegacyMarker = upper.contains("<!-- CONTINUE -->") or
-    upper.contains("<!-- INTERPRET -->") or upper.contains("<!-- FINAL -->")
-  if not allowBareCodeTools and not hasLegacyMarker and
-      content.strip().startsWith("```"):
+## Decodes explicit tool actions. Markdown and old HTML markers are answer data.
+proc decodeTextAction*(content: string): HarnessAction =
+  if content.strip().len == 0:
+    raise newException(ValueError, "assistant answer is empty")
+  if content.strip().startsWith("```"):
     let candidate = implStripJsonFence(content)
-    # JSON examples in ordinary answers are data too. An explicit action
-    # discriminator still enters the strict protocol and cannot run as text.
     try:
       let node = parseJson(candidate)
       let actionType = if node.kind == JObject: node{"type"} else: nil
       let explicitAction = not actionType.isNil and actionType.kind == JString and
         actionType.getStr().toLowerAscii() in
           ["answer", "refuse", "refusal", "tool", "tool_calls"]
-      if node.kind != JObject or
-          (not explicitAction and not (node.len == 1 and node.hasKey("text"))):
+      if not explicitAction:
         return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
     except JsonParsingError:
       return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
@@ -525,38 +496,7 @@ proc decodeTextAction*(
   let bracketCall = implParseBracketToolAction(content)
   if bracketCall.isSome:
     return bracketCall.get
-  if not allowBareCodeTools and not hasLegacyMarker:
-    return HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
-  let legacy = extractAgentAction(content)
-  case legacy.action
-  of aaAnswer:
-    result = HarnessAction(
-      kind: hakAnswer,
-      text: content.strip(),
-      calls: @[]
-    )
-  of aaContinue, aaInterpret, aaFinal:
-    if legacy.command.isNone:
-      raise newException(ValueError,
-        "legacy protocol marker is missing a command")
-    let mode =
-      if legacy.action in {aaContinue, aaInterpret}:
-        trmContinue
-      else:
-        trmReturnRaw
-    result = HarnessAction(
-      kind: hakToolCalls,
-      text: "",
-      calls: @[
-        ToolCall(
-          id: "legacy-1",
-          toolName: READ_ONLY_SHELL_TOOL,
-          command: implValidateCommand(legacy.command.get),
-          purpose: "",
-          resultMode: mode
-        )
-      ]
-    )
+  result = HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
 
 ## Serialises a tool observation for model feedback.
 ##

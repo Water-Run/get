@@ -47,7 +47,7 @@ const SHELL_TOOL_SCHEMA* = """{
 func implStrategyInstruction(kind: HarnessKind): string =
   case kind
   of hkAuto:
-    result = "Prefer one terminal call; continue only when evidence is needed."
+    result = "Collect the needed evidence, then answer the question."
   of hkDirect:
     result = "Tool output is returned verbatim. If calling once, the command " &
       "itself must produce the exact requested format, including yes/no or " &
@@ -127,7 +127,7 @@ func implSystemPrompt(
         "or true/false.",
       "One bounded plan; every pipeline/short ;/&&/|| sequence is " &
         "observational. Text: head/tail, " &
-        "stdout-only sed, or pure AWK field selectors. Counts: qualified " &
+        "stdout-only sed, or AWK arithmetic/arrays/END aggregation. Counts: qualified " &
         "globs+wc or find -printf/grep -o then sort|uniq -c; never " &
         "find -exec. Performance: " &
         "top -b -n 1 | head -n 15 on Linux, top -l 1 -n 15 on macOS, " &
@@ -140,8 +140,12 @@ func implSystemPrompt(
       "Globs need ./ or --. Web: curl -q; wget --no-config --no-hsts -O-.",
       "Weather without place: infer it from named timezone, never proxy egress; " &
         "use local units.",
-      "Composition: find -printf | sed | sort | uniq -c; " &
-        "skip .git/.ci/.release/build/dist/node_modules/__pycache__.",
+      "Composition: prefer rg --files, honoring ignore files; exclude nested " &
+        "build/dist/target/node_modules/.venv/venv/__pycache__/_deps/.git/.ci. " &
+        "Count extensions with awk -F. 'NF>1 {c[$NF]++} " &
+        "END {for (e in c) print c[e], e}' | sort -rn. " &
+        "Distinguish file counts from lines of code; read manifests/entrypoints " &
+        "to explain code. Use tokei only when installed.",
       "Git summaries, first batch: branch -vv --no-color; staged via diff " &
         "--cached, unstaged via diff-files (both --name-only --no-ext-diff " &
         "--no-textconv); untracked via ls-files --others --exclude-standard | " &
@@ -151,12 +155,13 @@ func implSystemPrompt(
         "status or plain diff. Systemd: " &
         "systemctl list-units or systemctl --failed --no-pager. macOS " &
         "services: launchctl list | head -n 21, then answer.",
-      "return_raw only for complete requested answer output; continue to " &
-        "explain/compare/summarize composition/status.",
+      "After tools, answer the original question from observations. " &
+        "Explain code, summarize system status, and state missing evidence. " &
+        "Code examples are answer text, never implicit tool calls.",
       "grep/diff/cmp/test exit 1 is evidence, not a crash. On failure explain " &
         "or try one simpler reader; don't repeat timed-out/truncated commands.",
       implStrategyInstruction(kind),
-      fmt"Limits: {budget.maxTurns} turns, {budget.maxToolCalls} tools, " &
+      fmt"Limits: {budget.maxTurns} inspection turns plus one answer turn, {budget.maxToolCalls} tools, " &
         fmt"{budget.maxParallel} concurrent.",
       "Without native tools emit one JSON action: " &
         "{\"type\":\"answer\",\"text\":\"...\"} or " &

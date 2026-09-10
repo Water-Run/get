@@ -133,7 +133,7 @@ type
     doubleCheck*: bool               ## Second model review.
     instance*: bool                  ## v2 alias for the direct harness.
     harness*: string                 ## Unified v3 harness strategy.
-    toolProtocol*: string            ## Native, legacy, or automatic tools.
+    toolProtocol*: string            ## Native, JSON, or automatic tools.
     timeout*: int                    ## Per-request timeout (s).
     maxToken*: int                   ## Max tokens per request.
     commandPattern*: Option[string]  ## Forbidden-cmd regex.
@@ -148,7 +148,7 @@ type
     logMaxEntries*: int              ## Max log entries.
     vivid*: bool                     ## Vivid output mode.
     markdown*: bool                  ## Render model answers in interactive terminals.
-    maxRounds*: int                  ## Max model turns per harness run.
+    maxRounds*: int                  ## Max inspection turns; one final answer turn follows.
     maxToolCalls*: int               ## Max tool calls per harness run.
     maxParallel*: int                ## Max concurrent tool calls.
     commandTimeout*: int             ## Per-command deadline in seconds.
@@ -332,14 +332,9 @@ func classifyInt*(value: int, lo: int, hi: int): ValueState =
 func classifyShell*(shell: string): ValueState =
   if isSupportedShell(shell): vsGood else: vsWarn
 
-## Classifies a model name using the strong-model heuristic so
-## that recognised high-performance models appear green and
-## unknown / weak models appear amber.
-##
-## :param model: The configured model name.
-## :returns: vsGood when strong, vsWarn otherwise.
+## Model identifiers are opaque provider values, without capability rankings.
 func classifyModel*(model: string): ValueState =
-  if isKnownStrongModel(model): vsGood else: vsWarn
+  if model.strip().len > 0: vsNeutral else: vsWarn
 
 ## Classifies a URL value: a non-empty value is neutral, an
 ## empty value is flagged as it prevents requests.

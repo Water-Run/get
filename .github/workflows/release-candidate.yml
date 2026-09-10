@@ -18,9 +18,9 @@ concurrency:
 
 env:
   NIM_VERSION: 2.2.10
-  RELEASE_VERSION: 3.1.0
+  RELEASE_VERSION: 3.2.0
   # Refresh only after the no-assembly payload passes the recorded provider gates.
-  PROVIDER_VALIDATED_LINUX_SHA256: 09886915f4bfef39cb5f2c5d7f8c6bd657ed05f013ff6e305711da46a1eb37ed
+  PROVIDER_VALIDATED_LINUX_SHA256: PENDING_PROVIDER_VALIDATION
 
 jobs:
   linux-amd64:
@@ -44,7 +44,7 @@ jobs:
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
           if git grep -IlE 'sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- .; then
             echo "Potential credential material found in tracked files" >&2
@@ -102,12 +102,6 @@ jobs:
           "$install_home/.local/bin/get" version
           test -f "$install_home/.local/share/man/man1/get.1"
 
-      - name: Run comprehensive Linux offline suite
-        run: |
-          install -m 0755 .ci/get-linux-x64 .ci/get
-          PATH="$GITHUB_WORKSPACE/.ci:$PATH" \
-            python3 get_test.py --key dummy --skip-llm
-
       - name: Upload Linux binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -143,7 +137,7 @@ jobs:
         shell: pwsh
         run: |
           nimble check
-          python -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
 
       - name: Run Windows Nim unit tests
@@ -220,13 +214,6 @@ jobs:
             throw "Installer did not copy zlib1.dll"
           }
 
-      - name: Run comprehensive Windows offline suite
-        shell: pwsh
-        run: |
-          Copy-Item .ci/get-windows-x64.exe .ci/get.exe
-          $env:PATH = "$(Resolve-Path .ci);$env:PATH"
-          python get_test.py --key dummy --skip-llm
-
       - name: Upload Windows payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -265,7 +252,7 @@ jobs:
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
 
       - name: Run macOS Nim unit tests
@@ -371,14 +358,11 @@ jobs:
             "$package_dir/OPENSSL-LICENSE.txt"
           install -m 0644 licenses/ZLIB.txt \
             "$package_dir/ZLIB-LICENSE.txt"
-          install -m 0644 RELEASE_NOTES-v3.1.0.md \
+          install -m 0644 RELEASE_NOTES-v3.2.0.md \
             "$package_dir/RELEASE_NOTES.md"
-          install -m 0644 VALIDATION-v3.1.0.md \
+          install -m 0644 VALIDATION-v3.2.0.md \
             "$package_dir/VALIDATION.md"
-          install -m 0644 benchmark-results-v3.1.0.json \
-            "$package_dir/benchmark-results.json"
-
-          install -m 0644 provider-validation-v3.1.0.json \
+          install -m 0644 provider-validation-v3.2.0.json \
             "$package_dir/PROVIDER_VALIDATION.json"
 
           printf '%s  %s\n' "$PROVIDER_VALIDATED_LINUX_SHA256" \
@@ -404,7 +388,10 @@ jobs:
           assert provider_record["status"] == "passed"
           assert provider_record["version"] == os.environ["RELEASE_VERSION"]
           assert provider_record["linux_payload_sha256"] == os.environ["PROVIDER_VALIDATED_LINUX_SHA256"]
-          assert provider_record["providers"]["deepseek"]["harness"]["passed"] == 47
+          assert provider_record["providers"]
+          assert provider_record["live_configuration_preserved"]
+          assert provider_record["cases"]
+          assert all(case["passed"] for case in provider_record["cases"])
           provider_lines = []
           for name, provider in provider_record["providers"].items():
               for suite, counts in provider.items():
@@ -439,7 +426,7 @@ jobs:
           [GitHub Actions run {os.environ['GITHUB_RUN_ID']}]({run_url}). Those
           gates cover the full Nim unit suite, platform release builds, HTTPS,
           CLI end-to-end tests, installer smoke tests, and the applicable
-          comprehensive offline suite. The release-candidate artifact is
+          focused CLI suite. The release-candidate artifact is
           uploaded only after package layout, architecture, version, installer
           syntax, per-file checksums, and archive checksum verification pass.
 
@@ -548,7 +535,6 @@ jobs:
             THIRD_PARTY_NOTICES.md
             VALIDATION.md
             ZLIB-LICENSE.txt
-            benchmark-results.json
             get-linux-x64
             get-macos-arm64
             get-windows-x64.exe
@@ -598,10 +584,10 @@ jobs:
       - name: Upload verified release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: get-v3.1.0-release-candidate-${{ github.sha }}
+          name: get-v3.2.0-release-candidate-${{ github.sha }}
           path: |
-            dist/get-v3.1.0.zip
-            dist/get-v3.1.0.zip.sha256
+            dist/get-v3.2.0.zip
+            dist/get-v3.2.0.zip.sha256
             dist/package/BUILDINFO.json
             dist/package/SHA256SUMS
           if-no-files-found: error

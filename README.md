@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a safe, read-only local inspection. Version 3.1.0 adds terminal Markdown rendering and read-only policy fixes to one typed harness that can answer directly, run one command, continue with observations, or execute independent checks in parallel.
+`get` turns a natural-language question into a safe, read-only local inspection. Version 3.2.0 makes code and system queries more practical: it supports AWK aggregation, private temporary storage, and a final answer after inspection. Model names are opaque identifiers; there are no strength rankings or name-based sampling settings.
 
 ```bash
 get "IP address of this device"
@@ -13,9 +13,9 @@ get "current git branch and uncommitted files"
 ## What changed in v3
 
 - One provider-independent `Model → Action → Policy → Tool → Observation` state machine.
-- Native function tools by default, with structured JSON and v2 Markdown compatibility fallbacks.
+- Native function tools by default, with explicit structured JSON fallback. Markdown examples and HTML markers never execute.
 - `auto`, `direct`, `loop`, and `parallel` strategies over the same runtime.
-- One model call for routine commands; no separate router or cache-classifier call.
+- One call for direct answers or explicit `direct` queries; default local inspections are followed by an answer. There is no separate router or cache-classifier call.
 - Reused HTTP connections and completion-driven waiting. Fast responses are no longer delayed by a one-second polling interval.
 - Pre-response transport failures retry up to three times within the original request timeout; HTTP and parsing errors are never retried, response bodies have an 8 MiB hard cap, and bearer-bearing requests do not follow redirects.
 - HTTPS verifies both the certificate chain and DNS/IP host name. Windows builds import the native Windows ROOT store into OpenSSL, so normal HTTPS use does not depend on a separately downloaded CA bundle.
@@ -59,12 +59,12 @@ API keys are never printed or logged. On Linux the key file is mode `0600`; on W
 
 | Strategy | Behavior | Typical model calls |
 |---|---|---:|
-| `auto` | Direct-first; continues or batches only when requested | 1 |
+| `auto` | Inspect, then answer from observations | 1–4 |
 | `direct` | One model turn and at most one terminal tool call | 1 |
-| `loop` | Serial observation feedback for dependent work | 1–3 |
-| `parallel` | Concurrent independent read-only calls | 1–3 |
+| `loop` | Serial observation feedback for dependent work | 1–4 |
+| `parallel` | Concurrent independent read-only calls | 1–4 |
 
-`auto` is the default.
+`auto` is the default. `max-rounds` limits inspection turns; a separate final turn has no tools. Tool limits stay enforced. If the provider cannot finish, get returns a bounded account of available evidence with a nonzero exit status.
 
 In `auto`, `loop`, and `parallel`, a command denied by the mandatory policy is
 not executed. The denial is returned as a typed observation so the model can
@@ -82,12 +82,14 @@ The tool protocol is configured separately:
 ```bash
 get set tool-protocol auto     # native tools, fallback on provider rejection
 get set tool-protocol native   # require native function tools
-get set tool-protocol legacy   # structured JSON plus v2 Markdown compatibility
+get set tool-protocol json     # explicit structured JSON actions
 ```
 
 When a query explicitly says `without tools` or `without calling a tool`, get
 uses enforced text-only routing: the provider receives no tool definition,
 textual tool actions are rejected, and an older cached command is ignored.
+
+POSIX observation processes receive a private temporary directory that is removed after execution. Native write denial protects the host filesystem while allowing tools such as `sort` to spill there. `env`, query-only `set`, GNOME settings queries, and Git metadata/blob reads are supported.
 
 ## Safety model
 
@@ -108,7 +110,7 @@ file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
 and `top -l 1` on macOS (`-n 0` is valid for a summary-only snapshot); Windows
 uses native readers such as `Get-Process`,
 `Get-CimInstance`, and `tasklist`. Common hardware/process reporters and pure
-AWK field selectors are accepted. `sed` is admitted for display-only address
+AWK arithmetic, variables, arrays, pure functions and END aggregation are accepted. External functions, input-source mutation and output redirection remain rejected. `sed` is admitted for display-only address
 expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
 external program files, and command execution remain denied. This keeps normal
 diagnostics usable while validating dual-use tools by semantics rather than by
@@ -123,7 +125,7 @@ For HTTP inspection, use `curl -q ...`; the leading `-q` prevents `.curlrc` from
 
 `git status` and worktree-content `git diff` are deliberately rejected: repository-owned clean/textconv/filter configuration can execute helpers even for commands that appear read-only. Use `git branch --show-current`; `git diff-files --name-only --no-ext-diff --no-textconv` for modified tracked names; `git ls-files --others --exclude-standard` for untracked names; and `git diff --cached --no-ext-diff --no-textconv` for staged content. `git show` and patch-rendering `git log` also require both disabling flags.
 
-`double-check` defaults to `false`, keeping routine requests to one model call. Enable it when an independent model review is worth the added latency and cost:
+`double-check` defaults to `false`, avoiding an extra safety-review request. Enable it when an independent model review is worth the added latency and cost:
 
 ```bash
 get "inspect service status" --double-check
@@ -143,10 +145,10 @@ Run `get config` to display all settings, `get config --<option>` for one value,
 | `manual-confirm` | `false` | Confirm each command interactively |
 | `double-check` | `false` | Add a second model safety review |
 | `harness` | `auto` | `auto`, `direct`, `loop`, or `parallel` |
-| `tool-protocol` | `auto` | `auto`, `native`, or `legacy` |
+| `tool-protocol` | `auto` | `auto`, `native`, or `json` |
 | `timeout` | `300` | API timeout in seconds; `false` disables it |
 | `max-token` | `20480` | Maximum response tokens; `false` omits it |
-| `max-rounds` | `3` | Hard model-turn limit |
+| `max-rounds` | `3` | Inspection-turn limit; one final answer turn is separate |
 | `max-tool-calls` | `8` | Hard tool-call limit per run |
 | `max-parallel` | `4` | Maximum concurrent tool calls |
 | `command-timeout` | `30` | Hard deadline per command, seconds |
@@ -189,7 +191,7 @@ get set command-pattern ""                 # clear an existing supplemental rege
 --manual-confirm / --no-manual-confirm
 --double-check / --no-double-check
 --harness <auto|direct|loop|parallel>
---protocol <auto|native|legacy>
+--protocol <auto|native|json>
 --instance / --no-instance          compatibility aliases
 --hide-process / --no-hide-process
 --system-proxy / --no-system-proxy
@@ -216,10 +218,7 @@ Pipes, redirected output, and `TERM=dumb` retain the Markdown source. Raw
 command output is never interpreted as Markdown. Cached answers keep their
 source text and respect the current rendering setting.
 
-In `auto` / `native`, unmarked code fences in answers are examples. Bare
-v2 command fences require explicit `legacy` mode. Typed tool actions and
-explicit legacy action markers still pass the safety gate and cannot bypass
-a request that disables tools.
+Markdown code examples and old HTML action markers are always answer text. `legacy` configuration values migrate to `json`; explicit JSON/native tool actions still pass the safety gate.
 
 The current review also closes quoting, glob-option injection, RPM macro,
 nft/tmux embedded-command, and abbreviated `ip` mutation paths. Use an explicit
@@ -267,13 +266,17 @@ Exit codes:
 Requires Nim 2.2.8 or newer; release CI uses Nim 2.2.10.
 
 ```bash
-nim c -d:release -o:get src/get.nim
-GET_V3_BINARY="$PWD/get" python tests/test_cli_v3.py -v
-PATH="$PWD:$PATH" python get_test.py --key dummy --skip-llm
+# Check MemAvailable >= 6 GiB and memory full avg10 < 2 before compiling.
+nice -n 10 nim c --parallelBuild:1 -d:release -o:.ci/get src/get.nim
+GET_V3_BINARY="$PWD/.ci/get" python tests/test_cli_v3.py -v
+python get_test.py --binary .ci/get --provider-config ~/.config/get \
+  --shell bash --report .ci/provider-replay.json
 ```
 
 Always select the newly built binary explicitly: historical executables in the
 working tree or on PATH may belong to a different release.
+
+Local persistence workers are capped at four. Full native platform suites run in CI. The provider replay uses isolated configuration, a mixed-language fixture with nested build/dependency directories, exact observable answers and an optional `--real-project` replay.
 
 Focused tests under `tests/` cover protocol parsing, native tool payloads, state transitions, configuration migration, mandatory policy, bounded execution, and real parallel execution.
 

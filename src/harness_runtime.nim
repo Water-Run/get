@@ -78,8 +78,7 @@ proc implEmit(options: HarnessRunOptions, event: HarnessEvent) =
 ## :returns: Validated typed action.
 ## :raises: HarnessProtocolError: If native arguments or fallback text is invalid.
 proc implDecodeResponse(
-  response: LlmResponse,
-  allowBareCodeTools: bool
+  response: LlmResponse
 ): HarnessAction =
   if response.toolCalls.len > 0:
     var calls: seq[ToolCall] = @[]
@@ -109,7 +108,7 @@ proc implDecodeResponse(
       calls: calls
     )
   try:
-    result = decodeTextAction(response.content, allowBareCodeTools)
+    result = decodeTextAction(response.content)
   except ValueError as error:
     raise newException(HarnessProtocolError, error.msg)
 
@@ -223,29 +222,27 @@ proc implFinish(value: HarnessResult, started: MonoTime): HarnessResult =
   result = value
   result.metrics.elapsedMs = implElapsedMs(started)
 
-## Some requests inherently need model interpretation after inspection. Models
-## occasionally mark a raw listing as terminal even for an explicit summary or
-## composition question; this small multilingual intent gate corrects that
-## protocol choice without exposing another tool or changing command policy.
-func implRequestNeedsInterpretation(messages: seq[LlmMessage]): bool =
-  var query = ""
-  for index in countdown(messages.high, 0):
-    if messages[index].role == "user":
-      query = toLowerAscii(messages[index].content)
+## A bounded fallback preserves evidence if the final answer cannot be obtained.
+func implIncompleteOutput(observations: seq[ToolObservation]): string =
+  result = "Inspection incomplete: the available observations are listed below."
+  if observations.len == 0:
+    return result & " No local evidence was collected."
+  for observation in observations:
+    if result.len >= MAX_MODEL_FEEDBACK_BYTES:
       break
-  for marker in [
-    "composition", "breakdown", "summarize", "summary", "compare",
-    "comparison", "whether", "determine if", "identical", "different",
-    "exists", "existence", "missing", "absent",
-    "explain", "analyze", "analyse", "status",
-    "clearly say", "as evidence", "interpret the exit", "explicit answer",
-    "weather", "forecast", "天气", "天氣", "天気", "날씨",
-    "组成", "构成", "汇总", "总结", "概览", "分析", "解释", "说明",
-    "比较", "对比", "情况", "状态", "是否", "有没有", "存在", "相同",
-    "一致", "缺失", "不存在", "内訳", "要約", "요약", "구성", "분석"
-  ]:
-    if query.contains(marker):
-      return true
+    var section = "\n\n" & observation.command & "\n"
+    var preview = observation.output
+    if preview.len > 2048:
+      var ending = 2048
+      while ending > 0 and (byte(preview[ending]) and 0xC0'u8) == 0x80'u8:
+        ending -= 1
+      preview = preview[0 ..< ending] & "\n[observation shortened]"
+    section.add(if preview.len > 0: preview else: "exit " & $observation.exitCode)
+    var remaining = min(section.len, MAX_MODEL_FEEDBACK_BYTES - result.len)
+    while remaining > 0 and remaining < section.len and
+        (byte(section[remaining]) and 0xC0'u8) == 0x80'u8:
+      remaining -= 1
+    result.add(section[0 ..< remaining])
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -290,8 +287,6 @@ proc runHarness*(
 
   let started = getMonoTime()
   var messages = initialMessages
-  let requestNeedsInterpretation =
-    implRequestNeedsInterpretation(initialMessages)
   var observations: seq[ToolObservation] = @[]
   var metrics = RunMetrics(
     modelTurns: 0,
@@ -308,7 +303,15 @@ proc runHarness*(
     elapsedMs: 0
   ))
 
-  for turn in 1 .. options.budget.maxTurns:
+  var finishOnly = false
+  let totalTurns = options.budget.maxTurns + (if options.kind == hkDirect: 0 else: 1)
+  for turn in 1 .. totalTurns:
+    let finalizing = finishOnly or (options.kind != hkDirect and turn == totalTurns)
+    if finalizing:
+      messages.add(LlmMessage(role: "user", content:
+        "Inspection is complete. No more tools are available. Answer the original " &
+        "question using the observations already collected. State missing evidence " &
+        "plainly; do not invent local facts or output another tool action."))
     implEmit(options, HarnessEvent(
       kind: hekModelStarted,
       turn: turn,
@@ -317,9 +320,17 @@ proc runHarness*(
       elapsedMs: implElapsedMs(started)
     ))
     let enableNative =
-      not options.toolsDisabled and options.protocol != tpkLegacy
+      not options.toolsDisabled and not finalizing and options.protocol != tpkJson
     let allowParallel = options.kind in {hkAuto, hkParallel}
-    let response = modelTurn(messages, enableNative, allowParallel)
+    var response: LlmResponse
+    try:
+      response = modelTurn(messages, enableNative, allowParallel and not finalizing)
+    except GetError:
+      if not finalizing or observations.len == 0:
+        raise
+      return implFinish(HarnessResult(output: implIncompleteOutput(observations),
+        exitCode: 1, observations: observations, metrics: metrics,
+        termination: htBudgetExhausted), started)
     metrics.modelTurns += 1
     metrics.modelRequests += max(response.providerRequests, 1)
     metrics.inputOutputTokens += response.tokensUsed
@@ -333,15 +344,18 @@ proc runHarness*(
 
     var action: HarnessAction
     try:
-      action = implDecodeResponse(response,
-        options.protocol == tpkLegacy and not options.toolsDisabled)
+      action = implDecodeResponse(response)
     except HarnessProtocolError:
       # A malformed textual action cannot be associated with a native tool
       # response, but it is also inert: no executor has seen it.  Auto/loop/
       # parallel runs use one remaining bounded model turn to repair the wire
       # format instead of failing an otherwise healthy long-running task.
       # Direct mode remains exactly one turn and therefore fails immediately.
-      if options.kind == hkDirect or turn >= options.budget.maxTurns:
+      if finalizing:
+        return implFinish(HarnessResult(output: implIncompleteOutput(observations),
+          exitCode: 1, observations: observations, metrics: metrics,
+          termination: htBudgetExhausted), started)
+      if options.kind == hkDirect:
         raise
       const MAX_INVALID_ACTION_CONTEXT = 4096
       var invalidText = response.content
@@ -420,6 +434,10 @@ proc runHarness*(
       ))
       return implFinish(value, started)
     of hakToolCalls:
+      if finalizing:
+        return implFinish(HarnessResult(output: implIncompleteOutput(observations),
+          exitCode: 1, observations: observations, metrics: metrics,
+          termination: htBudgetExhausted), started)
       if options.toolsDisabled:
         raise newException(HarnessProtocolError,
           "tool calls are disabled for this request")
@@ -439,23 +457,8 @@ proc runHarness*(
         raise newException(HarnessProtocolError,
           "direct harness permits one tool call")
       if metrics.toolCalls + action.calls.len > options.budget.maxToolCalls:
-        let value = HarnessResult(
-          output: "harness tool-call budget exhausted",
-          exitCode: 1,
-          finalCommand: "",
-          observations: observations,
-          metrics: metrics,
-          termination: htBudgetExhausted,
-          refused: false
-        )
-        implEmit(options, HarnessEvent(
-          kind: hekRunFailed,
-          turn: turn,
-          callId: "",
-          message: "tool-call budget exhausted",
-          elapsedMs: implElapsedMs(started)
-        ))
-        return implFinish(value, started)
+        finishOnly = true
+        continue
 
       for call in action.calls:
         implEmit(options, HarnessEvent(
@@ -495,25 +498,7 @@ proc runHarness*(
           elapsedMs: observation.elapsedMs
         ))
 
-      var needsContinuation = false
-      for call in action.calls:
-        if call.resultMode == trmContinue:
-          needsContinuation = true
-      if options.kind != hkDirect and requestNeedsInterpretation:
-        needsContinuation = true
-      # Auto/loop/parallel strategies recover from policy false positives and
-      # ordinary finite reader failures (no matches, missing files/tools).
-      # A hard timeout or output cap is returned immediately when the model
-      # requested raw output: automatically repeating a resource-limit breach
-      # would turn one bounded command into maxTurns expensive attempts.
-      if options.kind != hkDirect:
-        for observation in batch:
-          if observation.policyRejected or (observation.exitCode != 0 and
-              not observation.timedOut and not observation.truncated):
-            needsContinuation = true
       if options.kind == hkDirect:
-        needsContinuation = false
-      if not needsContinuation:
         let value = HarnessResult(
           output: implFormatRawOutput(batch),
           exitCode: implBatchExitCode(batch),
@@ -531,37 +516,14 @@ proc runHarness*(
           elapsedMs: implElapsedMs(started)
         ))
         return implFinish(value, started)
-      if turn >= options.budget.maxTurns:
-        let batchCode = implBatchExitCode(batch)
-        let rawOutput = implFormatRawOutput(batch)
-        let budgetOutput =
-          if rawOutput.len > 0:
-            rawOutput & "\n[harness model-turn budget exhausted]"
-          else:
-            "harness model-turn budget exhausted"
-        let value = HarnessResult(
-          output: budgetOutput,
-          exitCode:
-            if batchCode == 0: 1
-            else: batchCode,
-          finalCommand: batch[^1].command,
-          observations: observations,
-          metrics: metrics,
-          termination: htBudgetExhausted,
-          refused: false
-        )
-        implEmit(options, HarnessEvent(
-          kind: hekRunFailed,
-          turn: turn,
-          callId: "",
-          message: "model-turn budget exhausted; returning observation",
-          elapsedMs: implElapsedMs(started)
-        ))
-        return implFinish(value, started)
       implAppendFeedback(messages, response, batch)
+      finishOnly = metrics.toolCalls >= options.budget.maxToolCalls
+      for observation in batch:
+        if observation.timedOut or observation.truncated:
+          finishOnly = true
 
   let value = HarnessResult(
-    output: "harness model-turn budget exhausted",
+    output: implIncompleteOutput(observations),
     exitCode: 1,
     finalCommand:
       if observations.len > 0: observations[^1].command

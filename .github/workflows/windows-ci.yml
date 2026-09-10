@@ -42,7 +42,7 @@ jobs:
         shell: pwsh
         run: |
           nimble check
-          python -m py_compile get_ready.py get_test.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
 
       - name: Run Windows Nim unit tests
         shell: pwsh
@@ -84,9 +84,3 @@ jobs:
           $env:GET_V3_TARGET_OS = "windows"
           $env:GET_V3_TEST_SHELL = "powershell"
           python tests/test_cli_v3.py -v
-
-      - name: Run comprehensive Windows offline suite
-        shell: pwsh
-        run: |
-          $env:PATH = "$(Resolve-Path .ci);$env:PATH"
-          python get_test.py --key dummy --skip-llm

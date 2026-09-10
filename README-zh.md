@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-`get` 把自然语言问题转换为安全、只读的本地检查。3.1.0 增加终端 Markdown 渲染并修复只读策略，继续使用统一的类型化 Harness：它可以直接回答、执行一条命令、根据观察继续推理，也可以并行执行互不依赖的检查。
+`get` 把自然语言问题转换为安全、只读的本地检查。3.2.0 改善代码与系统查询：允许 AWK 聚合、提供私有临时目录，并在检查后给出答案。模型名称只作为服务标识传递，不再判断品牌、版本号或 Flash/Mini 等名称的强弱，也不再按名称设置采样参数。
 
 ```bash
 get "这台设备的 IP 地址"
@@ -13,9 +13,9 @@ get "当前 Git 分支和未提交文件"
 ## v3 的主要变化
 
 - 统一的 `Model → Action → Policy → Tool → Observation` 状态机。
-- 默认使用原生 function tools，并提供结构化 JSON 与 v2 Markdown 兼容层。
+- 默认使用原生 function tools，并提供显式结构化 JSON 协议；Markdown 示例和旧 HTML 标记不再触发执行。
 - `auto`、`direct`、`loop`、`parallel` 四种策略共用同一个运行时。
-- 常规命令只需一次模型调用；不再额外调用路由器或缓存分类模型。
+- 直接回答和显式 `direct` 查询只需一次模型调用；默认本地检查会再根据证据作答，不额外调用路由器或缓存分类模型。
 - 复用 HTTP 连接，请求完成即唤醒；快速响应不再被固定轮询额外拖慢一秒。
 - 收到 HTTP 响应前的瞬态传输故障会在原请求超时内最多重试三次；HTTP 与解析错误不会重试，响应体有 8 MiB 硬上限，携带 Bearer 凭据的请求不会跟随重定向。
 - HTTPS 同时校验证书链与 DNS/IP 主机名。Windows 版本会把系统 Windows ROOT 证书库导入 OpenSSL，正常 HTTPS 不依赖额外下载的 CA bundle。
@@ -50,10 +50,10 @@ API 密钥不会被打印或写入日志。Linux 密钥文件权限为 `0600`；
 
 | 策略 | 行为 | 常见模型调用数 |
 |---|---|---:|
-| `auto` | 直接优先，仅在确实需要时继续或批量执行 | 1 |
+| `auto` | 读取本地证据，再回答原问题 | 1–4 |
 | `direct` | 固定一次模型调用，最多一个终止工具调用 | 1 |
-| `loop` | 对有依赖关系的工作串行反馈观察 | 1–3 |
-| `parallel` | 允许互不依赖的只读调用并发执行 | 1–3 |
+| `loop` | 对有依赖关系的工作串行反馈观察 | 1–4 |
+| `parallel` | 允许互不依赖的只读调用并发执行 | 1–4 |
 
 在 `auto`、`loop`、`parallel` 中，被强制策略拒绝的命令绝不会执行；拒绝会作为类型化观察返回，模型只能在原有轮次/工具预算内改用更简单的安全命令，每个替代命令都从头校验。`direct` 对拒绝不重试。
 
@@ -68,10 +68,14 @@ get "显示当前目录" --harness direct
 ```bash
 get set tool-protocol auto     # 原生工具被拒绝时兼容回退
 get set tool-protocol native   # 必须使用原生 function tools
-get set tool-protocol legacy   # 结构化 JSON，并接受 v2 Markdown
+get set tool-protocol json     # 显式结构化 JSON 动作
 ```
 
 查询明确写出“不调用工具”“不用工具”或英文 `without tools` 时，get 会启用强制纯文本路由：请求不携带工具定义，文本形式的工具动作会被拒绝，旧缓存中的命令也不会执行。
+
+默认流程不再靠“组成”“情况”等问句关键词决定是否解释。`max-rounds` 限制取证轮数，另有一次禁用工具的收尾作答；无法完成时提供有界的已有证据和非零退出状态。POSIX 检查有独立的私有临时目录，`sort` 可以落盘排序，结束后自动清理。
+
+AWK 的算术、变量、关联数组、纯函数、`END` 聚合可以执行；`env`、只查询的 `set`、GNOME 设置读取与 Git 元数据/版本内文件查询也可使用。
 
 ## 安全模型
 
@@ -99,7 +103,7 @@ HTTP 检查应使用 `curl -q ...`，首个 `-q` 用于阻止 `.curlrc` 改写�
 
 `git status` 与读取工作树内容的普通 `git diff` 会被有意拒绝：仓库自身的 clean/textconv/filter 配置可能让表面只读的 Git 命令执行辅助程序。请用 `git branch --show-current` 查看分支，用 `git diff-files --name-only --no-ext-diff --no-textconv` 查看已修改的跟踪文件名，用 `git ls-files --others --exclude-standard` 查看未跟踪文件，用 `git diff --cached --no-ext-diff --no-textconv` 查看暂存内容。`git show` 与输出补丁的 `git log` 同样必须带两个禁用参数。
 
-`double-check` 在 v3 中默认是 `false`，因此日常请求只需一次模型调用。需要独立模型复核时可显式开启：
+`double-check` 默认是 `false`，避免额外的安全复核请求。需要独立模型复核时可显式开启：
 
 ```bash
 get "检查服务状态" --double-check
@@ -119,10 +123,10 @@ get set manual-confirm true
 | `manual-confirm` | `false` | 逐条命令手动确认 |
 | `double-check` | `false` | 增加第二模型安全复核 |
 | `harness` | `auto` | `auto`、`direct`、`loop`、`parallel` |
-| `tool-protocol` | `auto` | `auto`、`native`、`legacy` |
+| `tool-protocol` | `auto` | `auto`、`native`、`json` |
 | `timeout` | `300` | API 超时秒数；`false` 表示不限 |
 | `max-token` | `20480` | 响应 token 上限；`false` 表示不传 |
-| `max-rounds` | `3` | 模型轮次硬上限 |
+| `max-rounds` | `3` | 取证轮次上限，另保留一次收尾作答 |
 | `max-tool-calls` | `8` | 每次运行工具调用硬上限 |
 | `max-parallel` | `4` | 最大并发工具数 |
 | `command-timeout` | `30` | 单条命令硬超时（秒） |
@@ -165,7 +169,7 @@ get set command-pattern ""                 # 清除已有附加正则
 --manual-confirm / --no-manual-confirm
 --double-check / --no-double-check
 --harness <auto|direct|loop|parallel>
---protocol <auto|native|legacy>
+--protocol <auto|native|json>
 --instance / --no-instance          兼容别名
 --hide-process / --no-hide-process
 --system-proxy / --no-system-proxy
@@ -191,7 +195,7 @@ get "汇总项目结构" --no-markdown
 
 内置渲染器支持标题、强调、列表、引用、代码块、链接和表格（含中文列宽），无需外部渲染程序。`vivid=false` 或 `NO_COLOR` 关闭渲染颜色，但保留排版。输出重定向、管道和 `TERM=dumb` 保留源文本。命令原始输出始终按原文显示；缓存保存未渲染文本，切换配置后不必重新请求模型。
 
-`auto` / `native` 中，普通回答里的代码块作为示例显示；旧版裸代码块命令仅在显式 `legacy` 模式启用。显式类型化工具动作和旧版动作标记仍经过安全门，且不能绕过“不调用工具”的请求。
+所有协议中的 Markdown 代码块和旧 v2 HTML 动作标记都按回答文本显示。旧配置的 `legacy` 值迁移为 `json`；只有显式 JSON/原生工具调用进入执行边界。
 
 本轮只读修复还覆盖引号转义、通配符参数注入、RPM 宏执行、nft/tmux 嵌入命令及 `ip` 修改动作缩写。`git blame` 必须使用 `git blame --no-textconv HEAD -- 文件` 等明确版本查询，避免工作树 clean filter；工作树状态仍使用前述 `diff-files` 等查询。审查范围与验证结果见 [v3 审查记录](CODE_REVIEW-v3.md)。
 
@@ -233,12 +237,14 @@ get cache --unset "系统版本"
 需要 Nim 2.2.8 或更新版本；发布 CI 使用 Nim 2.2.10。
 
 ```bash
-nim c -d:release -o:get src/get.nim
-GET_V3_BINARY="$PWD/get" python tests/test_cli_v3.py -v
-PATH="$PWD:$PATH" python get_test.py --key dummy --skip-llm
+# 编译前确认 MemAvailable >= 6 GiB、memory full avg10 < 2。
+nice -n 10 nim c --parallelBuild:1 -d:release -o:.ci/get src/get.nim
+GET_V3_BINARY="$PWD/.ci/get" python tests/test_cli_v3.py -v
+python get_test.py --binary .ci/get --provider-config ~/.config/get \
+  --shell fish --report .ci/provider-replay.json
 ```
 
 `tests/` 中的测试覆盖协议解析、原生工具载荷、状态迁移、配置迁移、强制安全策略、受限执行和真实并行执行。
-开发测试应先构建并显式选择二进制；仓库历史二进制与 PATH 中已安装的 `get` 可能不是当前源码版本。构建和测试临时产物统一放入已忽略的 `.ci/` 或 `build/`。
+开发测试应先构建并显式选择二进制；仓库历史二进制与 PATH 中已安装的 `get` 可能不是当前源码版本。开发二进制统一放在 `.ci/`；本地持久化测试最多四个小进程，完整原生平台测试在 CI 执行。真实模型回放使用临时配置与带嵌套产物的多语言夹具，也支持 `--real-project`；不会修改现用配置、密钥或安装程序。
 
 `get` 使用 AGPL-3.0-or-later 许可证。源码：[github.com/Water-Run/get](https://github.com/Water-Run/get)。

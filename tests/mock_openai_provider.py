@@ -98,6 +98,39 @@ class Handler(BaseHTTPRequestHandler):
             """Return a deterministic command for the requested test shell."""
             return f"echo {text}" if is_windows else f"printf {text}"
 
+        if "model identifier contract" in user_text:
+            self._completion(content=json.dumps({"model": body["model"],
+                                                "temperature_present": "temperature" in body}))
+            return
+        if "old marked code" in user_text:
+            self._completion(content="```sh\nprintf x > ./never-run\n```\n<!-- FINAL -->")
+            return
+
+        observations = []
+        for message in messages:
+            content = str(message.get("content") or "")
+            if message.get("role") == "tool":
+                observations.append(json.loads(content))
+            elif content.startswith("Tool observations (JSON): "):
+                observations.extend(json.loads(content.split(": ", 1)[1]))
+        successful = [item for item in observations if not item.get("policy_rejected")
+                      and item.get("exit_code") == 0 and not item.get("truncated")
+                      and not item.get("timed_out")]
+        special = any(phrase in user_text for phrase in (
+            "mixed policy batch", "large feedback cli", "duplicate reader suppression",
+            "continue"))
+        if successful and "budget finalization" in user_text:
+            self._completion(content="budget-answer-ok" if not has_tools
+                             else "budget-incorrectly-exposes-tools")
+            return
+        if successful and not special:
+            self._completion(content="\n".join(item["output"] for item in successful))
+            return
+        if observations and "no more tools are available" in user_text:
+            self._completion(content=json.dumps({"type": "refuse", "text":
+                "read-only policy or execution limit prevented inspection"}))
+            return
+
         if "reply with exactly the word 'ok'" in user_text:
             self._completion(content="not ok" if body.get("model") == "mock-not-ok" else "ok")
             return

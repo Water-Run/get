@@ -38,7 +38,7 @@ const CACHE_SCHEMA_VERSION* = 3
 ## Semantic identity of the built-in Harness, prompt, protocol, and mandatory
 ## read-only policy. Bump this when a behavior change could make a cached result
 ## or command incompatible even though the JSON schema itself remains v3.
-const CACHE_IDENTITY_REVISION* = "get-v3-harness-policy-20260907"
+const CACHE_IDENTITY_REVISION* = "get-v3.2-observation-answer-20260910"
 
 ## Hard input bound protecting startup from an unexpectedly large cache file.
 const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024

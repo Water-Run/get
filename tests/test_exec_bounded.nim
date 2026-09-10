@@ -293,7 +293,7 @@ suite "bounded command execution":
         check not fileExists(fsmonitorMarker)
         writeFile(content, "worktree!\n")
         let metadataCommand = "git -C '" & root &
-          "' diff-files --name-only --no-ext-diff --no-textconv"
+          "' diff-files --name-only"
         check checkReadOnlyCommand(metadataCommand, "bash").allowed
         let metadata = executeCommandBounded(
           metadataCommand, "bash", 5, 16_384)
@@ -347,6 +347,29 @@ suite "bounded command execution":
             removeFile(marker)
           if dirExists(root):
             removeDir(root)
+
+    test "inspection scratch is private and removed after execution":
+      let value = executeCommandBounded("printenv TMPDIR", "bash", 3, 4096,
+        readOnlySandbox = true)
+      check value.exitCode == 0
+      check value.output.strip().contains("get-inspection-")
+      check not dirExists(value.output.strip())
+
+    test "AWK aggregation executes without changing its input":
+      let value = executeCommandBounded(
+        "printf 'a.py\\na.py\\nb.rs\\n' | " &
+          "awk -F. '{c[$NF]++} END {for (e in c) print e, c[e]}' | sort",
+        "bash", 3, 4096, readOnlySandbox = true)
+      check value.exitCode == 0
+      check value.output.strip() == "py 2\nrs 1"
+
+    when defined(linux):
+      test "sort spills to private disk scratch inside the read-only sandbox":
+        let value = executeCommandBounded(
+          "seq 5000 -1 1 | sort -S 1k -n | sed -n '1,3p'",
+          "bash", 5, 4096, readOnlySandbox = true)
+        check value.exitCode == 0
+        check value.output.strip() == "1\n2\n3"
 
     when defined(macosx):
       test "macOS launchctl compatibility preserves the service table":

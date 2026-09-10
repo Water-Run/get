@@ -29,7 +29,7 @@
 
 import std/[
   envvars, locks, monotimes, os, osproc, streams, strformat, strtabs, strutils,
-  times
+  tempfiles, times
 ]
 
 when defined(windows):
@@ -1166,7 +1166,14 @@ proc executeCommandBounded*(
   var executable = shellExecutable
   var args = implBuildShellArgs(
     shell, effectiveCommand)
+  var scratch = ""
+  defer:
+    if scratch.len > 0 and dirExists(scratch):
+      removeDir(scratch)
   if readOnlySandbox:
+    when defined(posix):
+      scratch = expandFilename(createTempDir("get-inspection-", ""))
+      setFilePermissions(scratch, {fpUserRead, fpUserWrite, fpUserExec})
     when defined(linux):
       let bubblewrap = implReadOnlySandboxExecutable()
       if bubblewrap.len > 0:
@@ -1175,6 +1182,7 @@ proc executeCommandBounded*(
           "--die-with-parent",
           "--ro-bind", "/", "/",
         ] & implLinuxReadOnlyDeviceArgs() & @[
+          "--bind", scratch, scratch,
           "--chdir", getCurrentDir(),
           "--", shellExecutable
         ] & args
@@ -1188,8 +1196,15 @@ proc executeCommandBounded*(
         let sandboxExec = implReadOnlySandboxExecutable()
         if sandboxExec.len > 0:
           executable = sandboxExec
-          args = @["-p", MACOS_READ_ONLY_PROFILE, shellExecutable] & args
+          let profile = MACOS_READ_ONLY_PROFILE &
+            "(allow file-write* (subpath \"" &
+            scratch.replace("\\", "\\\\").replace("\"", "\\\"") & "\"))"
+          args = @["-p", profile, shellExecutable] & args
   let childEnvironment = implSanitizedEnvironment()
+  if scratch.len > 0:
+    childEnvironment["TMPDIR"] = scratch
+    childEnvironment["TMP"] = scratch
+    childEnvironment["TEMP"] = scratch
   var p: Process
   acquire(processStartLock)
   try:

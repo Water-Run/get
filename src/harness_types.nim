@@ -41,7 +41,7 @@ const DEFAULT_MAX_OUTPUT_BYTES* = 1_048_576
 ## Selects the orchestration policy used by the unified harness state machine.
 type
   HarnessKind* = enum
-    hkAuto      ## Starts direct and escalates only when the model needs it.
+    hkAuto      ## Inspects local facts, then answers from the observations.
     hkDirect    ## Allows one model turn and terminal tool execution.
     hkLoop      ## Feeds observations back to the model until completion.
     hkParallel  ## Allows batches of independent read-only tool calls.
@@ -51,7 +51,7 @@ type
   ToolProtocolKind* = enum
     tpkAuto    ## Tries native tools, then falls back to structured JSON.
     tpkNative  ## Requires provider-native function tools.
-    tpkLegacy  ## Uses structured JSON with Markdown v2 compatibility.
+    tpkJson  ## Uses explicit structured JSON actions.
 
 ## Selects what the harness does after a tool call finishes.
 type
@@ -212,10 +212,10 @@ func parseToolProtocolKind*(value: string): ToolProtocolKind =
   case toLowerAscii(value.strip())
   of "auto": result = tpkAuto
   of "native", "tools": result = tpkNative
-  of "legacy", "json", "text": result = tpkLegacy
+  of "legacy", "json", "text": result = tpkJson
   else:
     raise newException(ValueError,
-      "expected auto, native, or legacy")
+      "expected auto, native, or json")
 
 ## Returns the stable configuration name for a tool protocol.
 ##
@@ -224,12 +224,12 @@ func parseToolProtocolKind*(value: string): ToolProtocolKind =
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert toolProtocolName(tpkLegacy) == "legacy"
+##     assert toolProtocolName(tpkJson) == "json"
 func toolProtocolName*(kind: ToolProtocolKind): string =
   case kind
   of tpkAuto: result = "auto"
   of tpkNative: result = "native"
-  of tpkLegacy: result = "legacy"
+  of tpkJson: result = "json"
 
 ## Parses a model-provided result mode.
 ##

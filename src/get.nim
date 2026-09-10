@@ -68,7 +68,7 @@ query flags (per-invocation overrides):
   --instance                   fast single-call mode
   --no-instance                compatibility alias for loop
   --harness <kind>             auto, direct, loop, or parallel
-  --protocol <kind>            auto, native, or legacy
+  --protocol <kind>            auto, native, or json
   --hide-process               suppress intermediate output
   --no-hide-process            show intermediate output
   --system-proxy               prefer OS system proxy settings
@@ -95,12 +95,12 @@ set options:
   harness            orchestration strategy
                        (auto/direct/loop/parallel, default: auto)
   tool-protocol      model tool protocol
-                       (auto/native/legacy, default: auto)
+                       (auto/native/json, default: auto)
   timeout            request timeout in seconds
                        (integer or false, default: 300)
   max-token          max tokens per request
                        (integer or false, default: 20480)
-  max-rounds         hard model-turn limit
+  max-rounds         inspection-turn limit (+ one final answer)
                        (positive integer, default: 3)
   max-tool-calls     max tool calls per run
                        (integer, default: 8)
@@ -407,17 +407,6 @@ proc implApplyOverrides(
 func implLoadStyle(cfg: Config): StyleKind =
   result = toStyleKind(cfg.vivid)
 
-## Uses deterministic sampling for Qwen tool orchestration.  Qwen-compatible
-## serving stacks otherwise commonly default to a non-zero temperature, which
-## makes identical local-system queries vary between a valid tool call and a
-## fabricated tool name.  Other providers retain their own defaults because
-## some reasoning APIs reject an explicit temperature field.
-func implSamplingTemperature(model: string): Option[float] =
-  if toLowerAscii(model).contains("qwen"):
-    result = some(0.0)
-  else:
-    result = none(float)
-
 # ---------------------------------------------------------------------------
 # Private helpers — LLM call wrappers
 # ---------------------------------------------------------------------------
@@ -439,7 +428,7 @@ proc implLlmCall(
     model: cfg.model,
     messages: messages,
     maxTokens: cfg.maxToken,
-    temperature: implSamplingTemperature(cfg.model)
+    temperature: none(float)
   )
   result = sendLlmRequest(
     req,
@@ -608,23 +597,6 @@ proc implSafetyCheck(
   result = checked
 
 # ---------------------------------------------------------------------------
-# Private helpers — model strength warning
-# ---------------------------------------------------------------------------
-
-## Emits a model-strength warning when the configured model is
-## not recognised as a known high-performance model.
-##
-## :param model: The configured model name.
-## :param sk: The active output style.
-proc implWarnIfWeakModel(
-  model: string,
-  sk: StyleKind
-) =
-  if model.len > 0 and
-      not isKnownStrongModel(model):
-    styleWarning(sk, MODEL_STRENGTH_WARNING)
-
-# ---------------------------------------------------------------------------
 # Private helpers — v3 unified harness flow
 # ---------------------------------------------------------------------------
 
@@ -765,7 +737,7 @@ proc implHarnessFlow(
   let kind = parseHarnessKind(cfg.harness)
   let protocol = parseToolProtocolKind(cfg.toolProtocol)
   let budget = implHarnessBudget(cfg, kind)
-  let initialMessages = buildHarnessMessages(
+  var initialMessages = buildHarnessMessages(
     info,
     query,
     shell,
@@ -775,6 +747,8 @@ proc implHarnessFlow(
     cfg.commandPattern,
     toolsDisabled
   )
+  initialMessages[0].content.add("\nConfigured model identifier: " & cfg.model &
+    ". This is configuration metadata, not a verified backend version.")
   let session = newLlmSession(
     cfg.url,
     key,
@@ -786,7 +760,7 @@ proc implHarnessFlow(
   defer:
     closeLlmSession(session)
 
-  var nativeUnavailable = protocol == tpkLegacy
+  var nativeUnavailable = protocol == tpkJson
   let modelTurn: ModelTurnProc = proc(
     messages: seq[LlmMessage],
     enableNativeTools: bool,
@@ -798,7 +772,7 @@ proc implHarnessFlow(
       model: cfg.model,
       messages: messages,
       maxTokens: cfg.maxToken,
-      temperature: implSamplingTemperature(cfg.model),
+      temperature: none(float),
       tools:
         if useNative: @[shellToolDefinition()]
         else: @[],
@@ -1294,7 +1268,7 @@ proc implHandleIsOk() =
         content: ISOK_USER_PROMPT)
     ],
     maxTokens: ISOK_MAX_TOKENS,
-    temperature: implSamplingTemperature(cfg.model)
+    temperature: none(float)
   )
   let resp = sendLlmRequest(
     req,
@@ -1347,9 +1321,6 @@ proc implHandleQuery(
       " Run: get set model <model>")
 
   let sk = toStyleKind(cfg.vivid)
-
-  if not cfg.hideProcess:
-    implWarnIfWeakModel(cfg.model, sk)
 
   let shell = implEffectiveShell(cfg)
   let cwd = getCurrentDir()

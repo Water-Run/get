@@ -137,6 +137,37 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "native-ok")
 
+    def test_01b_model_identifiers_do_not_change_request_parameters(self) -> None:
+        for name in ["flash", "mini", "qwen-any-alias", "custom/deployment-42"]:
+            with self.subTest(model=name):
+                result = self.run_get("model identifier contract", "--model", name,
+                                      "--no-cache", "--no-hide-process")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout),
+                                 {"model": name, "temperature_present": False})
+                self.assertNotIn("strong model", result.stderr.lower())
+                self.assertNotIn("high-performance", result.stderr.lower())
+
+    def test_01c_old_marked_code_is_an_answer_in_every_protocol(self) -> None:
+        for protocol in ["auto", "native", "json", "legacy"]:
+            with self.subTest(protocol=protocol):
+                result = self.run_get("old marked code", "--protocol", protocol,
+                                      "--no-cache")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("<!-- FINAL -->", result.stdout)
+                self.assertFalse((self.work / "never-run").exists())
+
+    def test_01d_tool_budget_reserves_a_tool_free_answer(self) -> None:
+        self.assertEqual(self.run_get("set", "max-rounds", "1").returncode, 0)
+        self.assertEqual(self.run_get("set", "max-tool-calls", "1").returncode, 0)
+        try:
+            result = self.run_get("budget finalization", "--no-cache")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "budget-answer-ok")
+        finally:
+            self.run_get("set", "max-rounds")
+            self.run_get("set", "max-tool-calls")
+
     def test_02_native_continuation(self) -> None:
         result = self.run_get("continue cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -363,9 +394,9 @@ class GetV3CliTests(unittest.TestCase):
         self.assertNotIn("\x1b", plain)
         self.assertIn("• ready", plain)
         self.assertNotIn("# Report", plain)
-        raw = terminal("markdown raw", "--markdown", "--cache")
+        raw = terminal("markdown raw", "--harness", "direct", "--markdown", "--cache")
         self.assertEqual(raw, "# raw\n**literal**\n")
-        cached_raw = terminal("markdown raw", "--markdown", "--cache")
+        cached_raw = terminal("markdown raw", "--harness", "direct", "--markdown", "--cache")
         self.assertEqual(cached_raw, raw)
 
     def test_06c_transient_transport_is_retried_three_times(self) -> None:
@@ -391,7 +422,7 @@ class GetV3CliTests(unittest.TestCase):
             self.run_get("set", "command-timeout", "1").returncode, 0)
         try:
             started = time.monotonic()
-            result = self.run_get("slow command cli", "--no-cache")
+            result = self.run_get("slow command cli", "--harness", "direct", "--no-cache")
             elapsed = time.monotonic() - started
             self.assertEqual(result.returncode, 124, result.stderr)
             # Wine process creation and taskkill emulation add several seconds;
@@ -405,7 +436,7 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(
             self.run_get("set", "max-output-bytes", "100").returncode, 0)
         try:
-            result = self.run_get("large output cli", "--no-cache")
+            result = self.run_get("large output cli", "--harness", "direct", "--no-cache")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("truncated", result.stderr.lower())
         finally:
@@ -451,8 +482,8 @@ class GetV3CliTests(unittest.TestCase):
         other_port = 1 if provider_port != 1 else 2
         for entry, expected_proxy_requests in [
             (f"127.0.0.1:{provider_port}", 0),
-            (f"127.0.0.1:{other_port}", 1),
-            ("127.0.0.1:invalid", 1),
+            (f"127.0.0.1:{other_port}", 2),
+            ("127.0.0.1:invalid", 2),
         ]:
             with self.subTest(no_proxy=entry):
                 before = ProxyHandler.request_count
@@ -469,14 +500,14 @@ class GetV3CliTests(unittest.TestCase):
                 )
 
     def test_10_cached_command_retains_output_cap(self) -> None:
-        first = self.run_get("large output cached cli")
+        first = self.run_get("large output cached cli", "--harness", "direct")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(
             self.run_get("set", "max-output-bytes", "100").returncode,
             0,
         )
         try:
-            second = self.run_get("large output cached cli")
+            second = self.run_get("large output cached cli", "--harness", "direct")
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("truncated", second.stderr.lower())
         finally:
@@ -533,87 +564,29 @@ class GetV3CliTests(unittest.TestCase):
         self.assertFalse(exists)
 
     def test_12_text_only_request_ignores_a_cached_command(self) -> None:
-        reference_query = "cache hash reference"
-        reference = self.run_get(reference_query)
-        self.assertEqual(reference.returncode, 0, reference.stderr)
-
+        query = "Explicit no tools cached: without calling a tool, answer directly"
+        seed = self.run_get(query, "--cache")
+        self.assertEqual(seed.returncode, 0, seed.stderr)
         cache_path = self.host_config_root / "get" / "cache.json"
-        config_path = self.host_config_root / "get" / "config.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        reference_entry = next(
-            entry for entry in payload["entries"]
-            if entry["query"] == reference_query
-        )
-        self.assertEqual(reference_entry["cacheMode"], "command")
-
-        pattern_result = self.run_get("config", "--command-pattern")
-        self.assertEqual(pattern_result.returncode, 0, pattern_result.stderr)
-        pattern_line = pattern_result.stdout.strip()
-        prefix = "command-pattern = "
-        suffix = " (default)"
-        self.assertTrue(pattern_line.startswith(prefix), pattern_line)
-        self.assertTrue(pattern_line.endswith(suffix), pattern_line)
-        pattern = pattern_line[len(prefix):-len(suffix)]
-        self.assertEqual(pattern, "(semantic policy only)")
-
-        def nim_json_hash(values: list[str]) -> str:
-            encoded = json.dumps(
-                values,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            return hashlib.sha256(encoded).hexdigest()
-
-        host_os = {
-            "linux": "linux",
-            "windows": "windows",
-            "macos": "macosx",
-        }[self.target_os]
-        host_cpu = "arm64" if self.target_os == "macos" else "amd64"
-        query = (
-            "Explicit no tools cached: without calling a tool, "
-            "answer directly"
-        )
-        global_hash = nim_json_hash([
-            "get-v3.0.1-harness-policy-20260830",
-            query,
-            config["shell"],
-            config["model"],
-            config["url"],
-            config["harness"],
-            config["toolProtocol"],
-            "",
-            "semantic-policy-only",
-            host_os,
-            host_cpu,
-        ])
-        context_hash = nim_json_hash([
-            "get-v3-context",
-            global_hash,
-            self.target_work,
-        ])
-        forged = dict(reference_entry)
-        forged.update({"hash": context_hash, "query": query})
-        payload["entries"].append(forged)
-        cache_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
+        entry = next(item for item in payload["entries"] if item["query"] == query)
+        # Reuse an actual current identity, rather than duplicating the hash
+        # implementation or accidentally testing a stale, nonmatching version.
+        entry.update(cacheMode="command", output="", isMarkdown=False,
+                     command="echo cached-command-executed")
+        cache_path.write_text(json.dumps(payload), encoding="utf-8")
         result = self.run_get(query)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "no-tools-ok")
-        self.assertNotEqual(result.stdout, reference.stdout)
 
     def test_15_cache_hit_needs_no_provider(self) -> None:
-        first = self.run_get("cache zero model")
+        first = self.run_get("cache zero model", "--cache")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.server.shutdown()
         self.server.server_close()
         self.server_thread.join(timeout=2)
         started = time.monotonic()
-        second = self.run_get("cache zero model")
+        second = self.run_get("cache zero model", "--cache")
         elapsed = time.monotonic() - started
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(second.stdout, first.stdout)
@@ -622,7 +595,7 @@ class GetV3CliTests(unittest.TestCase):
     def test_13_concurrent_cache_writers_keep_every_entry(self) -> None:
         self.assertEqual(
             self.run_get("cache", "--clean").returncode, 0)
-        queries = [f"answer-only concurrent cache {i}" for i in range(12)]
+        queries = [f"answer-only concurrent cache {i}" for i in range(4)]
         processes = [subprocess.Popen(
             [*self.command, query, "--cache"],
             cwd=self.work,

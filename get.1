@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-09-07" "get 3.1.0" "User Commands"
+.TH GET 1 "2026-09-10" "get 3.2.0" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -49,8 +49,9 @@ Version 3 uses one typed
 state machine instead of separate instance and marker-driven agent paths.
 .PP
 Provider-native function tools are preferred.
-Structured JSON is used as a compatibility fallback, and v2 Markdown command
-responses remain accepted only inside the legacy decoder.
+Structured JSON is used as a compatibility fallback. Markdown code blocks and
+old HTML action markers are answer text. Legacy configuration values migrate
+to the JSON protocol. Model names are opaque identifiers, without rankings.
 .PP
 Queries that explicitly request no tool use are routed as text-only: no tool
 definition is sent, textual tool actions are rejected, and cached commands are
@@ -63,10 +64,9 @@ manual confirmation, and bounded executor.
 .SH HARNESS STRATEGIES
 .TP
 .B auto
-Default. Starts direct and continues or batches only when the model requests
-more evidence. A mandatory-policy denial is not executed and may be returned
-as an observation for one budgeted safe revision. Routine commands normally
-use one model call.
+Default. Inspects local facts and then answers using the observations. A denied
+command is not executed. The model may select another reader within the
+inspection budget; a separate final answer turn has no tools.
 .TP
 .B direct
 Exactly one model turn and at most one terminal tool call.
@@ -134,7 +134,7 @@ Show the application name.
 Show the introduction.
 .TP
 .B \-\-version
-Show version 3.1.0.
+Show version 3.2.0.
 .TP
 .B \-\-author
 Show the author.
@@ -148,7 +148,7 @@ Show the repository URL.
 .SS version
 .B get version
 .PP
-Displays version 3.1.0. The standard aliases
+Displays version 3.2.0. The standard aliases
 .B \-\-version
 and
 .B \-V
@@ -183,7 +183,7 @@ Skip the additional review. The mandatory deterministic policy still runs.
 Use auto, direct, loop, or parallel for this query.
 .TP
 .BI \-\-protocol " kind"
-Use auto, native, or legacy tool encoding for this query.
+Use auto, native, or json tool encoding for this query.
 .TP
 .B \-\-instance
 Compatibility alias for direct.
@@ -242,7 +242,7 @@ Second model review. Default: false.
 auto, direct, loop, or parallel. Default: auto.
 .TP
 .BI "tool\-protocol " kind
-auto, native, or legacy. Default: auto.
+auto, native, or json. Default: auto.
 .TP
 .BI "timeout " "int | false"
 API timeout seconds. Default: 300.

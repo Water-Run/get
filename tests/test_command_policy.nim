@@ -651,15 +651,12 @@ const AttackCorpus = [
   "awk --load=untrusted '{print $1}'",
   "awk 'NR==1 {print $1; system(\"touch x\")}'",
   "awk '$1==system(\"touch x\") {print $1}' README.md",
-  "awk '$1=$2 {print $1}' README.md",
   "awk 'NF>1 {print $NF} NF==1 {system(\"touch x\")}'",
   "awk 'NF>1 {print $NF} NF==1 {print > \"result.txt\"}'",
   "awk '{print $1 | \"touch x\"}'",
   "awk '{getline value < \"input\"; print value}'",
-  "awk '{print tolower($1)}'",
   "awk '!/^\\.ci\\// {system(\"touch x\")}'",
   "awk '!/^\\.ci\\//; system(\"touch x\")'",
-  "awk '/safe/ > \"result.txt\"'",
   "yes",
   "yes x | grep x",
   "free -s 1",
@@ -995,7 +992,6 @@ const AttackCorpus = [
   "git diff --no-ext-diff --no-textconv",
   "git diff --cached --no-ext-diff",
   "git diff-files --no-ext-diff --no-textconv -p",
-  "git diff-files --name-only --no-ext-diff",
   "git show --stat HEAD",
   "git show --no-ext-diff --stat HEAD",
   "git show --no-textconv --stat HEAD",
@@ -1283,6 +1279,38 @@ const MutatingExecutables = [
 ]
 
 suite "mandatory read-only command policy":
+  test "allows ordinary aggregation and environment inspection":
+    for command in [
+      "env", "env -0", "set", "set --show",
+      "git diff-files --name-only", "git show HEAD:src/get.nim",
+      "gsettings get org.gnome.desktop.interface color-scheme",
+      "dconf read /org/gnome/desktop/interface/color-scheme",
+      "gnome-extensions list",
+      "awk -F. 'NF>1 {c[$NF]++} END {for (e in c) print c[e], e}'",
+      "awk '{s += $1} END {printf \"%.2f\\n\", s/NR}'",
+      "awk '{print tolower($1), length($0)}'",
+      "awk '$1=$2 {print $1}' README.md",
+      "awk 'BEGIN {print (2 > 1)}'",
+      "awk '/system|getline/ {print}' README.md"
+    ]:
+      checkpoint(command)
+      check checkReadOnlyCommand(command, "fish").allowed
+    for command in [
+      "env TMPDIR=/tmp sort", "env bash -c pwd", "set -U x y",
+      "gsettings set org.gnome.desktop.interface color-scheme default",
+      "dconf reset -f /", "gnome-extensions enable extension@example.invalid",
+      "awk 'BEGIN {ARGV[1]=\"/tmp/input\"}'",
+      "awk 'BEGIN {print \"data\" > \"/tmp/output\"}'",
+      "awk 'BEGIN {printf(\"data\") > \"/tmp/output\"}'",
+      "awk 'BEGIN {system(\"id\")}'",
+      "awk 'BEGIN {@load \"extension\"}'",
+      "awk 'BEGIN {print custom(1)}'",
+      "awk 'BEGIN {a=2; a++ / system(\"touch marker\") / 1}'",
+      "awk 'BEGIN {a=2; a-- / system(\"touch marker\") / 1}'"
+    ]:
+      checkpoint(command)
+      check not checkReadOnlyCommand(command, "fish").allowed
+
   test "accepts the realistic safe corpus without false positives":
     var rejected: seq[string] = @[]
     for command in SafeCorpus:
