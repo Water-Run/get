@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "version": "3.2.0",
+  "status": "passed",
+  "linux_payload_sha256": "757b984d66252a014cedfec71527c7d7788f6936c1b20a05ee2a7f8b6adf8fce",
+  "providers": {
+    "configured": {
+      "model": "deepseek-flash",
+      "replay": {
+        "expected": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "code_composition",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 1,
+      "seconds": 4.27
+    },
+    {
+      "name": "code_lookup",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 2,
+      "seconds": 5.55
+    },
+    {
+      "name": "code_lines",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 4,
+      "seconds": 4.1
+    },
+    {
+      "name": "environment",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 1,
+      "seconds": 1.93
+    },
+    {
+      "name": "no_match",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 2,
+      "seconds": 3.21
+    },
+    {
+      "name": "answer_budget",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 1,
+      "seconds": 2.1
+    },
+    {
+      "name": "code_answer",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 0,
+      "seconds": 1.34
+    },
+    {
+      "name": "system_memory",
+      "passed": true,
+      "exit_code": 0,
+      "tool_observations": 1,
+      "seconds": 1.87
+    },
+    {
+      "name": "real_project_composition",
+      "passed": true,
+      "exit_code": 0,
+      "verification": "successful answer naming at least three observed languages"
+    }
+  ],
+  "live_configuration_preserved": true,
+  "elapsed_seconds": 32.86,
+  "canonical_workflow_run": "https://github.com/Water-Run/get/actions/runs/34459041437",
+  "canonical_source_commit": "3defeab1785c71c7ebdae5750bdd5e3297ead4eb",
+  "replay_script_sha256": "b2246304845625d196fef14fd46dbd88775639fc508d675542652ed8dfd70f62",
+  "suite_definitions": {
+    "replay": "Eight focused code/system/answer scenarios and one real multi-language repository replay. Each scenario runs once per suite invocation, without semantic retries."
+  },
+  "earlier_replay": {
+    "same_linux_payload": true,
+    "passed": 7,
+    "failed": 2,
+    "failed_cases": [
+      "answer_budget",
+      "real_project_composition"
+    ],
+    "notes": "The budget fixture ambiguously requested a constant instead of the observed comparison literal; the final fixture clarifies that wording. One earlier real-project response ended with bounded evidence fallback. The attestation records the subsequent complete suite, not a claim that every model response succeeds."
+  }
+}

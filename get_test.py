@@ -115,7 +115,7 @@ def main() -> int:
              {"value": "replay-environment-marker"}, []),
             ("no_match", "查找 src 里字面字符串 ABSENT_REPLAY_NEEDLE 的匹配行数。"
              "只返回 JSON {\"matches\":整数}。", {"matches": 0}, []),
-            ("answer_budget", "读取 src/auth.py 中的 token 常量，"
+            ("answer_budget", "读取 src/auth.py 中 token 参数需要等于的字符串字面量，"
              "只返回 JSON {\"token\":\"实际值\"}。", {"token": "replay-marker"},
              []),
             ("code_answer", "不调用工具，给出一个 Python 两数相加函数示例。"
