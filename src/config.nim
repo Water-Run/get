@@ -822,9 +822,9 @@ proc saveConfig*(cfg: Config) =
 ## dimmed, booleans use a consistent green/grey pair, the
 ## semantic-policy-only default is dimmed with a highlighted
 ## ``(default)`` trailer while a custom pattern is
-## shown in emphatic red, and recognised values (known shells,
-## strong models, in-range integers) are green with
-## questionable ones in amber.
+## shown in emphatic red, and recognised shells
+## and in-range integers are green. Model identifiers are neutral;
+## questionable values are amber.
 ##
 ## :param sk: The active output style.
 ##

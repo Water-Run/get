@@ -19,8 +19,8 @@
 ## dimmed, the default command-pattern status is dimmed while its
 ## ``(default)`` marker is highlighted, a custom or
 ## changed pattern is shown in emphatic red, and recognised
-## values (known shells, strong models, in-range integers) are
-## green while questionable ones are amber.
+## values (known shells and in-range integers) are green; model
+## identifiers stay neutral while questionable values are amber.
 ##
 ## On Windows, ANSI virtual terminal processing must be
 ## explicitly enabled via initAnsi before any styled output is

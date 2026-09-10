@@ -135,8 +135,9 @@ func implSystemPrompt(
         "monitors.",
       "No script execution or shell wrappers; no substitution/loops/backgrounding/" &
         "splatting/output files/advanced redirects; literal < file needs a data " &
-        "reader; variables: " &
-        "$HOME, $USER, $LOGNAME, and $PWD.",
+        "reader. Shell variable expansion: $HOME, $USER, $LOGNAME, $PWD. " &
+        "Inspect any other environment name with printenv NAME or env; " &
+        "the expansion restriction does not limit environment queries.",
       "Globs need ./ or --. Web: curl -q; wget --no-config --no-hsts -O-.",
       "Weather without place: infer it from named timezone, never proxy egress; " &
         "use local units.",
