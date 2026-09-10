@@ -116,7 +116,7 @@ const STDIN_DATA_READERS = [
   "sha384sum", "sha512sum", "b2sum", "cksum", "strings", "od",
   "hexdump", "nl", "fold", "fmt", "expand", "unexpand", "paste", "join",
   "sort", "uniq", "base64", "xxd", "cmp", "comm", "diff", "diff3",
-  "awk", "sed"
+  "awk", "sed", "xargs"
 ]
 
 func implReject(reason: string): CommandPolicyDecision =
@@ -563,7 +563,7 @@ func implAllowsStablePathVariables(executable: string): bool =
   ## `find "$HOME"` and `rg pattern "$PWD"` diagnostics without reopening
   ## unquoted word-splitting or option injection.
   result = executable in [
-    "find", "fd", "fdfind", "rg", "git"
+    "find", "fd", "fdfind", "rg", "git", "cd"
   ]
 
 ## Unqualified globs are safe for readers whose complete option surface cannot
@@ -4782,6 +4782,38 @@ func implValidatePrintf(tokens: seq[string]): CommandPolicyDecision =
       return implReject("printf variable assignment can evaluate shell syntax")
   result = implAllow()
 
+func implValidateXargs(tokens: seq[string]): CommandPolicyDecision =
+  ## Input can add options as well as filenames. Only children whose entire
+  ## argument surface is observational are safe here. Do not delegate to a
+  ## validator that can inspect only the static prefix of those arguments.
+  var index = 1
+  while index < tokens.len and tokens[index].startsWith("-"):
+    let option = tokens[index]
+    if option == "--":
+      inc(index)
+      break
+    if option in ["-0", "--null", "-r", "--no-run-if-empty", "-t",
+        "--verbose", "-x", "--exit"]:
+      discard
+    elif option in ["-n", "--max-args"]:
+      inc(index)
+      if index >= tokens.len or not implPositiveAtMost(tokens[index], 4096):
+        return implReject("xargs requires a bounded positive argument count")
+    elif option.startsWith("--max-args="):
+      if not implPositiveAtMost(option[11 .. ^1], 4096):
+        return implReject("xargs requires a bounded positive argument count")
+    elif option.startsWith("-n"):
+      if not implPositiveAtMost(option[2 .. ^1], 4096):
+        return implReject("xargs requires a bounded positive argument count")
+    else:
+      return implReject("xargs supports serial data readers without replacement or execution options")
+    inc(index)
+  if index < tokens.len and implExecutableName(tokens[index]) in [
+      "cat", "wc", "du", "stat", "ls", "md5sum", "sha1sum", "sha224sum",
+      "sha256sum", "sha384sum", "sha512sum", "b2sum", "cksum"]:
+    return implAllow()
+  result = implReject("xargs requires an explicit reader whose input cannot enable writes or helpers")
+
 func implValidateStage(
   tokens: seq[string],
   shell: string
@@ -4805,6 +4837,33 @@ func implValidateStage(
 
   let isPowerShell = lowerShell.contains("powershell") or
     lowerShell.contains("pwsh")
+  if not isPowerShell and not lowerShell.contains("cmd"):
+    if name == "command":
+      var query = false
+      var index = 1
+      while index < tokens.len and tokens[index].startsWith("-"):
+        let option = tokens[index]
+        if option == "--":
+          inc(index)
+          break
+        if option in ["-v", "-V", "-pv", "-pV"]:
+          query = true
+        elif lowerShell.contains("fish") and
+            option in ["-s", "--search", "-q", "--query"]:
+          query = true
+        elif option != "-p":
+          return implReject("command requires a lookup-only option")
+        inc(index)
+      if query and index < tokens.len:
+        return implAllow()
+      return implReject("command supports tool lookup, not command wrapping")
+    if name == "cd":
+      # This changes only the inspection child shell's working directory.
+      # Startup hooks and CDPATH are removed by the execution environment.
+      if tokens.len <= 2 or (tokens.len == 3 and tokens[1] in
+          ["--", "-L", "-P"]):
+        return implAllow()
+      return implReject("cd accepts one inspection directory")
   if isPowerShell and implHasForbiddenPowerShellParameter(tokens, [
       "-outvariable", "-ov", "-pipelinevariable", "-pv",
       "-errorvariable", "-ev", "-warningvariable", "-wv",
@@ -4882,6 +4941,7 @@ func implValidateStage(
       return implAllow()
     return implReject("gnome-extensions requires list, info, or version")
   of "find": return implValidateFind(tokens)
+  of "xargs": return implValidateXargs(tokens)
   of "fd", "fdfind": return implValidateFd(tokens)
   of "rg": return implValidateRg(tokens)
   of "sort": return implValidateSort(tokens, shell)

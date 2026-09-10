@@ -108,6 +108,9 @@ def main() -> int:
             ("code_lookup", "读取 src/auth.py，说明 verify_user 的两个通过条件。"
              "只返回 JSON {\"enabled_required\":true,\"token\":\"实际值\"}。",
              {"enabled_required": True, "token": "replay-marker"}, []),
+            ("code_lines", "统计 src 目录中所有 Python 文件的总行数。"
+             "只返回 JSON {\"py_lines\":整数}，必须实际检查后填写。",
+             {"py_lines": 4}, []),
             ("environment", "读取 GET_REPLAY_LABEL 环境变量，只返回 JSON {\"value\":\"实际值\"}。",
              {"value": "replay-environment-marker"}, []),
             ("no_match", "查找 src 里字面字符串 ABSENT_REPLAY_NEEDLE 的匹配行数。"

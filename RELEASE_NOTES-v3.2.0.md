@@ -5,6 +5,7 @@ Code and system inspections now finish with an answer based on the collected evi
 - Allow AWK arithmetic, variables, arrays, pure builtins and END aggregation. External programs, output files and input-source mutation remain blocked.
 - Give POSIX inspection processes a private disk scratch directory, writable inside the native read-only sandbox and removed after execution. Large sorts can spill without modifying the host workspace.
 - Allow environment-only env/set queries, GNOME settings inspection, Git file-name metadata queries without redundant diff flags, and direct revision/blob reads.
+- Allow command -v tool discovery, inspection-local cd, and serial xargs calls to fully observational file readers such as wc, cat and checksum tools. Replacement, parallel spawning and write-capable children remain blocked.
 - Exclude nested build, dependency and virtual-environment directories when gathering code composition. Supply the configured model identifier as context.
 - Oversized tool batches use the remaining budget; skipped proposals receive matching non-execution observations instead of discarding all useful work.
 - Always interpret observations in auto/loop/parallel. Reserve one tool-free final answer turn after the configured inspection budget, with bounded evidence output if completion fails. Explicit direct mode retains one call and raw output.

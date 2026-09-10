@@ -363,6 +363,26 @@ suite "bounded command execution":
       check value.exitCode == 0
       check value.output.strip() == "py 2\nrs 1"
 
+    test "tool discovery and xargs line counts preserve the source and cwd":
+      let original = getCurrentDir()
+      let root = getTempDir() / ("get-v32-line-count-" & $getCurrentProcessId())
+      createDir(root)
+      let source = root / "two words.py"
+      writeFile(source, "first\nsecond\n")
+      defer: removeDir(root)
+      for shell in ["bash", "fish"]:
+        if findExe(shell).len == 0:
+          continue
+        let value = executeCommandBounded(
+          "command -v wc && cd '" & root & "' && " &
+            "printf 'two words.py\\0' | xargs -0 wc -l",
+          shell, 3, 4096, readOnlySandbox = true)
+        check value.exitCode == 0
+        check value.output.contains("wc")
+        check value.output.contains("2 two words.py")
+        check readFile(source) == "first\nsecond\n"
+        check getCurrentDir() == original
+
     when defined(linux):
       test "sort spills to private disk scratch inside the read-only sandbox":
         let value = executeCommandBounded(

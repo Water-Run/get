@@ -1279,6 +1279,31 @@ const MutatingExecutables = [
 ]
 
 suite "mandatory read-only command policy":
+  test "permits tool discovery and serial file readers without general execution":
+    for shell in ["bash", "fish", "zsh"]:
+      for command in [
+        "command -v tokei", "command -V wc", "command -p -v wc",
+        "command -v -- rm", "cd src && ls", "cd \"$HOME\" && pwd",
+        "rg --files -0 -g '*.py' | xargs -0 wc -l",
+        "xargs -r -n 20 sha256sum < paths.txt",
+        "xargs --null --max-args=20 wc -l",
+        "xargs -n20 -- /usr/bin/cat --"
+      ]:
+        checkpoint(shell & ": " & command)
+        check checkReadOnlyCommand(command, shell).allowed
+      for command in [
+        "command rm -rf data", "command -p rm data", "cd src && touch marker",
+        "xargs", "xargs rm", "xargs bash -c", "xargs sed -n '1p'",
+        "xargs sort", "xargs git show", "xargs env", "xargs /tmp/wc",
+        "xargs -I wc wc", "xargs --replace=wc wc", "xargs -P 0 wc",
+        "xargs -n 0 wc", "xargs --max-args=999999 wc",
+        "xargs -0 wc -l > counts.txt"
+      ]:
+        checkpoint(shell & ": " & command)
+        check not checkReadOnlyCommand(command, shell).allowed
+    check checkReadOnlyCommand("command --search tokei", "fish").allowed
+    check not checkReadOnlyCommand("command --search rm", "bash").allowed
+
   test "allows ordinary aggregation and environment inspection":
     for command in [
       "env", "env -0", "set", "set --show",

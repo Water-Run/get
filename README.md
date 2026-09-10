@@ -110,7 +110,7 @@ file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
 and `top -l 1` on macOS (`-n 0` is valid for a summary-only snapshot); Windows
 uses native readers such as `Get-Process`,
 `Get-CimInstance`, and `tasklist`. Common hardware/process reporters and pure
-AWK arithmetic, variables, arrays, pure functions and END aggregation are accepted. External functions, input-source mutation and output redirection remain rejected. `sed` is admitted for display-only address
+AWK arithmetic, variables, arrays, pure functions and END aggregation are accepted. Tool discovery with `command -v`, directory changes inside the inspection shell, and serial `xargs` calls to fully observational readers such as `wc`, `cat` and checksum tools are supported. General execution wrappers, replacement and parallel spawning remain blocked. External AWK functions, input-source mutation and output redirection remain rejected. `sed` is admitted for display-only address
 expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
 external program files, and command execution remain denied. This keeps normal
 diagnostics usable while validating dual-use tools by semantics rather than by

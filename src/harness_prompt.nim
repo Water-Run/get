@@ -133,7 +133,7 @@ func implSystemPrompt(
         "top -b -n 1 | head -n 15 on Linux, top -l 1 -n 15 on macOS, " &
         "or Get-Process | Select-Object -First 15 on PowerShell; no unbounded " &
         "monitors.",
-      "No scripts, wrappers, inline code; no substitution/loops/backgrounding/" &
+      "No script execution or shell wrappers; no substitution/loops/backgrounding/" &
         "splatting/output files/advanced redirects; literal < file needs a data " &
         "reader; variables: " &
         "$HOME, $USER, $LOGNAME, and $PWD.",
@@ -145,7 +145,9 @@ func implSystemPrompt(
         "Count extensions with awk -F. 'NF>1 {c[$NF]++} " &
         "END {for (e in c) print c[e], e}' | sort -rn. " &
         "Distinguish file counts from lines of code; read manifests/entrypoints " &
-        "to explain code. Use tokei only when installed.",
+        "to explain code. Detect tools with command -v. For lines, use tokei " &
+        "if installed or rg --files -0 -g '*.py' | xargs -0 wc -l. " &
+        "cd only changes the inspection shell's directory.",
       "Git summaries, first batch: branch -vv --no-color; staged via diff " &
         "--cached, unstaged via diff-files (both --name-only --no-ext-diff " &
         "--no-textconv); untracked via ls-files --others --exclude-standard | " &

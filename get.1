@@ -351,7 +351,10 @@ injection variables. curl reads require leading -q; wget reads require
 .PP
 Practical bounded diagnostics are supported across platforms: top requires
 -b and a finite -n count on Linux, or a finite -l count on macOS; Windows can
-use native Get-Process, Get-CimInstance, and tasklist readers. AWK arithmetic, arrays, pure functions and END aggregation, and display-only
+use native Get-Process, Get-CimInstance, and tasklist readers. Tool lookup with
+command -v, cd within the inspection shell, and serial xargs calls to wc, cat
+and checksum readers are accepted. xargs replacement, parallel spawning and
+write-capable children are rejected. AWK arithmetic, arrays, pure functions and END aggregation, and display-only
 sed address expressions are accepted. sed in-place
 mode, output commands, external program files, and command execution remain
 denied. On macOS, top -n 0 is accepted as a finite summary-only snapshot.
