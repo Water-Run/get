@@ -42,7 +42,7 @@ jobs:
         shell: pwsh
         run: |
           nimble check
-          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
 
       - name: Run Windows Nim unit tests
         shell: pwsh

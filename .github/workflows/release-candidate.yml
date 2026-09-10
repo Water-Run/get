@@ -44,7 +44,7 @@ jobs:
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
           if git grep -IlE 'sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- .; then
             echo "Potential credential material found in tracked files" >&2
@@ -137,7 +137,7 @@ jobs:
         shell: pwsh
         run: |
           nimble check
-          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
 
       - name: Run Windows Nim unit tests
@@ -252,7 +252,7 @@ jobs:
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
 
       - name: Run macOS Nim unit tests
@@ -425,8 +425,7 @@ jobs:
           Linux amd64, Windows amd64, and macOS arm64 release gates in
           [GitHub Actions run {os.environ['GITHUB_RUN_ID']}]({run_url}). Those
           gates cover the full Nim unit suite, platform release builds, HTTPS,
-          CLI end-to-end tests, installer smoke tests, and the applicable
-          focused CLI suite. The release-candidate artifact is
+          CLI end-to-end tests, and installer smoke tests. The release-candidate artifact is
           uploaded only after package layout, architecture, version, installer
           syntax, per-file checksums, and archive checksum verification pass.
 

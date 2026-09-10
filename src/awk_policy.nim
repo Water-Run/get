@@ -17,9 +17,9 @@ func safeAwkProgram*(program: string): bool =
   while index < program.len:
     let character = program[index]
     if character in {' ', '\t', '\r', '\n'}:
-      if character == '\n' and parens <= printDepth:
-        printDepth = -1
-        expectsOperand = true
+      # AWK can continue expressions across a newline after operators.
+      # Keep print redirection checks active until an explicit statement/block
+      # boundary, rather than treating whitespace as a new capability scope.
       index += 1
       continue
     if character == '#':

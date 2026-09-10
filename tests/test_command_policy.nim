@@ -1305,6 +1305,7 @@ suite "mandatory read-only command policy":
       "awk 'BEGIN {system(\"id\")}'",
       "awk 'BEGIN {@load \"extension\"}'",
       "awk 'BEGIN {print custom(1)}'",
+      "awk 'BEGIN {print 1 ?\n \"x\" : \"y\" > \"marker\"}'",
       "awk 'BEGIN {a=2; a++ / system(\"touch marker\") / 1}'",
       "awk 'BEGIN {a=2; a-- / system(\"touch marker\") / 1}'"
     ]:

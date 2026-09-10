@@ -251,7 +251,7 @@ API timeout seconds. Default: 300.
 Maximum response tokens. Default: 20480.
 .TP
 .BI "max\-rounds " int
-Hard model-turn limit. Default: 3.
+Inspection-turn limit plus one tool-free final answer turn. Default: 3.
 .TP
 .BI "max\-tool\-calls " int
 Hard tool-call limit per run. Default: 8.
@@ -351,8 +351,8 @@ injection variables. curl reads require leading -q; wget reads require
 .PP
 Practical bounded diagnostics are supported across platforms: top requires
 -b and a finite -n count on Linux, or a finite -l count on macOS; Windows can
-use native Get-Process, Get-CimInstance, and tasklist readers. Pure AWK field
-selectors and display-only sed address expressions are accepted. sed in-place
+use native Get-Process, Get-CimInstance, and tasklist readers. AWK arithmetic, arrays, pure functions and END aggregation, and display-only
+sed address expressions are accepted. sed in-place
 mode, output commands, external program files, and command execution remain
 denied. On macOS, top -n 0 is accepted as a finite summary-only snapshot.
 .PP
@@ -368,7 +368,8 @@ clean, textconv, and filter configuration can execute helpers. Use git branch
 --show-current; git diff-files --name-only --no-ext-diff --no-textconv for
 modified tracked names; git ls-files --others --exclude-standard for untracked
 names; and git diff --cached --no-ext-diff --no-textconv for staged content.
-git show and patch-rendering git log also require both disabling options.
+git show REV:PATH reads a blob directly. Other patch-rendering git show/log
+queries require both disabling options.
 .PP
 The syntax-aware semantic policy is the default authority, so a dangerous word
 used as search or log data is not confused with execution. command-pattern is
@@ -379,7 +380,8 @@ confirmation or execution. Cached commands use the identical gate.
 .PP
 In auto, loop, and parallel modes, a baseline-policy denial is represented as
 a typed, non-executed observation so the model can propose a safer command
-within the existing budgets. Every replacement is revalidated. Direct mode
+within the inspection budget, with a separate tool-free answer turn. Every
+replacement is revalidated. Direct mode
 returns the denial without another model turn.
 .PP
 Commands execute with command-timeout and max-output-bytes. Exceeding the
