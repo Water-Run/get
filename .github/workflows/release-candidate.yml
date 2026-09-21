@@ -20,7 +20,7 @@ env:
   NIM_VERSION: 2.2.10
   RELEASE_VERSION: 4.0.0
   # Refresh only after the no-assembly payload passes the recorded provider gates.
-  PROVIDER_VALIDATED_LINUX_SHA256: ""
+  PROVIDER_VALIDATED_LINUX_SHA256: "955d72ad2f1a0ccad39d7b479707570ef78b3faab8c7644092e578aecf80eaa0"
 
 jobs:
   linux-amd64:

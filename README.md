@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a read-only local query. v4 adds environment, file, search, and direct-process tools, ordinary Git status/diff, and isolated scripts and composition on capable Linux hosts. Model names remain opaque service identifiers. v4 validation is in progress; see the [development record](DEVELOPMENT-v4.0.0.md).
+`get` turns a natural-language question into a read-only local query. v4 adds environment, file, search, and direct-process tools, ordinary Git status/diff, and isolated scripts and composition on capable Linux hosts. Model names remain opaque service identifiers.
 
 ```bash
 get "IP address of this device"
