@@ -19,6 +19,7 @@ when defined(posix):
 import harness_executor
 import harness_protocol
 import harness_types
+import query_policy
 
 when defined(posix):
   # The approved child only reads the monotonic clock, sleeps, and writes stdout.
@@ -66,7 +67,10 @@ suite "harness tool executor":
         commandTimeoutSec: 5,
         maxOutputBytes: 1024
       )
-      let values = executeToolBatch(calls, "bash", budget, 2)
+      var probes: seq[AuthorizedQuery]
+      for call in calls:
+        probes.add(authorizeTestProbe(call, "bash"))
+      let values = executeAuthorizedBatch(probes, "bash", budget, 2)
       require values.len == 3
       var intervals: seq[tuple[started, finished: int64]] = @[]
       for index, value in values:

@@ -24,13 +24,13 @@ when defined(windows):
 suite "v3 configuration":
   test "defaults to automatic one-pass behavior":
     let value = defaultConfig()
-    check value.schemaVersion == 3
+    check value.schemaVersion == 4
     check value.harness == "auto"
     check value.toolProtocol == "auto"
     check not value.doubleCheck
     check value.markdown
-    check value.maxRounds == 3
-    check value.maxToolCalls == 8
+    check value.maxRounds == 6
+    check value.maxToolCalls == 16
     check value.maxParallel == 4
     check value.commandTimeout == 30
     check value.maxOutputBytes == 1_048_576
@@ -52,7 +52,7 @@ suite "v3 configuration":
       "{\"instance\":false}")
     check value.harness == "auto"
     check not value.instance
-    check value.schemaVersion == 3
+    check value.schemaVersion == 4
     check value.url == DEFAULT_URL
     check value.model == DEFAULT_MODEL
     check value.shell.len > 0
@@ -69,8 +69,8 @@ suite "v3 configuration":
     }""")
     check value.harness == "auto"
     check value.toolProtocol == "auto"
-    check value.maxRounds == 3
-    check value.maxToolCalls == 8
+    check value.maxRounds == 6
+    check value.maxToolCalls == 16
     check value.maxParallel == 4
     check value.commandTimeout == 30
     check value.maxOutputBytes == 1_048_576

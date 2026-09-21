@@ -9,10 +9,10 @@ import ../src/sysinfo
 import ../src/utils
 
 suite "version metadata":
-  test "uses release version 3.2.0 consistently":
+  test "uses release version 4.0.0 consistently":
     const nimbleContent = staticRead("../get.nimble")
-    check APP_VERSION == "3.2.0"
-    check nimbleContent.contains("version       = \"3.2.0\"")
+    check APP_VERSION == "4.0.0"
+    check nimbleContent.contains("version       = \"4.0.0\"")
 
   test "pins the supported Windows OpenSSL 3 runtime":
     const buildConfig = staticRead("../config.nims")
@@ -118,7 +118,7 @@ suite "agent response parsing":
     let sys = msgs[0].content
     check sys.contains("Get-ChildItem")
     check sys.contains("dynamic/local facts")
-    check sys.contains("runnable, placeholder-free commands")
-    check sys.contains("Only inspect/retrieve")
+    check sys.contains("native executable cmdlets")
+    check sys.contains("Only retrieve information")
     check sys.contains("Resolve-Path ~")
     check not sys.contains("[Environment]::")

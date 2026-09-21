@@ -901,7 +901,8 @@ proc closeLlmSession*(session: LlmSession) =
 proc sendLlmRequest*(
   session: LlmSession,
   req: LlmRequest,
-  spinnerLabel: string = "requesting"
+  spinnerLabel: string = "requesting",
+  timeoutOverrideSec: int = -1
 ): LlmResponse =
   if session.isNil:
     raise newException(GetError,
@@ -926,20 +927,21 @@ proc sendLlmRequest*(
       spinnerLabel)
     result = implParseResponse(respBody)
 
+  let requestTimeout = if timeoutOverrideSec >= 0: timeoutOverrideSec else: session.timeoutSec
   let requestStarted = getMonoTime()
   var transientFailures = 0
   while true:
     let attemptTimeoutSec =
-      if session.timeoutSec <= 0:
+      if requestTimeout <= 0:
         0
       else:
         let elapsedMs =
           (getMonoTime() - requestStarted).inMilliseconds
         let remainingMs =
-          int64(session.timeoutSec) * 1000 - elapsedMs
+          int64(requestTimeout) * 1000 - elapsedMs
         if remainingMs <= 0:
           raise newException(LlmApiError,
-            fmt"request timed out after {session.timeoutSec}s. " &
+            fmt"request timed out after {requestTimeout}s. " &
             NETWORK_ERROR_MESSAGE)
         int(max(1'i64, (remainingMs + 999) div 1000))
     try:

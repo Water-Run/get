@@ -33,12 +33,12 @@ import utils
 # ---------------------------------------------------------------------------
 
 ## On-disk cache schema. Older hashes are intentionally invalidated by SHA-256.
-const CACHE_SCHEMA_VERSION* = 3
+const CACHE_SCHEMA_VERSION* = 4
 
 ## Semantic identity of the built-in Harness, prompt, protocol, and mandatory
 ## read-only policy. Bump this when a behavior change could make a cached result
 ## or command incompatible even though the JSON schema itself remains v3.
-const CACHE_IDENTITY_REVISION* = "get-v3.2-observation-answer-20260910"
+const CACHE_IDENTITY_REVISION* = "get-v4-query-boundary-20260921"
 
 ## Hard input bound protecting startup from an unexpectedly large cache file.
 const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024
@@ -95,6 +95,7 @@ type
 ## Behavior when a cache entry is hit.
 type
   CacheMode* = enum
+    cmPlan    ## Revalidate a typed query plan with current capabilities.
     cmCommand ## Revalidate and re-execute the cached command.
     cmResult  ## Return the cached text without a provider request.
 
@@ -139,6 +140,7 @@ func implScopeToStr(scope: CacheScope): string =
 
 func implModeToStr(mode: CacheMode): string =
   case mode
+  of cmPlan: result = "plan"
   of cmCommand: result = "command"
   of cmResult: result = "result"
 
@@ -150,6 +152,7 @@ func implParseScope(value: string): Option[CacheScope] =
 
 func implParseMode(value: string): Option[CacheMode] =
   case toLowerAscii(value.strip())
+  of "plan": result = some(cmPlan)
   of "command": result = some(cmCommand)
   of "result": result = some(cmResult)
   else: result = none(CacheMode)
@@ -191,7 +194,7 @@ func implValidEntry(entry: CacheEntry, nowEpoch: int64): bool =
       not implFreshTimestamp(entry.timestamp, nowEpoch, 0):
     return false
   case entry.cacheMode
-  of cmCommand:
+  of cmCommand, cmPlan:
     result = entry.command.strip().len > 0
   of cmResult:
     result = entry.output.len > 0
@@ -265,7 +268,8 @@ proc computeGlobalHashV3*(
   harness: string,
   toolProtocol: string,
   systemPrompt: Option[string],
-  commandPattern: Option[string]
+  commandPattern: Option[string],
+  executionIdentity: string = ""
 ): string =
   let customInstruction =
     if systemPrompt.isSome: systemPrompt.get
@@ -277,6 +281,7 @@ proc computeGlobalHashV3*(
       "semantic-policy-only"
   result = implSha256($(%*[
     CACHE_IDENTITY_REVISION,
+    executionIdentity,
     query.strip(),
     shell,
     model,
@@ -299,7 +304,8 @@ proc computeContextHashV3*(
   harness: string,
   toolProtocol: string,
   systemPrompt: Option[string],
-  commandPattern: Option[string]
+  commandPattern: Option[string],
+  executionIdentity: string = ""
 ): string =
   let globalHash = computeGlobalHashV3(
     query,
@@ -309,7 +315,8 @@ proc computeContextHashV3*(
     harness,
     toolProtocol,
     systemPrompt,
-    commandPattern
+    commandPattern,
+    executionIdentity
   )
   result = implSha256($(%*[
     "get-v3-context",
@@ -710,12 +717,12 @@ proc displayCacheInfo*(
   for entry in store.entries:
     case entry.scope
     of csGlobal:
-      if entry.cacheMode == cmCommand:
+      if entry.cacheMode in {cmCommand, cmPlan}:
         globalCommands += 1
       else:
         globalResults += 1
     of csContext:
-      if entry.cacheMode == cmCommand:
+      if entry.cacheMode in {cmCommand, cmPlan}:
         contextCommands += 1
       else:
         contextResults += 1

@@ -13,10 +13,14 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[strformat]
+import std/[strformat, times, monotimes]
 
 import exec
-import harness_protocol
+import tool_registry
+import query_policy
+import observations
+import native_query_worker
+import query_environment
 import harness_types
 import utils
 
@@ -35,7 +39,7 @@ type
 type
   WorkerTask = object
     index: int    ## Original batch position, or negative for shutdown.
-    call: ToolCall ## Already-authorized tool call.
+    plan: AuthorizedQuery ## Validated invocation and execution constraints.
 
 ## Supplies shared queues and immutable execution settings to a worker.
 type
@@ -54,17 +58,26 @@ type
 ## :param call: Originating authorized tool call.
 ## :param value: Bounded process result.
 ## :returns: Provider-independent observation.
-func implObservation(call: ToolCall, value: ExecResult): ToolObservation =
+proc implObservation(call: ToolCall, value: ExecResult): ToolObservation =
   result = ToolObservation(
     callId: call.id,
     toolName: call.toolName,
     command: call.command,
-    output: value.output,
+    argumentsJson: call.argumentsJson, identity: queryIdentity(call),
+    output: redactEnvironmentSecrets(value.output),
     exitCode: value.exitCode,
     elapsedMs: value.elapsedMs,
     timedOut: value.timedOut,
     truncated: value.truncated,
-    policyRejected: false
+    policyRejected: false,
+    required: call.required,
+    evidenceKey: call.evidenceKey,
+    sampledAt: now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+    source: "host process",
+    stdout: redactEnvironmentSecrets(value.stdout),
+    stderr: redactEnvironmentSecrets(value.stderr),
+    status: (if value.timedOut: osTimedOut elif value.truncated: osTruncated
+      else: queryResultStatus(call, value.exitCode))
   )
 
 ## Executes one authorized tool call synchronously.
@@ -74,22 +87,45 @@ func implObservation(call: ToolCall, value: ExecResult): ToolObservation =
 ## :param budget: Command deadline and capture cap.
 ## :returns: Bounded observation.
 ## :raises: GetError: If the shell cannot be started.
-proc implExecuteOne(
-  call: ToolCall,
-  shell: string,
-  budget: RunBudget
-): ToolObservation {.gcsafe.} =
-  if call.toolName != READ_ONLY_SHELL_TOOL:
-    raise newException(GetError,
-      fmt"unsupported executable tool '{call.toolName}'")
-  let value = executeCommandBounded(
-    call.command,
-    shell,
-    budget.commandTimeoutSec,
-    budget.maxOutputBytes,
-    readOnlySandbox = true
-  )
-  result = implObservation(call, value)
+proc implExecuteOne(plan: AuthorizedQuery,
+    configuredBudget: RunBudget): ToolObservation {.gcsafe.} =
+  let call = plan.call
+  var budget = configuredBudget
+  if budget.executionDeadline.ticks > 0:
+    let remaining = (budget.executionDeadline - getMonoTime()).inMilliseconds
+    if remaining < 1000:
+      return ToolObservation(callId: call.id, toolName: call.toolName,
+        command: call.command, exitCode: 124, status: osTimedOut,
+        timedOut: true, notExecuted: true, required: call.required,
+        evidenceKey: call.evidenceKey, output: "query deadline reached before this step started")
+    let seconds = int(remaining div 1000)
+    budget.commandTimeoutSec = if budget.commandTimeoutSec <= 0: seconds
+      else: min(seconds, budget.commandTimeoutSec)
+  try:
+    if plan.backend in {qbBuiltin, qbGitSnapshot}:
+      return executeNativeQuery(call, budget, plan.shell)
+    let value =
+      if plan.backend == qbIsolatedCompute and call.invocationKind == tikProcess:
+        executeIsolatedProcess(call.executable, call.argv,
+          budget.commandTimeoutSec, budget.maxOutputBytes, call.cwd)
+      elif plan.backend == qbIsolatedCompute:
+        executeIsolatedCommand(call.command, plan.shell,
+          budget.commandTimeoutSec, budget.maxOutputBytes, call.cwd)
+      elif call.invocationKind == tikProcess:
+        executeProcessBounded(call.executable, call.argv,
+          budget.commandTimeoutSec, budget.maxOutputBytes, call.cwd)
+      else:
+        executeCommandBounded(call.command, plan.shell,
+          budget.commandTimeoutSec, budget.maxOutputBytes,
+          readOnlySandbox = true, workingDirectory = call.cwd)
+    result = implObservation(call, value)
+    if plan.backend == qbIsolatedCompute:
+      result.source = "isolated computation; process, network and device views are not host observations"
+  except CatchableError as error:
+    result = ToolObservation(callId: call.id, toolName: call.toolName,
+      command: call.command, required: call.required, exitCode: 1,
+      evidenceKey: call.evidenceKey, notExecuted: true,
+      status: osUnavailable, output: error.msg)
 
 ## Drains authorized calls from the work queue and reports every completion.
 ##
@@ -101,8 +137,7 @@ proc implWorker(arguments: WorkerArguments) {.thread, gcsafe.} =
       return
     try:
       let observation = implExecuteOne(
-        task.call,
-        arguments.shell,
+        task.plan,
         arguments.budget
       )
       arguments.results[].send(WorkerResult(
@@ -126,27 +161,21 @@ proc implWorker(arguments: WorkerArguments) {.thread, gcsafe.} =
 ## :returns: Observations in original call order.
 ## :raises: GetError: If any worker fails to start its command.
 proc implExecuteParallel(
-  calls: seq[ToolCall],
+  plans: seq[AuthorizedQuery],
   workerCount: int,
   shell: string,
   budget: RunBudget
 ): seq[ToolObservation] =
   var taskChannel: Channel[WorkerTask]
   var resultChannel: Channel[WorkerResult]
-  taskChannel.open(calls.len + workerCount)
-  resultChannel.open(calls.len)
-  for index, call in calls:
-    taskChannel.send(WorkerTask(index: index, call: call))
+  taskChannel.open(plans.len + workerCount)
+  resultChannel.open(plans.len)
+  for index, plan in plans:
+    taskChannel.send(WorkerTask(index: index, plan: plan))
   for _ in 0 ..< workerCount:
     taskChannel.send(WorkerTask(
       index: -1,
-      call: ToolCall(
-        id: "",
-        toolName: "",
-        command: "",
-        purpose: "",
-        resultMode: trmReturnRaw
-      )
+      plan: AuthorizedQuery()
     ))
 
   var threads = newSeq[Thread[WorkerArguments]](workerCount)
@@ -158,9 +187,9 @@ proc implExecuteParallel(
       results: addr resultChannel
     ))
 
-  result = newSeq[ToolObservation](calls.len)
+  result = newSeq[ToolObservation](plans.len)
   var firstError = ""
-  for _ in 0 ..< calls.len:
+  for _ in 0 ..< plans.len:
     let workerResult = resultChannel.recv()
     if workerResult.errorMessage.len > 0:
       if firstError.len == 0:
@@ -195,8 +224,8 @@ proc implExecuteParallel(
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc executeToolBatch*(
-  calls: seq[ToolCall],
+proc executeAuthorizedBatch*(
+  plans: seq[AuthorizedQuery],
   shell: string,
   budget: RunBudget,
   maxParallel: int
@@ -206,16 +235,27 @@ proc executeToolBatch*(
   if maxParallel <= 0:
     raise newException(GetError,
       "tool executor parallelism must be positive")
-  if calls.len == 0:
+  if plans.len == 0:
     return @[]
-  if maxParallel == 1 or calls.len == 1:
-    result = newSeq[ToolObservation](calls.len)
-    for index, call in calls:
-      result[index] = implExecuteOne(call, shell, budget)
+  if maxParallel == 1 or plans.len == 1:
+    result = newSeq[ToolObservation](plans.len)
+    for index, plan in plans:
+      result[index] = implExecuteOne(plan, budget)
     return
   result = implExecuteParallel(
-    calls,
-    min(maxParallel, calls.len),
+    plans,
+    min(maxParallel, plans.len),
     shell,
     budget
   )
+
+proc executeToolBatch*(calls: seq[ToolCall], shell: string, budget: RunBudget,
+    maxParallel: int): seq[ToolObservation] =
+  ## Compatibility API: even direct callers pass through the shared gateway.
+  var plans: seq[AuthorizedQuery]
+  for call in calls:
+    let decision = authorizeQuery(call, shell)
+    if decision.kind != qdAllowed:
+      raise newException(GetError, decision.reason)
+    plans.add(decision.plan)
+  executeAuthorizedBatch(plans, shell, budget, maxParallel)

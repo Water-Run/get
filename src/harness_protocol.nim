@@ -16,6 +16,7 @@
 import std/[json, options, strformat, strutils]
 
 import harness_types
+import tool_registry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -83,29 +84,6 @@ func implOptionalString(
     raise newException(ValueError,
       fmt"field '{fieldName}' must be a string")
   result = value.getStr().strip()
-
-## Validates the exact command field used by the shell tool.
-##
-## :param command: Raw model-provided command.
-## :returns: Trimmed command.
-## :raises: ValueError: If the command is empty or too large.
-func implValidateCommand(command: string): string =
-  result = command.strip()
-  if result.len == 0:
-    raise newException(ValueError,
-      "tool command must not be empty")
-  if result.len > MAX_COMMAND_CHARS:
-    raise newException(ValueError,
-      fmt"tool command exceeds {MAX_COMMAND_CHARS} characters")
-
-## Enforces the provider-advertised `additionalProperties: false` schema even
-## when a provider returns hand-written or textual JSON.
-func implValidateArgumentFields(node: JsonNode) =
-  for fieldName, unused in node:
-    discard unused
-    if fieldName notin ["command", "purpose", "result_mode"]:
-      raise newException(ValueError,
-        fmt"unsupported tool argument '{fieldName}'")
 
 ## Returns whether a character can appear in a relaxed tool-call field name.
 func implIsFieldChar(value: char): bool =
@@ -259,7 +237,7 @@ proc implParseBracketToolAction(
     raise newException(ValueError,
       "textual tool call is missing a tool name")
   let toolName = remainder[0 ..< nameEnd]
-  if toolName != READ_ONLY_SHELL_TOOL:
+  if not knownQueryTool(toolName):
     raise newException(ValueError,
       fmt"unsupported tool '{toolName}'")
   let payload = remainder[nameEnd .. ^1].strip()
@@ -308,39 +286,22 @@ func implParseCallNode(
       "each tool call must be a JSON object")
   let toolName = implOptionalString(
     node, "tool", READ_ONLY_SHELL_TOOL)
-  if toolName != READ_ONLY_SHELL_TOOL:
+  if not knownQueryTool(toolName):
     raise newException(ValueError,
       fmt"unsupported tool '{toolName}'")
   let argsNode = node{"arguments"}
   if not argsNode.isNil and argsNode.kind != JObject:
     raise newException(ValueError,
       "field 'arguments' must be a JSON object")
-  if not argsNode.isNil:
-    implValidateArgumentFields(argsNode)
-  let source =
-    if not argsNode.isNil: argsNode
-    else: node
-  let command = implValidateCommand(
-    implRequiredString(source, "command"))
-  let modeText = implOptionalString(
-    source, "result_mode", "")
-  let mode =
-    if modeText.len > 0:
-      parseToolResultMode(modeText)
-    else:
-      defaultMode
-  let rawId = implOptionalString(
-    node, "id", fmt"local-{index + 1}")
-  let idValue =
-    if rawId.len > 0: rawId
-    else: fmt"local-{index + 1}"
-  result = ToolCall(
-    id: idValue,
-    toolName: toolName,
-    command: command,
-    purpose: implOptionalString(source, "purpose", ""),
-    resultMode: mode
-  )
+  let source = if not argsNode.isNil: argsNode else: node
+  var arguments = newJObject()
+  for key, value in source:
+    if argsNode.isNil and key in ["id", "tool", "type", "after"]:
+      continue
+    arguments[key] = value
+  let rawId = implOptionalString(node, "id", "local-" & $(index + 1))
+  let idValue = if rawId.len > 0: rawId else: "local-" & $(index + 1)
+  result = parseQueryArguments(toolName, idValue, arguments, defaultMode)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -365,7 +326,7 @@ proc parseNativeToolCall*(
   toolName: string,
   arguments: string
 ): ToolCall =
-  if toolName != READ_ONLY_SHELL_TOOL:
+  if not knownQueryTool(toolName):
     raise newException(ValueError,
       fmt"unsupported tool '{toolName}'")
   var node: JsonNode
@@ -522,6 +483,10 @@ func implObservationHint(observation: ToolObservation): string =
     return "The output cap stopped collection. Do not repeat the same broad " &
       "command; summarize the available prefix or use one narrower reader."
 
+  if observation.status == osNoMatch:
+    return "The query completed with no match or a false condition; this is evidence, not a failed execution."
+  if observation.status == osFinding:
+    return "The query completed and reported a difference/finding through its exit status."
   let words = observation.command.strip().splitWhitespace()
   var executable =
     if words.len > 0: toLowerAscii(words[0])
@@ -591,6 +556,18 @@ func observationJson*(observation: ToolObservation): string =
     "truncated": observation.truncated,
     "policy_rejected": observation.policyRejected
   }
+  node["status"] = %($observation.status)
+  if observation.status == osReused:
+    node["original_status"] = %($observation.originalStatus)
+  node["executed"] = %(not observation.notExecuted and not observation.policyRejected)
+  node["required"] = %observation.required
+  node["has_more"] = %observation.moreData
+  node["feedback_compacted"] = %observation.feedbackCompacted
+  node["original_output_bytes"] = %observation.originalOutputBytes
+  if observation.evidenceKey.len > 0: node["evidence_key"] = %observation.evidenceKey
+  if observation.sampledAt.len > 0: node["sampled_at"] = %observation.sampledAt
+  if observation.source.len > 0: node["source"] = %observation.source
+  if observation.stderr.len > 0: node["stderr"] = %observation.stderr
   let hint = implObservationHint(observation)
   if observation.proposedCommand.len > 0:
     node["proposed_command"] = %observation.proposedCommand

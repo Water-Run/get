@@ -33,13 +33,21 @@ import std/[
 ]
 
 when defined(windows):
-  import std/atomics
+  import std/[atomics, winlean]
+  proc queryPeekPipe(pipe: Handle, buffer: pointer, size: int32,
+      read, available, remaining: ptr int32): int32 {.stdcall, dynlib: "kernel32",
+      importc: "PeekNamedPipe".}
+  proc queryReadPipe(pipe: Handle, buffer: pointer, size: int32,
+      read: ptr int32, overlapped: pointer): int32 {.stdcall, dynlib: "kernel32",
+      importc: "ReadFile".}
 
 when defined(posix):
   import std/posix
 
 import style
 import utils
+import query_environment
+import compute_sandbox
 
 when defined(macosx):
   import command_policy
@@ -107,6 +115,8 @@ when defined(macosx):
 type
   ExecResult* = object
     output*: string    ## Combined stdout and stderr output.
+    stdout*: string    ## Data stream, with its own decoding.
+    stderr*: string    ## Diagnostic stream, with its own decoding.
     exitCode*: int     ## Process exit code (0 = success).
     elapsedMs*: int64  ## Wall-clock execution duration in milliseconds.
     timedOut*: bool    ## Whether the configured deadline stopped the process.
@@ -140,6 +150,12 @@ var readOnlySandboxLock: Lock
 ## -1 means unprobed, 0 unavailable, 1 /usr/bin runner, and 2 /bin runner.
 ## An integer avoids sharing a GC-managed string between Harness workers.
 var readOnlySandboxState = -1
+var computeSandboxLock: Lock
+var computeSandboxState = -1
+var nestedQueryWorker = false
+
+proc enterQueryWorker*() =
+  nestedQueryWorker = true
 
 ## Contains raw shell references that must be cancelled on Ctrl+C.
 ## Workers retain ownership; raw pointers avoid cross-thread GC roots.
@@ -148,6 +164,7 @@ var activeProcessSlots: array[MAX_TRACKED_PROCESSES, pointer]
 initLock(activeProcessLock)
 initLock(processStartLock)
 initLock(readOnlySandboxLock)
+initLock(computeSandboxLock)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -381,6 +398,22 @@ proc implSanitizedExecutablePath(rawPath: string): string =
     add(entry, true)
   result = entries.join($PathSep)
 
+proc implResolveQueryExecutable(executable: string): string =
+  if executable.isAbsolute: return executable
+  if '/' in executable or '\\' in executable:
+    raise newException(GetError, "query executable must be a name or absolute path")
+  let path = implSanitizedExecutablePath(getEnv("PATH"))
+  for directory in path.split(PathSep):
+    when defined(windows):
+      for suffix in ["", ".exe", ".com"]:
+        let candidate = directory / (executable & suffix)
+        if fileExists(candidate): return candidate
+    else:
+      let candidate = directory / executable
+      if fileExists(candidate) and fpUserExec in getFilePermissions(candidate):
+        return candidate
+  raise newException(GetError, "query executable is not installed: " & executable)
+
 ## Builds a child environment without executable startup hooks.
 ##
 ## The command policy treats the parent environment as untrusted input: shell
@@ -394,6 +427,9 @@ proc implSanitizedEnvironment(): StringTableRef =
     else: modeCaseSensitive)
   for key, value in envPairs():
     let upper = toUpperAscii(key)
+    if sensitiveEnvironmentName(key):
+      result[key] = "[redacted]"
+      continue
     let blocked = upper in [
       "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "CDPATH", "IFS",
       "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "GCONV_PATH",
@@ -1146,12 +1182,17 @@ proc confirmExecution*(
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     discard
-proc executeCommandBounded*(
+proc implExecuteBounded(
   command: string,
   shell: string,
   timeoutSec: int,
   maxOutputBytes: int,
-  readOnlySandbox: bool = false
+  readOnlySandbox: bool = false,
+  directExecutable: string = "",
+  directArguments: seq[string] = @[],
+  workingDirectory: string = "",
+  isolatedCompute: bool = false,
+  cleanGitConfiguration: bool = false
 ): ExecResult =
   if timeoutSec < 0:
     raise newException(GetError,
@@ -1162,15 +1203,30 @@ proc executeCommandBounded*(
   let started = getMonoTime()
   let effectiveCommand = implApplyWindowsCompatCommand(
     command, shell)
-  let shellExecutable = implResolveShellExecutable(shell)
+  let workDir = if workingDirectory.len > 0: absolutePath(workingDirectory)
+    else: getCurrentDir()
+  let shellExecutable =
+    if isolatedCompute and directExecutable.len > 0 and
+        (DirSep in directExecutable or '/' in directExecutable):
+      implResolveQueryExecutable(absolutePath(directExecutable, workDir))
+    elif directExecutable.len > 0: implResolveQueryExecutable(directExecutable)
+    else: implResolveShellExecutable(shell)
   var executable = shellExecutable
-  var args = implBuildShellArgs(
-    shell, effectiveCommand)
+  var args = if directExecutable.len > 0: directArguments
+    else: implBuildShellArgs(shell, effectiveCommand)
   var scratch = ""
   defer:
     if scratch.len > 0 and dirExists(scratch):
       removeDir(scratch)
-  if readOnlySandbox:
+  if isolatedCompute:
+    let runner = computeRunnerPath()
+    if runner.len == 0:
+      raise newException(GetError, "isolated computation is unavailable")
+    scratch = expandFilename(createTempDir("get-compute-", ""))
+    setFilePermissions(scratch, {fpUserRead, fpUserWrite, fpUserExec})
+    executable = runner
+    args = computeSandboxArguments(getAppFilename(), shellExecutable, args, workDir, scratch)
+  elif readOnlySandbox:
     when defined(posix):
       scratch = expandFilename(createTempDir("get-inspection-", ""))
       setFilePermissions(scratch, {fpUserRead, fpUserWrite, fpUserExec})
@@ -1183,7 +1239,7 @@ proc executeCommandBounded*(
           "--ro-bind", "/", "/",
         ] & implLinuxReadOnlyDeviceArgs() & @[
           "--bind", scratch, scratch,
-          "--chdir", getCurrentDir(),
+          "--chdir", workDir,
           "--", shellExecutable
         ] & args
     elif defined(macosx):
@@ -1192,7 +1248,9 @@ proc executeCommandBounded*(
       # that has already passed the full mandatory policy may take this narrow
       # compatibility path; all other macOS commands keep Seatbelt's
       # filesystem-write denial.
-      if not macosRequiresUnsandboxedReader(command, shell):
+      if not (macosRequiresUnsandboxedReader(command, shell) or
+          (directExecutable.len > 0 and extractFilename(directExecutable) in
+            ["ps", "top", "traceroute", "launchctl"])):
         let sandboxExec = implReadOnlySandboxExecutable()
         if sandboxExec.len > 0:
           executable = sandboxExec
@@ -1201,6 +1259,15 @@ proc executeCommandBounded*(
             scratch.replace("\\", "\\\\").replace("\"", "\\\"") & "\"))"
           args = @["-p", profile, shellExecutable] & args
   let childEnvironment = implSanitizedEnvironment()
+  childEnvironment["PWD"] = workDir
+  if isolatedCompute:
+    for name in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS", "RAYON_NUM_THREADS", "UV_THREADPOOL_SIZE"]:
+      childEnvironment[name] = "1"
+  if cleanGitConfiguration:
+    childEnvironment["GIT_CONFIG_NOSYSTEM"] = "1"
+    childEnvironment["GIT_CONFIG_SYSTEM"] = (when defined(windows): "NUL" else: "/dev/null")
+    childEnvironment["GIT_CONFIG_GLOBAL"] = (when defined(windows): "NUL" else: "/dev/null")
   if scratch.len > 0:
     childEnvironment["TMPDIR"] = scratch
     childEnvironment["TMP"] = scratch
@@ -1210,13 +1277,14 @@ proc executeCommandBounded*(
   try:
     p = startProcess(
       executable,
+      workingDir = workDir,
       args = args,
       env = childEnvironment,
       options =
         when defined(posix):
-          {poStdErrToStdOut, poUsePath, poDaemon}
+          (if nestedQueryWorker: {poUsePath} else: {poUsePath, poDaemon})
         else:
-          {poStdErrToStdOut, poUsePath})
+          {poUsePath})
     implPreventPipeInheritance(p)
   except OSError as e:
     raise newException(GetError,
@@ -1250,6 +1318,7 @@ proc executeCommandBounded*(
       ))
 
   var rawOutput = ""
+  var rawStreams: array[2, string]
   var exitCode = -1
   var truncated = false
   var buffer: array[8192, char]
@@ -1257,83 +1326,76 @@ proc executeCommandBounded*(
     # This API supplies no interactive input. Readers of stdin must see EOF
     # instead of waiting for a parent pipe that is never written to.
     p.inputStream.close()
-    when defined(posix):
-      let outputFd = cint(p.outputHandle)
-      let deadline = started + initDuration(seconds = timeoutSec)
-      while true:
-        var pollTimeout = -1.cint
+    let deadline = started + initDuration(seconds = timeoutSec)
+    var closed: array[2, bool]
+    while true:
+      if timeoutSec > 0 and getMonoTime() >= deadline:
+        didTimeOut = true
+        implTerminateProcessTree(p)
+        break
+      if closed[0] and closed[1]:
+        exitCode = p.peekExitCode()
+        if exitCode != -1: break
+        sleep(10)
+        continue
+      when defined(posix):
+        var descriptors = [
+          TPollfd(fd: (if closed[0]: -1.cint else: cint(p.outputHandle)), events: POLLIN),
+          TPollfd(fd: (if closed[1]: -1.cint else: cint(p.errorHandle)), events: POLLIN)]
+        var pollTimeout = 100.cint
         if timeoutSec > 0:
-          let remaining = deadline - getMonoTime()
-          if remaining <= DurationZero:
-            didTimeOut = true
-            implTerminateProcessTree(p)
-            break
-          let remainingMs = max(1'i64, remaining.inMilliseconds)
-          pollTimeout = cint(min(remainingMs, int64(high(cint))))
-
-        var descriptor = TPollfd(
-          fd: outputFd,
-          events: POLLIN,
-          revents: 0
-        )
-        let ready = posix.poll(
-          addr descriptor, Tnfds(1), pollTimeout)
-        if ready == 0:
-          didTimeOut = true
+          pollTimeout = cint(min(100'i64, max(1'i64,
+            (deadline - getMonoTime()).inMilliseconds)))
+        let ready = posix.poll(addr descriptors[0], Tnfds(2), pollTimeout)
+        if ready < 0:
+          if errno == EINTR: continue
+          raiseOSError(osLastError())
+      else:
+        let handles = [Handle(p.outputHandle), Handle(p.errorHandle)]
+        var hadData = false
+      for index in 0 .. 1:
+        if closed[index]: continue
+        var count = 0
+        when defined(posix):
+          if descriptors[index].revents == 0: continue
+          count = int(posix.read(descriptors[index].fd, addr buffer[0], buffer.len))
+          if count < 0:
+            if errno in [EINTR, EAGAIN]: continue
+            raiseOSError(osLastError())
+        else:
+          var available, readCount: int32
+          if queryPeekPipe(handles[index], nil, 0, nil, addr available, nil) == 0:
+            closed[index] = true
+            continue
+          if available <= 0: continue
+          hadData = true
+          if queryReadPipe(handles[index], addr buffer[0],
+              min(available, int32(buffer.len)), addr readCount, nil) == 0:
+            closed[index] = true
+            continue
+          count = int(readCount)
+        if count == 0:
+          closed[index] = true
+          continue
+        let previousLength = rawOutput.len
+        let exceeded = implCaptureChunk(rawOutput, addr buffer[0], count, maxOutputBytes)
+        let kept = rawOutput.len - previousLength
+        if kept > 0:
+          discard implCaptureChunk(rawStreams[index], addr buffer[0], kept, 0)
+        if exceeded:
+          truncated = true
           implTerminateProcessTree(p)
           break
-        if ready < 0:
-          if errno == EINTR:
-            continue
-          raiseOSError(osLastError())
+      if truncated: break
+      when defined(windows):
+        if not hadData: sleep(10)
 
-        let count = int(posix.read(
-          outputFd, addr buffer[0], buffer.len))
-        if count > 0:
-          if implCaptureChunk(
-              rawOutput, addr buffer[0], count,
-              maxOutputBytes):
-            truncated = true
-            implTerminateProcessTree(p)
-            break
-        elif count == 0:
-          # Closing stdout is not process completion. Continue enforcing the
-          # same deadline instead of applying waitForExit's separate timeout.
-          while true:
-            exitCode = p.peekExitCode()
-            if exitCode != -1:
-              break
-            if timeoutSec > 0 and getMonoTime() >= deadline:
-              didTimeOut = true
-              implTerminateProcessTree(p)
-              break
-            sleep(10)
-          break
-        elif errno == EINTR or errno == EAGAIN:
-          continue
-        else:
-          raiseOSError(osLastError())
-    else:
-      let outp = p.outputStream
-      while true:
-        let count = outp.readData(addr buffer[0], buffer.len)
-        if count <= 0:
-          exitCode = p.peekExitCode()
-          if exitCode != -1:
-            break
-          continue
-        if implCaptureChunk(
-            rawOutput, addr buffer[0], count,
-            maxOutputBytes):
-          if not truncated:
-            truncated = true
-            implTerminateProcessTree(p)
   finally:
     when defined(windows):
       completed.store(true)
       if usesWatchdog:
         joinThread(watchdog)
-      didTimeOut = timedOut.load()
+      didTimeOut = didTimeOut or timedOut.load()
     if exitCode == -1:
       try:
         if not didTimeOut and not truncated:
@@ -1351,6 +1413,10 @@ proc executeCommandBounded*(
     let output = rawOutput
   result = ExecResult(
     output: output,
+    stdout: (when defined(windows): implNormalizeWindowsOutput(rawStreams[0])
+      else: rawStreams[0]),
+    stderr: (when defined(windows): implNormalizeWindowsOutput(rawStreams[1])
+      else: rawStreams[1]),
     exitCode:
       if exitCode == -1: 1
       else: exitCode,
@@ -1358,6 +1424,47 @@ proc executeCommandBounded*(
     timedOut: didTimeOut,
     truncated: truncated
   )
+
+proc executeCommandBounded*(command, shell: string, timeoutSec, maxOutputBytes: int,
+    readOnlySandbox = false, workingDirectory = ""): ExecResult =
+  implExecuteBounded(command, shell, timeoutSec, maxOutputBytes, readOnlySandbox,
+    workingDirectory = workingDirectory)
+
+proc executeProcessBounded*(executable: string, arguments: seq[string],
+    timeoutSec, maxOutputBytes: int, workingDirectory = "",
+    readOnlySandbox = true): ExecResult =
+  ## Starts literal argv through the same capture, cancellation and sandbox path.
+  implExecuteBounded("", "", timeoutSec, maxOutputBytes, readOnlySandbox,
+    directExecutable = executable, directArguments = arguments,
+    workingDirectory = workingDirectory)
+
+proc executeIsolatedCommand*(command, shell: string, timeoutSec, maxOutputBytes: int,
+    workingDirectory = ""): ExecResult =
+  implExecuteBounded(command, shell, timeoutSec, maxOutputBytes,
+    workingDirectory = workingDirectory, isolatedCompute = true)
+
+proc executeIsolatedProcess*(executable: string, arguments: seq[string],
+    timeoutSec, maxOutputBytes: int, workingDirectory = ""): ExecResult =
+  implExecuteBounded("", "", timeoutSec, maxOutputBytes,
+    directExecutable = executable, directArguments = arguments,
+    workingDirectory = workingDirectory, isolatedCompute = true)
+
+proc isolatedComputeAvailable*(): bool =
+  ## Probe the complete worker (including seccomp), not just a binary's presence.
+  acquire(computeSandboxLock)
+  try:
+    if computeSandboxState < 0:
+      computeSandboxState = 0
+      if computeRunnerPath().len > 0:
+        try:
+          let probe = executeIsolatedProcess("true", @[], 3, 4096)
+          if probe.exitCode == 0 and not probe.timedOut:
+            computeSandboxState = 1
+        except CatchableError:
+          discard
+    result = computeSandboxState == 1
+  finally:
+    release(computeSandboxLock)
 
 ## Executes a command with compatibility defaults and captures its output.
 ##
@@ -1382,3 +1489,11 @@ proc executeCommand*(
     timeoutSec = 0,
     maxOutputBytes = 0
   )
+
+
+proc executeGitSnapshot*(arguments: seq[string], timeoutSec, maxOutputBytes: int,
+    workingDirectory: string): ExecResult =
+  ## Internal adapter path; model arguments never control its environment.
+  implExecuteBounded("", "", timeoutSec, maxOutputBytes,
+    directExecutable = "git", directArguments = arguments,
+    workingDirectory = workingDirectory, cleanGitConfiguration = true)

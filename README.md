@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a safe, read-only local inspection. Version 3.2.0 makes code and system queries more practical: it supports AWK aggregation, private temporary storage, and a final answer after inspection. Model names are opaque identifiers; there are no strength rankings or name-based sampling settings.
+`get` turns a natural-language question into a read-only local query. v4 adds environment, file, search, and direct-process tools, ordinary Git status/diff, and isolated scripts and composition on capable Linux hosts. Model names remain opaque service identifiers. v4 validation is in progress; see the [development record](DEVELOPMENT-v4.0.0.md).
 
 ```bash
 get "IP address of this device"
@@ -10,20 +10,16 @@ get "code structure in the current directory"
 get "current git branch and uncommitted files"
 ```
 
-## What changed in v3
+## What changed in v4
 
-- One provider-independent `Model → Action → Policy → Tool → Observation` state machine.
-- Native function tools by default, with explicit structured JSON fallback. Markdown examples and HTML markers never execute.
-- `auto`, `direct`, `loop`, and `parallel` strategies over the same runtime.
-- One call for direct answers or explicit `direct` queries; default local inspections are followed by an answer. There is no separate router or cache-classifier call.
-- Reused HTTP connections and completion-driven waiting. Fast responses are no longer delayed by a one-second polling interval.
-- Pre-response transport failures retry up to three times within the original request timeout; HTTP and parsing errors are never retried, response bodies have an 8 MiB hard cap, and bearer-bearing requests do not follow redirects.
-- HTTPS verifies both the certificate chain and DNS/IP host name. Windows builds import the native Windows ROOT store into OpenSSL, so normal HTTPS use does not depend on a separately downloaded CA bundle.
-- Lazy local context collection instead of eager shell-version and PATH-wide probes.
-- Real bounded parallel execution for independent read-only checks.
-- Per-command timeout, output cap, and cross-platform process-tree cancellation.
-- A mandatory allowlist-based read-only policy that cannot be disabled, startup-hook-free shells, a sanitized executable path/environment, and native filesystem write denial on supported Linux/macOS hosts. Regex, model review, and manual confirmation are additional layers.
-- Production cache: SHA-256 identities, cross-process writers, atomic durable snapshots, last-good recovery, and bounded parsing. Cached commands still pass through the same safety policy.
+- Named environment reads distinguish missing, empty, and redacted values without a four-variable limit.
+- Built-in file paging, literal content search, path globs, and common ignore rules handle spaces and Unicode paths.
+- Literal argv avoids shell quoting. Complex shell queries and short scripts use a fully probed Linux isolation backend.
+- Git status/diff use a private metadata snapshot with executable filters, external diff, and submodule inspection disabled.
+- Defaults are six inspection turns, sixteen actual starts, and four concurrent calls. Rejections and reuse count separately; local failures can recover.
+- Automatic queries have a 120-second total deadline with time reserved for an answer. stdout/stderr, paging, and truncation are separate observations.
+- New, reviewed, and cached plans share one authorization path and one event stream for terminal output and diagnostics.
+- Native tools/JSON fallback, TLS verification, HTTP reuse, durable persistence, and Markdown output remain available.
 
 ## Installation
 
@@ -89,50 +85,25 @@ When a query explicitly says `without tools` or `without calling a tool`, get
 uses enforced text-only routing: the provider receives no tool definition,
 textual tool actions are rejected, and an older cached command is ignored.
 
-POSIX observation processes receive a private temporary directory that is removed after execution. Native write denial protects the host filesystem while allowing tools such as `sort` to spill there. `env`, query-only `set`, GNOME settings queries, and Git metadata/blob reads are supported.
+## Query boundary
 
-## Safety model
+`read_environment`, `read_file`, and `search_files` handle common reads directly. `run_process` accepts literal argv; `run_shell` uses the configured shell dialect. Search supports path globs, literal content matching, paging, and common `.gitignore` / `.ignore` / `.rgignore` rules. It is a bounded reader, not a complete Git/ripgrep replacement; scan limits produce an explicit incomplete result.
 
-Every model-proposed, model-revised, or cached command follows the same gate:
+Known host readers retain argument checks and see real process, device, network, and service state. On Linux, other computation is enabled only after a complete isolation probe: bubblewrap namespaces, read-only host mounts, seccomp, and resource ceilings prevent network/control-socket access and host process/device control. Writes are confined to private query scratch space, cleaned by the parent. Missing capabilities never fall back to an unrestricted script.
 
-1. Validate the typed tool name and arguments.
-2. Apply the mandatory read-only policy.
-3. Apply `command-pattern` only when the user configured an additional blocklist.
-4. Optionally run the second-model review (`double-check`).
-5. Re-run both deterministic checks if the reviewer changes the command.
-6. Optionally request manual confirmation.
-7. Execute with a deadline and output cap.
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| Typed environment/files/search and known host queries | Supported | Supported | Supported |
+| Ordinary Git status/diff snapshot | Supported | Supported | Supported |
+| General scripts and complex shell computation | Only after the full isolation probe | Not yet supported | Not yet supported |
 
-The mandatory policy parses simple commands, reader pipelines, and reader-only sequences, then validates every stage and every state-changing option. Unknown syntax and executables fail closed. It blocks command substitution, background/group execution, regular-file output redirection, scripts and wrappers, inline interpreters, PowerShell splatting/script conversion, option abbreviations and glob-to-option injection, helper/config injection, mutating Git/container/cluster/package-manager operations, uploads, and unsafe short-option variants. A single literal-file `<` stdin redirect is accepted only for a small set of validated data readers; heredocs, here-strings, process substitution, input-descriptor duplication, expansion, multiple input redirects, and read/write `<>` remain rejected. Output-descriptor duplication is limited to existing stdout/stderr. Shell aliases and null devices are checked per platform; only trusted supported shells can be configured. The shell and every bare reader resolve through a system-first PATH with the current workspace and temporary directories removed. Child processes start without profile hooks and without loader, language-runtime, Git, pager, tracing, or tool-config injection variables. Cached and reviewer-rewritten commands pass through the identical gate.
+Git snapshots retain the worktree, index, and basic line-ending/file-mode semantics without writing the real index. Executable filters, textconv, fsmonitor, and submodule inspection are disabled. Global excludes, upstream configuration, and custom filtered results may differ from interactive Git; observations identify the snapshot source. Use literal process arguments or a single literal Git status/diff shell call for this adapter.
 
-The allowlist includes practical cross-platform inspection, not just trivial
-file readers. Bounded `top` snapshots are accepted as `top -b -n 1` on Linux
-and `top -l 1` on macOS (`-n 0` is valid for a summary-only snapshot); Windows
-uses native readers such as `Get-Process`,
-`Get-CimInstance`, and `tasklist`. Common hardware/process reporters and pure
-AWK arithmetic, variables, arrays, pure functions and END aggregation are accepted. Tool discovery with `command -v`, directory changes inside the inspection shell, and serial `xargs` calls to fully observational readers such as `wc`, `cat` and checksum tools are supported. General execution wrappers, replacement and parallel spawning remain blocked. External AWK functions, input-source mutation and output redirection remain rejected. `sed` is admitted for display-only address
-expressions such as `sed -n '1,80p' file`; in-place mode, output commands,
-external program files, and command execution remain denied. This keeps normal
-diagnostics usable while validating dual-use tools by semantics rather than by
-executable name alone. Version 3.0.1 also admits bounded `free`, `sar`, `pidstat`, and
-traceroute diagnostics; home-directory `find`/`rg` with stable path expansion;
-tmux/cron/Secure Boot queries; macOS metadata/package queries; Windows service,
-boot, BitLocker, WSL, DNS, and network readers; and common Go/.NET/Rust/Swift/
-Java environment inspection. Their execute, write, install, export, live, and
-unbounded forms remain denied.
+Every proposal validates tool arguments and selects an allowed backend, then applies an explicitly configured `command-pattern`, optional `double-check`, and optional `manual-confirm`. Reviewed edits and cached plans are authorized again. Confirmation cannot enable host mutation. Both review and confirmation default to off.
 
-For HTTP inspection, use `curl -q ...`; the leading `-q` prevents `.curlrc` from changing the operation, and only GET/HEAD with an explicit read protocol is accepted. `wget` is accepted only with `--no-config --no-hsts -O-`. Prefix unquoted POSIX globs with `./` or place `--` before them. `$HOME`, `$USER`, `$LOGNAME`, and `$PWD` are accepted by side-effect-free readers; dual-use `find`, `fd`, `rg`, and Git path selection additionally require `~` or a quoted `"$HOME"`/`"$PWD"`. The v3 default is the syntax-aware semantic policy alone, so a dangerous word used as grep/rg/log data is not mistaken for execution. `command-pattern` remains available as an explicit organization-specific supplemental regex and can never disable the mandatory policy.
+A failed step can recover locally. No matches, missing environment values, and differences found by diff have distinct semantics. Existing observations can be reused; explicit `fresh` requests resample. Failure of all required evidence produces a nonzero exit status even if the model supplies prose. Recovery is limited to two failed-step revisions per query.
 
-`git status` and worktree-content `git diff` are deliberately rejected: repository-owned clean/textconv/filter configuration can execute helpers even for commands that appear read-only. Use `git branch --show-current`; `git diff-files --name-only --no-ext-diff --no-textconv` for modified tracked names; `git ls-files --others --exclude-standard` for untracked names; and `git diff --cached --no-ext-diff --no-textconv` for staged content. `git show` and patch-rendering `git log` also require both disabling flags.
-
-`double-check` defaults to `false`, avoiding an extra safety-review request. Enable it when an independent model review is worth the added latency and cost:
-
-```bash
-get "inspect service status" --double-check
-get set manual-confirm true
-```
-
-This policy is a fail-closed mutation-resistance gate under the documented semantics of trusted reader binaries; it is not a confidentiality boundary. Linux uses bubblewrap and macOS uses Seatbelt for filesystem write denial when available, with a narrowly revalidated macOS compatibility path for Apple set-id readers; Windows retains the same semantic gate and process limits without an equivalent bundled OS sandbox. An allowed reader can expose requested files, process/environment data, URLs, or command output to the configured model provider when the harness continues. The boundary includes administrator- or operator-controlled tool directories retained after PATH hardening, the kernel, operator-controlled tool configuration, and the remote semantics of an allowed HTTP GET/HEAD. Reads may also update access metadata or incidental caches. A compromised trusted binary, hostile server, unavailable native sandbox, or compromised host is outside the guarantee. Review commands and use manual confirmation or an additional external sandbox in sensitive environments.
+This boundary resists host mutation; it is not a confidentiality boundary. Requested observations may reach the configured model. Environment credential values are redacted, but file contents are not subject to a general secret detector. Host readers rely on trusted binaries and tool configuration; reads can update access metadata. HTTP readers accept checked GET/HEAD forms whose remote semantics remain server-dependent.
 
 ## Configuration
 
@@ -148,9 +119,11 @@ Run `get config` to display all settings, `get config --<option>` for one value,
 | `tool-protocol` | `auto` | `auto`, `native`, or `json` |
 | `timeout` | `300` | API timeout in seconds; `false` disables it |
 | `max-token` | `20480` | Maximum response tokens; `false` omits it |
-| `max-rounds` | `3` | Inspection-turn limit; one final answer turn is separate |
-| `max-tool-calls` | `8` | Hard tool-call limit per run |
+| `max-rounds` | `6` | Inspection-turn limit; one final answer turn is separate |
+| `max-tool-calls` | `16` | Actual tool-start limit per query |
 | `max-parallel` | `4` | Maximum concurrent tool calls |
+| `query-timeout` | `120` | Automatic query deadline in seconds, including model and tools |
+| `diagnostics` | `false` | Emit structured events and counters to stderr |
 | `command-timeout` | `30` | Hard deadline per command, seconds |
 | `max-output-bytes` | `1048576` | Captured bytes per command |
 | `command-pattern` | semantic policy only | Optional supplemental forbidden-command regex |
@@ -220,22 +193,17 @@ source text and respect the current rendering setting.
 
 Markdown code examples and old HTML action markers are always answer text. `legacy` configuration values migrate to `json`; explicit JSON/native tool actions still pass the safety gate.
 
-The current review also closes quoting, glob-option injection, RPM macro,
-nft/tmux embedded-command, and abbreviated `ip` mutation paths. Use an explicit
-revision for blame, such as `git blame --no-textconv HEAD -- file`, to avoid
-working-tree clean filters. See [the v3 review record](CODE_REVIEW-v3.md).
-
 ## Cache behavior
 
-v3 caching never spends another model call deciding what to cache.
+Caching does not spend a model call deciding what to cache. Schema 4 stores typed query plans; old entries do not share the new capability context.
 
-- A successful terminal run with one command stores a context-specific command.
+- A successful single-step raw query stores a context-specific typed plan.
 - A cache hit performs zero model calls, revalidates the command, and re-executes it so dynamic information stays current.
 - Explicit text-only requests never execute a cached command; a cached final
   text result may still be returned without a provider or tool call.
-- `--cache` may store a final text result when there is no reusable command.
+- `--cache` may store a final text result when there is no reusable plan; hits show its original sample time.
 - Multi-step results are not guessed into a cache entry.
-- SHA-256 keys include v3, working directory, provider URL, model, harness, protocol, shell, custom prompt, command policy, OS, and architecture. v2 entries cannot collide.
+- SHA-256 keys include v4, tool/backend capabilities, execution limits, working directory, provider URL, model, harness, protocol, shell, custom prompt, command policy, OS, and architecture. Older entries cannot collide.
 - Writers hold a short cross-process lock around read-modify-write, so simultaneous `get` processes do not lose entries.
 - Snapshots are flushed and atomically replaced with mode `0600` on POSIX. A last-good `.bak` snapshot is used automatically if the primary is damaged.
 - Files and fields are schema-validated and size-bounded; expiry, duplicate replacement, and oldest-entry eviction are deterministic.

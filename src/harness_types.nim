@@ -13,17 +13,22 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[strutils]
+import std/[strutils, monotimes]
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 ## Default number of model turns available to an automatic harness run.
-const DEFAULT_HARNESS_TURNS* = 3
+const DEFAULT_HARNESS_TURNS* = 6
 
 ## Default maximum number of tool calls available to one harness run.
-const DEFAULT_TOOL_CALLS* = 8
+const DEFAULT_TOOL_CALLS* = 16
+
+const DEFAULT_QUERY_TIMEOUT* = 120
+const DEFAULT_ANSWER_RESERVE* = 20
+const MAX_PROPOSALS_PER_TURN* = 16
+const MAX_RECOVERY_TURNS* = 2
 
 ## Default maximum number of independent tool calls executed together.
 const DEFAULT_PARALLELISM* = 4
@@ -68,12 +73,32 @@ type
 
 ## Describes one read-only tool invocation proposed by the model.
 type
+  ToolInvocationKind* = enum
+    tikShell, tikProcess, tikEnvironment, tikReadFile, tikSearchFiles
+
   ToolCall* = object
     id*: string                  ## Provider call identifier or local fallback ID.
     toolName*: string            ## Registered tool name.
     command*: string             ## Exact read-only shell command to execute.
     purpose*: string             ## Short user-facing reason for the invocation.
     resultMode*: ToolResultMode  ## Terminal or model-feedback behavior.
+    invocationKind*: ToolInvocationKind
+    argumentsJson*: string      ## Validated arguments for tracing and identity.
+    executable*: string
+    argv*: seq[string]
+    cwd*: string
+    shell*: string
+    names*: seq[string]
+    path*: string
+    pattern*: string
+    startLine*: int
+    limit*: int
+    offset*: int
+    includeIgnored*: bool
+    contentSearch*: bool
+    fresh*: bool                ## Request a new sample instead of a cached observation.
+    required*: bool             ## Whether this fact is necessary for task completion.
+    evidenceKey*: string        ## Same key identifies a repaired essential fact.
 
 ## Describes one provider-independent action produced by the model.
 type
@@ -84,10 +109,16 @@ type
 
 ## Captures the bounded result of one tool invocation.
 type
+  ObservationStatus* = enum
+    osCompleted, osNoMatch, osFinding, osUnavailable, osDenied, osUnsupported,
+    osTimedOut, osTruncated, osReused
+
   ToolObservation* = object
     callId*: string       ## Identifier of the originating tool call.
     toolName*: string     ## Name of the tool that produced the observation.
     command*: string      ## Exact command that was executed.
+    argumentsJson*: string
+    identity*: string
     proposedCommand*: string ## Original proposal when safety review rewrote it.
     output*: string       ## Captured, size-bounded combined output.
     exitCode*: int        ## Child-process exit code.
@@ -95,6 +126,18 @@ type
     timedOut*: bool       ## Whether execution exceeded its timeout.
     truncated*: bool      ## Whether output exceeded its byte budget.
     policyRejected*: bool ## Whether policy denied it before any execution.
+    status*: ObservationStatus
+    originalStatus*: ObservationStatus ## Semantic status retained when reusing a sample.
+    notExecuted*: bool
+    required*: bool
+    sampledAt*: string
+    source*: string
+    stdout*: string
+    stderr*: string
+    moreData*: bool
+    evidenceKey*: string
+    feedbackCompacted*: bool
+    originalOutputBytes*: int
 
   ## Applies hard resource limits to a complete harness run.
 type
@@ -104,6 +147,9 @@ type
     maxParallel*: int        ## Maximum calls executed concurrently.
     commandTimeoutSec*: int  ## Per-command timeout; zero means no limit.
     maxOutputBytes*: int     ## Per-command output cap; zero means no limit.
+    totalTimeoutSec*: int    ## Whole-query deadline; zero only for embedding/tests.
+    answerReserveSec*: int
+    executionDeadline*: MonoTime ## Absolute shared deadline for queued tools; zero means unset.
 
 ## Identifies an event emitted by the harness state machine.
 type
@@ -112,7 +158,10 @@ type
     hekModelStarted      ## A model turn has started.
     hekModelCompleted    ## A model turn has completed.
     hekActionProposed    ## A typed action has been decoded.
-    hekToolStarted       ## A tool call has started.
+    hekToolProposed      ## A tool proposal awaits authorization.
+    hekBatchStarted      ## An authorized batch is being dispatched.
+    hekRunSummary        ## Measured counters for one completed run.
+    hekToolAuthorized       ## A tool call is authorized and ready for the executor.
     hekToolCompleted     ## A tool call has completed.
     hekRunCompleted      ## The run completed successfully.
     hekRunFailed         ## The run failed or exhausted its budget.
@@ -146,6 +195,10 @@ type
     modelTurns*: int       ## Number of completed logical model turns.
     modelRequests*: int    ## Physical provider requests, including retries.
     toolCalls*: int        ## Number of started tool calls.
+    toolProposals*: int
+    toolRejections*: int
+    toolReuses*: int
+    recoveryTurns*: int
     inputOutputTokens*: int ## Total tokens reported by providers.
     elapsedMs*: int64      ## Complete run wall-clock duration.
 
@@ -159,6 +212,7 @@ type
     metrics*: RunMetrics                ## Resource-use summary.
     termination*: HarnessTermination    ## Stable reason the run stopped.
     refused*: bool                      ## Whether the model explicitly refused.
+    partial*: bool                      ## One or more observations remain unavailable.
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -278,5 +332,7 @@ func defaultRunBudget*(kind: HarnessKind): RunBudget =
       else:
         1,
     commandTimeoutSec: DEFAULT_COMMAND_TIMEOUT,
-    maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES
+    maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
+    totalTimeoutSec: DEFAULT_QUERY_TIMEOUT,
+    answerReserveSec: DEFAULT_ANSWER_RESERVE
   )

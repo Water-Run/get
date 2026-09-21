@@ -18,9 +18,9 @@ concurrency:
 
 env:
   NIM_VERSION: 2.2.10
-  RELEASE_VERSION: 3.2.0
+  RELEASE_VERSION: 4.0.0
   # Refresh only after the no-assembly payload passes the recorded provider gates.
-  PROVIDER_VALIDATED_LINUX_SHA256: 757b984d66252a014cedfec71527c7d7788f6936c1b20a05ee2a7f8b6adf8fce
+  PROVIDER_VALIDATED_LINUX_SHA256: ""
 
 jobs:
   linux-amd64:
@@ -41,11 +41,15 @@ jobs:
       - name: Install dependencies
         run: nimble -y install --depsOnly
 
+      - name: Prepare Linux query capabilities
+        run: bash scripts/ci_prepare_bwrap.sh
+
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py get_test_v4.py scripts/verify_provider_validation.py tests/replay/v4_cases.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
+          python3 tests/test_provider_validation.py -v
           if git grep -IlE 'sk-[[:alnum:]_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- .; then
             echo "Potential credential material found in tracked files" >&2
             exit 1
@@ -62,14 +66,14 @@ jobs:
           mkdir -p .ci
           for test_file in tests/test_*.nim; do
             test_name=$(basename "$test_file" .nim)
-            nim c -r -d:release -d:getTest --path:src \
+            nim c --parallelBuild:1 -r -d:release -d:getTest --path:src \
               --nimcache:".ci/nimcache-$test_name" \
               --out:".ci/$test_name" "$test_file"
           done
 
       - name: Build Linux release binary
         run: |
-          nim c -d:release --path:src \
+          nim c --parallelBuild:1 -d:release --path:src \
             --nimcache:.ci/nimcache-get \
             --out:.ci/get-linux-x64 src/get.nim
           .ci/get-linux-x64 --version
@@ -77,7 +81,7 @@ jobs:
 
       - name: Verify Linux HTTPS runtime
         run: |
-          nim c -r -d:release --path:src \
+          nim c --parallelBuild:1 -r -d:release --path:src \
             --nimcache:.ci/nimcache-https \
             --out:.ci/release-https-smoke tests/release_https_smoke.nim
 
@@ -87,6 +91,29 @@ jobs:
           GET_V3_TARGET_OS: linux
           GET_V3_TEST_SHELL: bash
         run: python3 tests/test_cli_v3.py -v
+
+      - name: Run fish CLI queries
+        env:
+          GET_V3_BINARY: ${{ github.workspace }}/.ci/get-linux-x64
+          GET_V3_TARGET_OS: linux
+          GET_V3_TEST_SHELL: fish
+        run: python3 tests/test_cli_v3.py -v
+
+      - name: Verify typed readers with computation unavailable
+        env:
+          GET_V3_BINARY: ${{ github.workspace }}/.ci/get-linux-x64
+          GET_V3_TARGET_OS: linux
+          GET_V3_TEST_SHELL: bash
+        run: |
+          set -euo pipefail
+          sudo mv /usr/bin/bwrap /usr/bin/bwrap-get-ci-disabled
+          trap 'sudo mv /usr/bin/bwrap-get-ci-disabled /usr/bin/bwrap' EXIT
+          python3 tests/test_cli_v3.py -v \
+            GetV3CliTests.test_01_native_terminal_call \
+            GetV3CliTests.test_09v4_environment_uses_typed_host_values \
+            GetV3CliTests.test_09v4_file_page_runs_through_native_protocol \
+            GetV3CliTests.test_09v4_search_honors_literal_root_and_pattern \
+            GetV3CliTests.test_09v4_git_status_disables_executable_filters
 
       - name: Smoke-test Linux installer
         run: |
@@ -137,8 +164,9 @@ jobs:
         shell: pwsh
         run: |
           nimble check
-          python -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python -m py_compile get_ready.py get_test.py get_test_v4.py scripts/verify_provider_validation.py tests/replay/v4_cases.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
+          python tests/test_provider_validation.py -v
 
       - name: Run Windows Nim unit tests
         shell: pwsh
@@ -146,7 +174,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           Get-ChildItem tests/test_*.nim | Sort-Object Name | ForEach-Object {
             $name = $_.BaseName
-            nim c -r -d:release -d:getTest --path:src `
+            nim c --parallelBuild:1 -r -d:release -d:getTest --path:src `
               --nimcache:".ci/nimcache-$name" `
               --out:".ci/$name.exe" $_.FullName
             if ($LASTEXITCODE -ne 0) {
@@ -157,7 +185,7 @@ jobs:
       - name: Build Windows release binary
         shell: pwsh
         run: |
-          nim c -d:release --path:src `
+          nim c --parallelBuild:1 -d:release --path:src `
             --nimcache:.ci/nimcache-get `
             --out:.ci/get-windows-x64.exe src/get.nim
           if ($LASTEXITCODE -ne 0) {
@@ -168,7 +196,7 @@ jobs:
       - name: Verify HTTPS with packaged OpenSSL
         shell: pwsh
         run: |
-          nim c -r -d:release --path:src `
+          nim c --parallelBuild:1 -r -d:release --path:src `
             --nimcache:.ci/nimcache-https `
             --out:.ci/release-https-smoke.exe tests/release_https_smoke.nim
 
@@ -252,8 +280,9 @@ jobs:
       - name: Validate sources
         run: |
           nimble check
-          python3 -m py_compile get_ready.py get_test.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
+          python3 -m py_compile get_ready.py get_test.py get_test_v4.py scripts/verify_provider_validation.py tests/replay/v4_cases.py scripts/build_release_assets.py scripts/verify_release_install.py tests/mock_openai_provider.py tests/test_cli_v3.py
           git diff --check
+          python3 tests/test_provider_validation.py -v
 
       - name: Run macOS Nim unit tests
         run: |
@@ -261,14 +290,14 @@ jobs:
           mkdir -p .ci
           for test_file in tests/test_*.nim; do
             test_name=$(basename "$test_file" .nim)
-            nim c -r -d:release -d:getTest --path:src \
+            nim c --parallelBuild:1 -r -d:release -d:getTest --path:src \
               --nimcache:".ci/nimcache-$test_name" \
               --out:".ci/$test_name" "$test_file"
           done
 
       - name: Build macOS arm64 release binary
         run: |
-          nim c -d:release --path:src \
+          nim c --parallelBuild:1 -d:release --path:src \
             --nimcache:.ci/nimcache-get \
             --out:.ci/get-macos-arm64 src/get.nim
           .ci/get-macos-arm64 --version
@@ -277,7 +306,7 @@ jobs:
 
       - name: Verify macOS HTTPS runtime
         run: |
-          nim c -r -d:release --path:src \
+          nim c --parallelBuild:1 -r -d:release --path:src \
             --nimcache:.ci/nimcache-https \
             --out:.ci/release-https-smoke tests/release_https_smoke.nim
 
@@ -358,11 +387,11 @@ jobs:
             "$package_dir/OPENSSL-LICENSE.txt"
           install -m 0644 licenses/ZLIB.txt \
             "$package_dir/ZLIB-LICENSE.txt"
-          install -m 0644 RELEASE_NOTES-v3.2.0.md \
+          install -m 0644 RELEASE_NOTES-v4.0.0.md \
             "$package_dir/RELEASE_NOTES.md"
-          install -m 0644 VALIDATION-v3.2.0.md \
+          install -m 0644 VALIDATION-v4.0.0.md \
             "$package_dir/VALIDATION.md"
-          install -m 0644 provider-validation-v3.2.0.json \
+          install -m 0644 provider-validation-v4.0.0.json \
             "$package_dir/PROVIDER_VALIDATION.json"
 
           printf '%s  %s\n' "$PROVIDER_VALIDATED_LINUX_SHA256" \
@@ -385,21 +414,10 @@ jobs:
           )
           with open(os.path.join(package_dir, "PROVIDER_VALIDATION.json"), encoding="utf-8") as handle:
               provider_record = json.load(handle)
-          assert provider_record["status"] == "passed"
-          assert provider_record["version"] == os.environ["RELEASE_VERSION"]
-          assert provider_record["linux_payload_sha256"] == os.environ["PROVIDER_VALIDATED_LINUX_SHA256"]
-          assert provider_record["providers"]
-          assert provider_record["live_configuration_preserved"]
-          assert provider_record["cases"]
-          assert all(case["passed"] for case in provider_record["cases"])
-          provider_lines = []
-          for name, provider in provider_record["providers"].items():
-              for suite, counts in provider.items():
-                  if suite == "model":
-                      continue
-                  assert counts["failed"] == 0 and counts["skipped"] == 0
-                  assert counts["passed"] == counts["expected"]
-                  provider_lines.append(f"- {name} `{provider['model']}` {suite}: {counts['passed']}/{counts['expected']}")
+          from scripts.verify_provider_validation import validate_attestation
+          provider_lines = validate_attestation(
+              provider_record, os.environ["RELEASE_VERSION"],
+              os.environ["PROVIDER_VALIDATED_LINUX_SHA256"])
           provider_details = "\n".join(provider_lines)
           payload_lines = []
           for filename in [
@@ -583,10 +601,10 @@ jobs:
       - name: Upload verified release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: get-v3.2.0-release-candidate-${{ github.sha }}
+          name: get-v4.0.0-release-candidate-${{ github.sha }}
           path: |
-            dist/get-v3.2.0.zip
-            dist/get-v3.2.0.zip.sha256
+            dist/get-v4.0.0.zip
+            dist/get-v4.0.0.zip.sha256
             dist/package/BUILDINFO.json
             dist/package/SHA256SUMS
           if-no-files-found: error

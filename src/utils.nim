@@ -29,7 +29,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "3.2.0"
+const APP_VERSION* = "4.0.0"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"

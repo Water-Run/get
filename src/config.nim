@@ -78,10 +78,10 @@ const DEFAULT_VIVID* = true
 const DEFAULT_MARKDOWN* = true
 
 ## Default maximum number of model turns in one harness run.
-const DEFAULT_MAX_ROUNDS* = 3
+const DEFAULT_MAX_ROUNDS* = DEFAULT_HARNESS_TURNS
 
 ## Current on-disk configuration schema version.
-const DEFAULT_SCHEMA_VERSION* = 3
+const DEFAULT_SCHEMA_VERSION* = 4
 
 ## Default unified harness strategy.
 const DEFAULT_HARNESS* = "auto"
@@ -140,6 +140,7 @@ type
     systemPrompt*: Option[string]    ## Custom system prompt.
     shell*: string                   ## Shell executable.
     log*: bool                       ## Log requests.
+    diagnostics*: bool               ## Emit structured query events to stderr.
     hideProcess*: bool               ## Hide intermediate output.
     systemProxy*: bool               ## Prefer system proxy settings.
     cache*: bool                     ## Enable response cache.
@@ -151,6 +152,7 @@ type
     maxRounds*: int                  ## Max inspection turns; one final answer turn follows.
     maxToolCalls*: int               ## Max tool calls per harness run.
     maxParallel*: int                ## Max concurrent tool calls.
+    queryTimeout*: int               ## Whole-query deadline, including final answer.
     commandTimeout*: int             ## Per-command deadline in seconds.
     maxOutputBytes*: int             ## Per-command capture limit.
 
@@ -501,6 +503,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "maxToken":        cfg.maxToken,
     "shell":           cfg.shell,
     "log":             cfg.log,
+    "diagnostics":     cfg.diagnostics,
     "hideProcess":     cfg.hideProcess,
     "systemProxy":      cfg.systemProxy,
     "cache":           cfg.cache,
@@ -512,6 +515,7 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "maxRounds":       cfg.maxRounds,
     "maxToolCalls":    cfg.maxToolCalls,
     "maxParallel":     cfg.maxParallel,
+    "queryTimeout":    cfg.queryTimeout,
     "commandTimeout":  cfg.commandTimeout,
     "maxOutputBytes":  cfg.maxOutputBytes
   }
@@ -576,6 +580,7 @@ proc implJsonToConfig(
       defaults.maxToken),
     shell: storedShell,
     log: node{"log"}.getBool(defaults.log),
+    diagnostics: node{"diagnostics"}.getBool(false),
     hideProcess: node{"hideProcess"}.getBool(
       defaults.hideProcess),
     systemProxy: node{"systemProxy"}.getBool(
@@ -602,6 +607,8 @@ proc implJsonToConfig(
       if storedMaxParallel in 1 .. MAX_HARNESS_PARALLEL:
         storedMaxParallel
       else: defaults.maxParallel,
+    queryTimeout: (if node{"queryTimeout"}.getInt(DEFAULT_QUERY_TIMEOUT) in 1 .. 3600:
+      node{"queryTimeout"}.getInt(DEFAULT_QUERY_TIMEOUT) else: DEFAULT_QUERY_TIMEOUT),
     commandTimeout:
       if storedCommandTimeout in 1 .. MAX_COMMAND_TIMEOUT:
         storedCommandTimeout
@@ -664,6 +671,7 @@ func defaultConfig*(): Config =
     maxRounds:       DEFAULT_MAX_ROUNDS,
     maxToolCalls:    DEFAULT_MAX_TOOL_CALLS,
     maxParallel:     DEFAULT_MAX_PARALLEL,
+    queryTimeout:    DEFAULT_QUERY_TIMEOUT,
     commandTimeout:  DEFAULT_COMMAND_TIMEOUT,
     maxOutputBytes:  DEFAULT_MAX_OUTPUT_BYTES
   )
@@ -870,6 +878,8 @@ proc displayConfig*(sk: StyleKind = skSimp) =
   styleConfigValue(sk, "max-parallel",
     formatIntOrDisable(cfg.maxParallel),
     classifyInt(cfg.maxParallel, 1, 16))
+  styleConfigValue(sk, "query-timeout", $cfg.queryTimeout,
+    classifyInt(cfg.queryTimeout, 1, 3600))
   styleConfigValue(sk, "command-timeout",
     formatIntOrDisable(cfg.commandTimeout),
     classifyInt(cfg.commandTimeout, 1, 3600))
@@ -889,6 +899,7 @@ proc displayConfig*(sk: StyleKind = skSimp) =
     classifyShell(cfg.shell))
   styleConfigValue(sk, "log", $cfg.log,
     classifyBool(cfg.log))
+  styleConfigValue(sk, "diagnostics", $cfg.diagnostics, classifyBool(cfg.diagnostics))
   styleConfigValue(sk, "hide-process",
     $cfg.hideProcess, classifyBool(cfg.hideProcess))
   styleConfigValue(sk, "system-proxy",
@@ -1036,6 +1047,8 @@ proc setConfigOption*(
   of "log":
     cfg.log = implParseBool(
       value, name, DEFAULT_LOG)
+  of "diagnostics":
+    cfg.diagnostics = implParseBool(value, name, false)
   of "hide-process":
     cfg.hideProcess = implParseBool(
       value, name, DEFAULT_HIDE_PROCESS)
@@ -1072,6 +1085,8 @@ proc setConfigOption*(
     cfg.maxParallel = implParsePositiveInt(
       value, name, DEFAULT_MAX_PARALLEL,
       MAX_HARNESS_PARALLEL)
+  of "query-timeout":
+    cfg.queryTimeout = implParsePositiveInt(value, name, DEFAULT_QUERY_TIMEOUT, 3600)
   of "command-timeout":
     cfg.commandTimeout = implParsePositiveInt(
       value, name, DEFAULT_COMMAND_TIMEOUT,

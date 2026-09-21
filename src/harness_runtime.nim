@@ -16,6 +16,7 @@ import std/[json, monotimes, strformat, strutils, times]
 
 import harness_protocol
 import harness_types
+import observations
 import llm
 import utils
 
@@ -168,18 +169,7 @@ proc implAppendFeedback(
   observations: seq[ToolObservation]
 ) =
   func compactForModel(observation: ToolObservation): ToolObservation =
-    result = observation
-    if result.output.len <= MAX_MODEL_FEEDBACK_BYTES:
-      return
-    var prefixBytes = MAX_MODEL_FEEDBACK_BYTES
-    while prefixBytes > 0 and prefixBytes < result.output.len and
-        (byte(result.output[prefixBytes]) and 0xC0'u8) == 0x80'u8:
-      prefixBytes -= 1
-    let originalBytes = result.output.len
-    result.output = result.output[0 ..< prefixBytes] &
-      fmt"\n[model feedback compacted: first {prefixBytes} of " &
-      fmt"{originalBytes} bytes]"
-    result.truncated = true
+    compactObservation(observation, MAX_MODEL_FEEDBACK_BYTES)
 
   if response.toolCalls.len > 0:
     messages.add(LlmMessage(
@@ -304,9 +294,17 @@ proc runHarness*(
   ))
 
   var finishOnly = false
+  var recoveryPending = false
   let totalTurns = options.budget.maxTurns + (if options.kind == hkDirect: 0 else: 1)
   for turn in 1 .. totalTurns:
+    if options.budget.totalTimeoutSec > 0 and
+        implElapsedMs(started) >= int64(max(0, options.budget.totalTimeoutSec -
+          options.budget.answerReserveSec)) * 1000:
+      finishOnly = true
     let finalizing = finishOnly or (options.kind != hkDirect and turn == totalTurns)
+    if recoveryPending and not finalizing:
+      metrics.recoveryTurns += 1
+      recoveryPending = false
     if finalizing:
       messages.add(LlmMessage(role: "user", content:
         "Inspection is complete. No more tools are available. Answer the original " &
@@ -390,6 +388,10 @@ proc runHarness*(
         message: "invalid textual action; requesting protocol correction",
         elapsedMs: implElapsedMs(started)
       ))
+      if metrics.recoveryTurns >= MAX_RECOVERY_TURNS:
+        finishOnly = true
+      else:
+        recoveryPending = true
       continue
     implEmit(options, HarnessEvent(
       kind: hekActionProposed,
@@ -400,9 +402,11 @@ proc runHarness*(
     ))
     case action.kind
     of hakAnswer:
+      let evidence = answerEvidenceStatus(observations)
       let value = HarnessResult(
         output: action.text,
-        exitCode: 0,
+        exitCode: evidence.code,
+        partial: evidence.partial,
         finalCommand: "",
         observations: observations,
         metrics: metrics,
@@ -462,10 +466,12 @@ proc runHarness*(
       if remainingCalls <= 0:
         finishOnly = true
         continue
-      let selectedCalls = action.calls[0 ..< min(action.calls.len, remainingCalls)]
+      metrics.toolProposals += action.calls.len
+      let selectedCalls = action.calls[0 ..< min(action.calls.len,
+        min(remainingCalls, MAX_PROPOSALS_PER_TURN))]
       for call in selectedCalls:
         implEmit(options, HarnessEvent(
-          kind: hekToolStarted,
+          kind: hekToolProposed,
           turn: turn,
           callId: call.id,
           message: call.purpose,
@@ -490,7 +496,13 @@ proc runHarness*(
           raise newException(GetError,
             "tool executor returned an observation that does not match " &
               "its proposed call")
-      metrics.toolCalls += selectedCalls.len
+      for observation in batch:
+        if observation.policyRejected:
+          metrics.toolRejections += 1
+        elif observation.status == osReused:
+          metrics.toolReuses += 1
+        elif not observation.notExecuted:
+          metrics.toolCalls += 1
       # Every native proposal still receives a matching observation. Calls
       # outside the budget are inert; do not discard the useful permitted prefix.
       for index in selectedCalls.len ..< action.calls.len:
@@ -498,7 +510,8 @@ proc runHarness*(
         batch.add(ToolObservation(callId: call.id, toolName: call.toolName,
           command: call.command, output:
             "Tool budget reached: this proposal was not executed. Answer from " &
-            "the available observations.", exitCode: 125))
+            "the available observations.", exitCode: 125, notExecuted: true,
+          status: osUnsupported, required: call.required, evidenceKey: call.evidenceKey))
       for observation in batch:
         observations.add(observation)
         implEmit(options, HarnessEvent(
@@ -506,7 +519,7 @@ proc runHarness*(
           turn: turn,
           callId: observation.callId,
           message: $observation.exitCode,
-          elapsedMs: observation.elapsedMs
+          elapsedMs: implElapsedMs(started)
         ))
 
       if options.kind == hkDirect:
@@ -530,8 +543,11 @@ proc runHarness*(
       implAppendFeedback(messages, response, batch)
       finishOnly = metrics.toolCalls >= options.budget.maxToolCalls
       for observation in batch:
-        if observation.timedOut or observation.truncated:
-          finishOnly = true
+        if not observationSucceeded(observation):
+          if metrics.recoveryTurns >= MAX_RECOVERY_TURNS:
+            finishOnly = true
+          else:
+            recoveryPending = true
 
   let value = HarnessResult(
     output: implIncompleteOutput(observations),

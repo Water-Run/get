@@ -141,7 +141,7 @@ suite "v3 cache identity":
       writeFile(path, "{\"entries\":[]}")
       let schemaRecovery = loadCache()
       check schemaRecovery.entries.len == 1
-      writeFile(path, "{\"schemaVersion\":3," &
+      writeFile(path, "{\"schemaVersion\":" & $CACHE_SCHEMA_VERSION & "," &
         "\"hashAlgorithm\":\"md5\",\"entries\":[]}")
       let algorithmRecovery = loadCache()
       check algorithmRecovery.entries.len == 1

@@ -1,0 +1,8 @@
+{
+  "schema_version": 4,
+  "version": "4.0.0",
+  "status": "pending",
+  "linux_payload_sha256": "",
+  "live_configuration_preserved": true,
+  "replays": []
+}

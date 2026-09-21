@@ -19,6 +19,7 @@ import harness_runtime
 import harness_types
 import llm
 import utils
+import observations
 
 ## Builds one successful observation for a proposed call.
 ##
@@ -322,7 +323,9 @@ suite "unified harness runtime":
     )
     check modelCalls == 2
     check value.output == "safe revision completed"
-    check value.exitCode == 0
+    check value.exitCode == 1
+    check value.metrics.toolCalls == 0
+    check value.metrics.toolRejections == 1
     check value.observations.len == 1
     check value.observations[0].policyRejected
     check value.termination == htAnswer
@@ -562,7 +565,7 @@ suite "unified harness runtime":
           finishReason: "tool_calls"
         )
       check messages[^1].role == "tool"
-      check messages[^1].content.contains("model feedback compacted")
+      check messages[^1].content.contains("feedback excerpt")
       check messages[^1].content.len < 14_000
       result = LlmResponse(
         content: "Mostly Nim source with Python tests.",
@@ -1129,3 +1132,85 @@ suite "unified harness runtime":
         model,
         tools
       )
+
+
+suite "v4 recovery and evidence":
+  test "denial does not spend the last execution and repair resolves required evidence":
+    var turns = 0
+    let model: ModelTurnProc = proc(messages: seq[LlmMessage],
+        enableNativeTools, allowParallel: bool): LlmResponse =
+      inc turns
+      if turns == 1:
+        return LlmResponse(content: """{"type":"tool_calls","calls":[{"command":"unknown-reader","required":true,"evidence_key":"system"}]}""")
+      if turns == 2:
+        check enableNativeTools
+        return LlmResponse(content: """{"type":"tool_calls","calls":[{"command":"uname","required":true,"evidence_key":"system"}]}""")
+      check not enableNativeTools
+      LlmResponse(content: "system observed")
+    let tools: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      var value = fakeObservation(calls[0])
+      value.required = calls[0].required
+      value.evidenceKey = calls[0].evidenceKey
+      if turns == 1:
+        value.exitCode = 126
+        value.policyRejected = true
+        value.notExecuted = true
+        value.status = osUnsupported
+      result = @[value]
+    var budget = defaultRunBudget(hkAuto)
+    budget.maxToolCalls = 1
+    let value = runHarness(initialMessages(), HarnessRunOptions(kind: hkAuto,
+      protocol: tpkNative, budget: budget), model, tools)
+    check value.exitCode == 0
+    check not value.partial
+    check value.metrics.toolCalls == 1
+    check value.metrics.toolProposals == 2
+    check value.metrics.toolRejections == 1
+    check value.metrics.recoveryTurns == 1
+
+  test "one truncated step permits focused recovery without losing sibling evidence":
+    var turns = 0
+    let model: ModelTurnProc = proc(messages: seq[LlmMessage],
+        enableNativeTools, allowParallel: bool): LlmResponse =
+      inc turns
+      if turns == 1:
+        return LlmResponse(content: """{"type":"tool_calls","calls":[{"id":"large","command":"ls"},{"id":"good","command":"pwd"}]}""")
+      if turns == 2:
+        check enableNativeTools
+        check messages[^1].content.contains("output:pwd")
+        return LlmResponse(content: """{"type":"tool_calls","calls":[{"command":"ls src"}]}""")
+      LlmResponse(content: "partial view with narrowed inspection")
+    let tools: ToolBatchProc = proc(calls: seq[ToolCall],
+        maxParallel: int): seq[ToolObservation] =
+      for call in calls:
+        var value = fakeObservation(call)
+        if call.id == "large": value.truncated = true
+        result.add(value)
+    let value = runHarness(initialMessages(), HarnessRunOptions(kind: hkAuto,
+      protocol: tpkNative, budget: defaultRunBudget(hkAuto)), model, tools)
+    check value.exitCode == 0
+    check value.observations.len == 3
+    check value.metrics.recoveryTurns == 1
+
+  test "feedback preserves final totals and does not invent execution truncation":
+    let value = compactObservation(ToolObservation(output:
+      "first\n" & repeat("中间", 4000) & "\nTOTAL=45", exitCode: 0), 1024)
+    check value.output.startsWith("first")
+    check value.output.endsWith("TOTAL=45")
+    check value.feedbackCompacted
+    check not value.truncated
+    check observationSucceeded(value)
+
+  test "required failures cannot be hidden by optional successful observations":
+    let values = @[ToolObservation(callId: "required", required: true,
+      exitCode: 1), ToolObservation(callId: "optional", exitCode: 0)]
+    check answerEvidenceStatus(values) == (1, true)
+
+
+suite "v4 reused negative evidence":
+  test "a reused no-match remains a successful required observation":
+    let value = ToolObservation(callId: "negative", toolName: "run_process",
+      command: "literal process query", exitCode: 1, status: osReused,
+      originalStatus: osNoMatch, notExecuted: true, required: true)
+    check answerEvidenceStatus(@[value]) == (0, false)

@@ -481,3 +481,16 @@ suite "bounded command execution":
       check value.elapsedMs >= 900
       check value.elapsedMs < 2_000
       check value.exitCode != 0
+
+
+suite "v4 separated streams":
+  test "stderr stays separate while combined capture is retained":
+    when defined(windows):
+      let value = executeCommandBounded("echo data & echo warning 1>&2", "cmd", 5, 1024)
+    else:
+      let value = executeCommandBounded("printf data; printf warning >&2", "sh", 5, 1024)
+    check value.exitCode == 0
+    check value.stdout.strip() == "data"
+    check value.stderr.strip() == "warning"
+    check value.output.contains("data")
+    check value.output.contains("warning")

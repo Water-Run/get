@@ -8,6 +8,7 @@ import struct
 import tempfile
 from datetime import datetime
 import zipfile
+from verify_provider_validation import validate_attestation
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -46,6 +47,8 @@ def main():
     assert info["provider_validation"] == provider
     assert provider["status"] == "passed"
     assert digest(flat["get-linux-x64"]) == provider["linux_payload_sha256"]
+    if version.startswith('4.'):
+        validate_attestation(provider, version, digest(flat["get-linux-x64"]))
     declared = checksums(flat["SHA256SUMS"])
     assert set(declared) == set(flat) - {"SHA256SUMS"}
     assert all(digest(flat[name]) == checksum for name, checksum in declared.items())

@@ -4,7 +4,7 @@
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-09-10" "get 3.2.0" "User Commands"
+.TH GET 1 "2026-09-21" "get 4.0.0" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -44,7 +44,7 @@ get \- get anything from your computer
 .B get
 sends a natural-language query to an OpenAI-compatible model and performs
 read-only local inspection when a shell command is required.
-Version 3 uses one typed
+Version 4 uses one typed
 .I model/action/policy/tool/observation
 state machine instead of separate instance and marker-driven agent paths.
 .PP
@@ -134,7 +134,7 @@ Show the application name.
 Show the introduction.
 .TP
 .B \-\-version
-Show version 3.2.0.
+Show version 4.0.0.
 .TP
 .B \-\-author
 Show the author.
@@ -148,7 +148,7 @@ Show the repository URL.
 .SS version
 .B get version
 .PP
-Displays version 3.2.0. The standard aliases
+Displays version 4.0.0. The standard aliases
 .B \-\-version
 and
 .B \-V
@@ -251,13 +251,19 @@ API timeout seconds. Default: 300.
 Maximum response tokens. Default: 20480.
 .TP
 .BI "max\-rounds " int
-Inspection-turn limit plus one tool-free final answer turn. Default: 3.
+Inspection-turn limit plus one tool-free final answer turn. Default: 6.
 .TP
 .BI "max\-tool\-calls " int
-Hard tool-call limit per run. Default: 8.
+Actual tool-start limit per query. Default: 16.
 .TP
 .BI "max\-parallel " int
 Maximum concurrent tool calls. Default: 4.
+.TP
+.BI "query\-timeout " int
+Whole automatic query deadline, including model and tools. Default: 120.
+.TP
+.BI "diagnostics " bool
+Structured query events and counters on stderr. Default: false.
 .TP
 .BI "command\-timeout " int
 Hard command deadline in seconds. Default: 30.
@@ -310,10 +316,10 @@ Cached answers are rendered using the current setting.
 v2 compatibility alias. true selects direct; false selects auto when stored.
 .
 .SH TOOL PROTOCOL
-The native shell function is named
-.BR run_readonly_shell .
-Its arguments contain command, purpose, and result_mode.
-result_mode is either return_raw or continue.
+The native tools are read_environment, read_file, search_files, run_process,
+and run_shell. They accept typed names, paths, paging arguments, literal argv,
+or a shell command respectively. required/evidence_key identify essential
+facts; fresh requests a new sample. run_readonly_shell is a compatibility alias.
 .PP
 With tool-protocol auto, provider HTTP 400/404/422 errors that identify
 unsupported tool fields trigger one structured-JSON retry for that run.
@@ -325,105 +331,63 @@ are not retried. Provider response bodies are limited to 8 MiB, and requests
 carrying bearer credentials do not follow redirects.
 .
 .SH SAFETY
-The non-configurable baseline accepts only a small grammar of simple commands,
-reader pipelines, and reader-only sequences, then validates every executable
-and its state-changing options. Unknown syntax and executables fail closed. It
-rejects substitution, background and grouped execution, scripts and wrappers,
-regular-file output redirection,
-inline interpreters, helper or config injection, mutating Git, container,
-cluster and package-manager operations, uploads, PowerShell splatting and
-script conversion, option abbreviations, glob-to-option injection, and unsafe
-short options.
+Typed environment and file readers do not execute shell text. Files are paged;
+search implements bounded literal content matching, path globs, and common
+ignore rules. Missing values, no matches, and incomplete pages are explicit.
 .PP
-A single literal-file input redirect is accepted only for validated data
-readers. Here-documents, here-strings, process substitution, input-descriptor
-duplication, expansion, multiple input redirects, and read/write redirection
-remain rejected. Output-descriptor duplication is limited to existing
-stdout/stderr.
+Known host queries validate executable arguments and observe real host state.
+General scripts and complex shell computation are enabled only on Linux when
+the complete isolation probe succeeds. Namespaces, read-only host mounts,
+seccomp and resource limits restrict writes to private scratch space and block
+network/control sockets, host process control and device control. The parent
+cleans scratch space. macOS and Windows provide typed readers and known host
+queries; arbitrary computation is unavailable there.
 .PP
-Shell aliases and null devices are checked per platform. Only supported shells
-from trusted executable paths can be configured. The shell and every bare
-reader resolve through a system-first PATH with the current workspace and
-temporary directories removed. Shell profiles are disabled, and child
-environments remove loader, runtime, Git, pager, tracing, and tool-config
-injection variables. curl reads require leading -q; wget reads require
---no-config, --no-hsts, and -O-.
+Ordinary Git status/diff use a private metadata snapshot without writing the
+real index. Executable filters, textconv, fsmonitor and submodule inspection
+are disabled. Global excludes, upstream settings and custom filtered results
+may differ from interactive Git; the observation identifies its source.
 .PP
-Practical bounded diagnostics are supported across platforms: top requires
--b and a finite -n count on Linux, or a finite -l count on macOS; Windows can
-use native Get-Process, Get-CimInstance, and tasklist readers. Tool lookup with
-command -v, cd within the inspection shell, and serial xargs calls to wc, cat
-and checksum readers are accepted. xargs replacement, parallel spawning and
-write-capable children are rejected. AWK arithmetic, arrays, pure functions and END aggregation, and display-only
-sed address expressions are accepted. sed in-place
-mode, output commands, external program files, and command execution remain
-denied. On macOS, top -n 0 is accepted as a finite summary-only snapshot.
+All new, reviewed and cached plans share argument validation, backend selection,
+optional command-pattern restrictions, optional double-check and optional
+manual-confirm. Confirmation does not enable host mutation. Trusted shell
+startup hooks and injection variables are removed from child environments.
 .PP
-Additional exact or bounded readers cover free, sar, pidstat, traceroute, stable
-home/current-directory searches, tmux and cron queries, Secure Boot status,
-macOS metadata and package queries, Windows services, boot, BitLocker, WSL,
-DNS and network state, and common Go, .NET, Rust, Swift, Xcode, and Java
-environment inspection. Execute, write, install, export, live, and unbounded
-forms remain denied.
+Rejections and reused observations do not spend execution slots. A failed step
+can recover within the total budget, with at most two failure-recovery turns.
+Necessary evidence failures remain nonzero even when the model returns prose.
+stdout and stderr are separate; feedback compaction and actual capture
+truncation have distinct flags. fresh permits bounded repeat sampling.
 .PP
-git status and worktree-content git diff are rejected because repository-owned
-clean, textconv, and filter configuration can execute helpers. Use git branch
---show-current; git diff-files --name-only --no-ext-diff --no-textconv for
-modified tracked names; git ls-files --others --exclude-standard for untracked
-names; and git diff --cached --no-ext-diff --no-textconv for staged content.
-git show REV:PATH reads a blob directly. Other patch-rendering git show/log
-queries require both disabling options.
+Automatic execution uses query-timeout, command-timeout and max-output-bytes.
+Model requests and queued tools receive only the remaining deadline. A final
+answer turn reserves time and has no tools. Explicit interactive confirmation
+can wait for user input; no tool starts after its execution deadline.
 .PP
-The syntax-aware semantic policy is the default authority, so a dangerous word
-used as search or log data is not confused with execution. command-pattern is
-an explicitly configured supplemental organization policy and cannot disable
-the baseline.
-If double-check revises a command, both deterministic layers run again before
-confirmation or execution. Cached commands use the identical gate.
-.PP
-In auto, loop, and parallel modes, a baseline-policy denial is represented as
-a typed, non-executed observation so the model can propose a safer command
-within the inspection budget, with a separate tool-free answer turn. Every
-replacement is revalidated. Direct mode
-returns the denial without another model turn.
-.PP
-Commands execute with command-timeout and max-output-bytes. Exceeding the
-deadline returns 124. Exceeding the output cap truncates capture and stops the
-command. On POSIX the shell receives its own process group so cancellation
-stops descendants as well; Windows uses taskkill /T for the child tree.
-.PP
-This deterministic command gate provides fail-closed mutation resistance under
-the documented semantics of trusted reader binaries; it is not a
-confidentiality boundary. Linux uses bubblewrap and macOS uses Seatbelt for
-filesystem write denial when available, with a narrowly revalidated macOS
-compatibility path for Apple set-id readers. Windows retains the same semantic
-gate and process limits without an equivalent bundled OS sandbox. Allowed
-readers can expose requested data to the configured model provider when the
-harness continues. The boundary includes administrator-controlled system and
-user tool directories retained after PATH hardening, the kernel,
-operator-controlled tool configuration, and the remote semantics of allowed
-GET/HEAD requests. Reads may update access metadata or incidental caches. A
-compromised trusted binary, hostile server, unavailable native sandbox, or
-compromised host is outside the guarantee. Use manual confirmation or an
-additional external sandbox in sensitive environments.
+The query boundary resists mutation, not disclosure. Requested observations
+may be sent to the configured provider. Environment credential values are
+redacted, but arbitrary file content is not a universal secret filter.
+Host readers depend on trusted programs and configuration; reads may update
+access metadata. HTTP readers permit checked GET/HEAD forms, whose remote
+semantics depend on the server.
 .
 .SH CACHE
-The v3 cache performs no classifier model call.
-A successful terminal single-command run stores a context-specific command.
+The v4 cache performs no classifier model call. Schema 4 stores typed plans.
+A successful single-step raw query stores a context-specific typed plan.
 A hit uses zero model calls, validates the command again, and re-executes it.
 This keeps dynamic information current.
 An explicit text-only request never executes a cached command, though a cached
 final text result may still be returned without a model or tool call.
 .PP
 Cache identities use SHA-256 over the provider, model, strategy, protocol,
-shell, policy, platform, and working-directory context. Writers serialize the
+shell, policy, tool/backend capabilities, execution limits, platform, and working-directory context. Writers serialize the
 complete read-modify-write operation with a cross-process lock. Snapshots are
 flushed, atomically replaced, and backed by a last-good copy used when the
 primary is damaged. Cache files and individual fields are size-bounded and
 schema-validated.
 .PP
 The \-\-cache flag may store a terminal text answer when no reusable command
-exists. Multi-step results are not guessed into cache entries.
+exists; hits show its original sample time. Multi-step results are not guessed into cache entries.
 Versioned keys include working directory, provider URL, model, harness,
 protocol, shell, custom prompt, policy configuration, OS, and architecture.
 .

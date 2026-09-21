@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
 from urllib.parse import urlsplit
@@ -106,6 +107,14 @@ class Handler(BaseHTTPRequestHandler):
             self._completion(content="```sh\nprintf x > ./never-run\n```\n<!-- FINAL -->")
             return
 
+        if "whole query model deadline" in user_text:
+            time.sleep(5)
+            try:
+                self._completion(content="late answer")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         observations = []
         for message in messages:
             content = str(message.get("content") or "")
@@ -135,6 +144,30 @@ class Handler(BaseHTTPRequestHandler):
         if observations and "no more tools are available" in user_text:
             self._completion(content=json.dumps({"type": "refuse", "text":
                 "read-only policy or execution limit prevented inspection"}))
+            return
+
+        if "v4 environment cli" in user_text:
+            self._query_completion("read_environment", {
+                "names": ["GET_V4_FIXTURE_LABEL", "GET_V4_FIXTURE_MISSING"]})
+            return
+        if "v4 file cli" in user_text:
+            self._query_completion("read_file", {
+                "path": "answer.md", "start_line": 2, "limit": 1})
+            return
+        if "v4 git cli" in user_text:
+            self._query_completion("run_process", {"executable": "git",
+                "args": ["status", "--porcelain"], "cwd": "git-read"})
+            return
+        if "v4 search cli" in user_text:
+            self._query_completion("search_files", {"path": ".", "pattern": "*.md"})
+            return
+        if "v4 environment expansion cli" in user_text:
+            self._query_completion("run_shell", {
+                "command": "echo $XDG_CURRENT_DESKTOP; echo $XDG_SESSION_TYPE; echo $GET_V4_FIXTURE_LABEL"})
+            return
+        if "v4 isolated computation cli" in user_text:
+            self._query_completion("run_process", {"executable": "python3",
+                "args": ["-c", "import json; print(json.dumps({'sum':sum(range(10))}))"]})
             return
 
         if "reply with exactly the word 'ok'" in user_text:
@@ -217,16 +250,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "unknown native recovery" in user_text and any(
                 message.get("role") == "tool" for message in messages):
-            feedback = "\n".join(
-                str(message.get("content") or "")
-                for message in messages if message.get("role") == "tool"
-            ).replace(" ", "").lower()
-            self._completion(content=(
-                "unknown-tool-recovered"
-                if '"policy_rejected":true' in feedback
-                and "nocommandwasexecuted" in feedback
-                else "unknown-tool-feedback-missing"
-            ))
+            feedback = [json.loads(message["content"])
+                        for message in messages if message.get("role") == "tool"]
+            if feedback[-1].get("policy_rejected"):
+                self._tool_completion([("recovered-reader", output("unknown-tool-recovered"), "continue")])
+            else:
+                self._completion(content="unknown-tool-recovered"
+                                 if "unknown-tool-recovered" in feedback[-1].get("output", "")
+                                 else "unknown-tool-feedback-missing")
             return
         if "unknown native recovery" in user_text and has_tools:
             self._write(200, {
@@ -268,8 +299,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(feedback) >= 2:
                 self._completion(content=(
                     "duplicate-suppressed-ok"
-                    if "duplicate reader skipped" in feedback[-1].lower()
-                    and "no command was executed" in feedback[-1].lower()
+                    if json.loads(feedback[-1]).get("status") == "osReused"
+                    and json.loads(feedback[-1]).get("executed") is False
+                    and "duplicate-evidence" in json.loads(feedback[-1]).get("output", "")
                     else "duplicate-was-not-suppressed"
                 ))
                 return
@@ -304,9 +336,9 @@ class Handler(BaseHTTPRequestHandler):
             ), "")
             if feedback:
                 compact = (
-                    "model feedback compacted" in feedback
+                    "feedback excerpt" in feedback
                     and len(feedback.encode("utf-8")) < 14_000
-                    and "final-marker" not in feedback
+                    and "final-marker" in feedback
                 )
                 self._completion(content=(
                     "feedback-compact-ok" if compact
@@ -328,8 +360,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "policy recovery" in user_text and any(
                 message.get("role") == "tool"
-                and '"policy_rejected":true' in
-                str(message.get("content", "")).replace(" ", "").lower()
+                and (json.loads(message.get("content", "{}")).get("policy_rejected")
+                     or json.loads(message.get("content", "{}")).get("exit_code") != 0)
                 for message in messages):
             self._tool_completion([
                 ("recovered-2", output("policy-recovered"), "return_raw"),
@@ -344,7 +376,8 @@ class Handler(BaseHTTPRequestHandler):
             self._completion(content=(
                 "mixed-batch-ok"
                 if "mixed-safe-marker" in feedback
-                and '"policy_rejected":true' in feedback
+                and any(item.get("policy_rejected") or item.get("exit_code") != 0
+                        for item in observations)
                 else "mixed-batch-incomplete"
             ))
             return
@@ -416,6 +449,15 @@ class Handler(BaseHTTPRequestHandler):
                 "message": {"role": "assistant", "content": content},
             }],
             "usage": {"total_tokens": 7},
+        })
+
+    def _query_completion(self, name: str, arguments: dict) -> None:
+        self._write(200, {
+            "choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": "query-v4-1", "type": "function", "function": {
+                        "name": name, "arguments": json.dumps(arguments)}}]}}],
+            "usage": {"total_tokens": 9},
         })
 
     def _tool_completion(self, calls: list[tuple[str, str, str]]) -> None:

@@ -521,24 +521,26 @@ func implExecutableName(raw: string): string =
     path.setLen(path.len - 4)
   result = path
 
-## Accepts only a small set of non-secret identity/path variables. Their
-## values are passed as arguments to already-approved readers and shell
-## expansion does not re-parse metacharacters contained in the value.
+## Recognizes ordinary parameter names without evaluating their values.
+## Whether expansion is valid depends on the receiving command/argument role,
+## not a four-name environment allowlist. Dynamic executable/option positions
+## still require a constrained backend or a typed query adapter.
 func implSafeVariableLength(command: string, index: int): int =
-  if index + 2 <= command.len and command[index ..< index + 2] == "$?":
-    return 2
-  for variable in ["HOME", "USER", "LOGNAME", "PWD"]:
-    let braced = "${" & variable & "}"
-    let bracedAfter = index + braced.len
-    if bracedAfter <= command.len and
-        command[index ..< bracedAfter] == braced:
-      return braced.len
-    let plain = "$" & variable
-    let after = index + plain.len
-    if after <= command.len and command[index ..< after] == plain and
-        (after == command.len or
-          command[after] notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}):
-      return plain.len
+  if index + 1 >= command.len: return 0
+  if command[index + 1] == '?': return 2
+  var cursor = index + 1
+  let braced = command[cursor] == '{'
+  if braced: inc cursor
+  if cursor >= command.len or command[cursor] notin {'a'..'z', 'A'..'Z', '_'}:
+    return 0
+  inc cursor
+  while cursor < command.len and
+      command[cursor] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+    inc cursor
+  if braced:
+    if cursor >= command.len or command[cursor] != '}': return 0
+    inc cursor
+  result = cursor - index
 
 ## Variable expansion remains restricted to commands whose complete option
 ## surface is observational. This admits common model output such as
@@ -5098,3 +5100,27 @@ func macosRequiresUnsandboxedReader*(
         toLowerAscii(stage[1]) == "list":
       return true
   result = false
+
+## Validates literal argv without passing it through any Shell grammar.
+## Expansion and glob rules do not apply: the OS receives these exact words.
+func checkReadOnlyArguments*(executable: string, arguments: seq[string],
+    shell = ""): CommandPolicyDecision =
+  if executable.len == 0 or '\0' in executable:
+    return implReject("invalid executable")
+  var size = executable.len
+  for argument in arguments:
+    if '\0' in argument:
+      return implReject("argument contains a NUL byte")
+    size += argument.len
+  if size > 32768 or arguments.len > 256:
+    return implReject("process arguments exceed the query limit")
+  result = implValidateStage(@[executable] & arguments, shell)
+
+func literalQueryWords*(command, shell: string): seq[string] =
+  ## A narrow lossless bridge for simple adapter invocations; never evaluates.
+  for character in command:
+    if character in {'$', '`', '*', '?', '[', ']', '{', '}', '%', '!',
+        ';', '|', '&', '<', '>', '\n', '\r'}: return
+  let parsed = implParseCommand(command, shell)
+  if parsed.valid and parsed.stages.len == 1:
+    result = parsed.stages[0]

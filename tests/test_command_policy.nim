@@ -1742,7 +1742,7 @@ suite "mandatory read-only command policy":
     ]:
       check not macosRequiresUnsandboxedReader(command, "zsh")
 
-  test "allows only controlled non-secret shell expansions":
+  test "allows environment names in data positions and constrains option injection":
     check checkReadOnlyCommand("echo $HOME", "bash").allowed
     check checkReadOnlyCommand("echo \"$PWD\"", "bash").allowed
     check checkReadOnlyCommand("ls -d $HOME", "bash").allowed
@@ -1767,7 +1767,7 @@ suite "mandatory read-only command policy":
     check not checkReadOnlyCommand("xxd $HOME", "bash").allowed
     check not checkReadOnlyCommand(
       "Invoke-WebRequest $HOME", "powershell").allowed
-    check not checkReadOnlyCommand("echo $API_KEY", "bash").allowed
+    check checkReadOnlyCommand("echo $API_KEY", "bash").allowed
     check checkReadOnlyCommand("echo ${HOME}", "bash").allowed
     check checkReadOnlyCommand(
       "grep -R absent src; echo \"exit=$?\"", "bash").allowed

@@ -44,8 +44,9 @@ func buildDoubleCheckMessages*(
     "RULES:",
     "- If the command could modify local or external state in any way, " &
       "reply with exactly UNSAFE.",
-    "- Treat writes, deletes, moves, permission changes, redirections, " &
-      "and write-mode flags as unsafe.",
+    "- Reject changes to host files, settings, services, processes or remote state. " &
+      "Private temporary computation within the enforced isolated backend is allowed. " &
+      "Redirection to its private temporary directory is not a host modification.",
     "- If it is read-only but clearly does not answer the query, return a " &
       "corrected read-only command in one ```sh code block.",
     "- Otherwise return the approved command in one ```sh code block.",
