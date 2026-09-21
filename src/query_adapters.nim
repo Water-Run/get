@@ -13,12 +13,18 @@ type IgnoreRule = object
   base, pattern: string
   negated, directoryOnly, anchored: bool
 
+type MissingQueryPathError = object of IOError
+
 proc openReader(path: string): File =
   when defined(posix):
     # Never block while opening a FIFO/device. Validate the opened object to
     # avoid a stat/open symlink race; regular procfs files remain readable.
     let descriptor = posix.open(path.cstring, O_RDONLY or O_NONBLOCK or O_NOCTTY)
-    if descriptor < 0: raiseOSError(osLastError())
+    if descriptor < 0:
+      let error = osLastError()
+      if int(error) in [int(ENOENT), int(ENOTDIR)]:
+        raise newException(MissingQueryPathError, "query path does not exist")
+      raiseOSError(error)
     var info: Stat
     if fstat(descriptor, info) != 0 or not S_ISREG(info.st_mode):
       discard posix.close(descriptor)
@@ -27,8 +33,14 @@ proc openReader(path: string): File =
       discard posix.close(descriptor)
       raise newException(IOError, "cannot open file for reading")
   else:
-    if not fileExists(path):
-      raise newException(IOError, "file query requires an existing regular file")
+    try:
+      if getFileInfo(path).kind != pcFile:
+        raise newException(IOError, "file query requires a regular file")
+    except OSError as error:
+      # Win32 FILE_NOT_FOUND and PATH_NOT_FOUND. Access errors are not absence.
+      if error.errorCode in [2'i32, 3'i32]:
+        raise newException(MissingQueryPathError, "query path does not exist")
+      raise
     result = open(path, fmRead)
 
 proc readFilePage(call: ToolCall, budget: RunBudget): ToolObservation =
@@ -267,6 +279,11 @@ proc executeBuiltinQuery*(call: ToolCall, budget: RunBudget): ToolObservation =
       result.notExecuted = true
       result.exitCode = 125
       result.output = "This query adapter is not available."
+  except MissingQueryPathError:
+    result.status = osNoMatch
+    result.source = "host filesystem"
+    result.output = $(%*{"path": absolutePath(call.path), "exists": false,
+      "error": "not_found", "lines": []})
   except CatchableError as error:
     result.exitCode = 1
     result.status = osUnavailable

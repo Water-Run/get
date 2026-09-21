@@ -52,7 +52,10 @@ func compactObservation*(value: ToolObservation, maximum: int): ToolObservation 
   result = value
   result.originalOutputBytes = value.output.len
   if result.stderr.len > maximum div 4:
-    result.stderr = result.stderr[0 ..< maximum div 4] & "\n[stderr feedback compacted]"
+    var boundary = maximum div 4
+    while boundary > 0 and (byte(result.stderr[boundary]) and 0xC0'u8) == 0x80'u8:
+      dec boundary
+    result.stderr = result.stderr[0 ..< boundary] & "\n[stderr feedback compacted]"
     result.feedbackCompacted = true
   if value.output.len <= maximum: return
   # Keep the end as well as the beginning: many tools put totals/errors last.

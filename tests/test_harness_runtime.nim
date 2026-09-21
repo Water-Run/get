@@ -1202,6 +1202,13 @@ suite "v4 recovery and evidence":
     check not value.truncated
     check observationSucceeded(value)
 
+  test "stderr feedback does not split a UTF-8 code point":
+    let value = compactObservation(ToolObservation(output: "ok",
+      stderr: repeat("错", 1000)), 1024)
+    check value.stderr == repeat("错", 85) & "\n[stderr feedback compacted]"
+    check value.feedbackCompacted
+    check not value.truncated
+
   test "required failures cannot be hidden by optional successful observations":
     let values = @[ToolObservation(callId: "required", required: true,
       exitCode: 1), ToolObservation(callId: "optional", exitCode: 0)]

@@ -150,6 +150,10 @@ class Handler(BaseHTTPRequestHandler):
             self._query_completion("read_environment", {
                 "names": ["GET_V4_FIXTURE_LABEL", "GET_V4_FIXTURE_MISSING"]})
             return
+        if "v4 absent file cli" in user_text:
+            self._query_completion("read_file", {
+                "path": "ABSENT_FILE", "required": True})
+            return
         if "v4 file cli" in user_text:
             self._query_completion("read_file", {
                 "path": "answer.md", "start_line": 2, "limit": 1})

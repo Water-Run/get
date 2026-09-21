@@ -698,6 +698,11 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(values["GET_V4_FIXTURE_LABEL"], "value with spaces; literal")
         self.assertIsNone(values["GET_V4_FIXTURE_MISSING"])
 
+    def test_09v4_absent_file_is_successful_negative_evidence(self) -> None:
+        result = self.run_get("v4 absent file cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIs(json.loads(result.stdout)['exists'], False)
+
     def test_09v4_file_page_runs_through_native_protocol(self) -> None:
         result = self.run_get("v4 file cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)

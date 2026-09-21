@@ -63,6 +63,21 @@ suite "v4 typed query tools":
       check schema["properties"].hasKey("fresh")
 
 suite "v4 native observations":
+  test "a missing file is negative evidence, but a directory is a reader error":
+    let root = createTempDir("get-v4-absent-", "")
+    defer: removeDir(root)
+    let missing = parseNativeToolCall("absent", "read_file", $(%*{
+      "path": root / "absent.txt", "required": true}))
+    let value = executeAuthorizedBatch(@[authorizeQuery(missing, "bash").plan],
+      "bash", defaultRunBudget(hkAuto), 1)[0]
+    check value.status == osNoMatch
+    check value.exitCode == 0
+    check not parseJson(value.output)["exists"].getBool
+    let directory = parseNativeToolCall("directory", "read_file", $(%*{"path": root}))
+    let invalid = executeBuiltinQuery(directory, defaultRunBudget(hkAuto))
+    check invalid.status == osUnavailable
+    check invalid.exitCode != 0
+
   test "environment values preserve missing/empty semantics and mask credentials":
     putEnv("GET_V4_FIXTURE_LABEL", "value with spaces; $(echo data)")
     putEnv("GET_V4_FIXTURE_EMPTY", "")
