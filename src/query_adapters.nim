@@ -281,4 +281,3 @@ proc executeBuiltinQuery*(call: ToolCall, budget: RunBudget): ToolObservation =
     result.status = osTruncated
   result.stdout = result.output
   result.elapsedMs = (getMonoTime() - started).inMilliseconds
-
