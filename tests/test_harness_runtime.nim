@@ -1214,6 +1214,17 @@ suite "v4 recovery and evidence":
       exitCode: 1), ToolObservation(callId: "optional", exitCode: 0)]
     check answerEvidenceStatus(values) == (1, true)
 
+  test "failed corroboration cannot erase evidence for the same required fact":
+    let proven = ToolObservation(callId: "direct", evidenceKey: "cpu_count",
+      required: true, status: osCompleted, exitCode: 0)
+    let failed = ToolObservation(callId: "corroboration", evidenceKey: "cpu_count",
+      required: true, status: osUnavailable, exitCode: 1)
+    check answerEvidenceStatus(@[proven, failed]) == (0, true)
+    check answerEvidenceStatus(@[failed, proven]) == (0, false)
+    var optionalProof = proven
+    optionalProof.required = false
+    check answerEvidenceStatus(@[optionalProof, failed]) == (0, true)
+
 
 suite "v4 reused negative evidence":
   test "a reused no-match remains a successful required observation":

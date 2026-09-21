@@ -37,6 +37,11 @@ def validate_attestation(record: dict, version: str, payload_sha256: str) -> lis
                 raise ValueError('replay must retain all 40 tasks with at least three distinct repeats')
             populations[label] = set(identities)
             if label == 'candidate':
+                if any(row['passed'] is True and (
+                        row.get('has_execution_evidence') is not True
+                        or row.get('exit_code') != 0 or row.get('timed_out') is not False)
+                       for row in rows):
+                    raise ValueError('a completed task must have executed evidence and a successful exit')
                 passed = sum(row['passed'] is True for row in rows)
                 rejected = sum(row['policy_rejections'] > 0 for row in rows)
                 if (passed / len(rows) < .95 or rejected / len(rows) > .02

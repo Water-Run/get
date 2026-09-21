@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -131,6 +132,19 @@ def sample_tree(pid):
     return rss
 
 
+def has_execution(evidence, summary, log):
+    if 'tool_starts' in summary: return summary['tool_starts'] > 0
+    if any(not item.get('policy_rejected') and item.get('executed', True) for item in evidence):
+        return True
+    # A v3 direct/raw response can terminate before another provider request.
+    # Its successful command log is evidence; an answer-only log is not.
+    for command, code in re.findall(r'^\[[^\n]+\] command: (.+)\n\[[^\n]+\] exit: (-?\d+)$', log, re.M):
+        try: command = json.loads(command)
+        except ValueError: continue
+        if code == '0' and command not in ['(none)', '(run summary)']: return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', action='append', required=True, help='label=/absolute/binary/path')
@@ -233,13 +247,16 @@ def main():
                             try: actual = answer(stdout)
                             except ValueError: actual = None
                             preserved_host = host_preserved()
+                            execution_log = log_path.read_text() if log_path.exists() else ''
+                            executed = has_execution(evidence, summary, execution_log)
                             passed = (process.returncode == 0 and equivalent(actual, case.expected)
-                                      and preserved_host and not timed_out)
+                                      and preserved_host and executed and not timed_out)
                             tokens = sum(record.get('response', {}).get('usage', {}).get('total_tokens', 0)
                                          for record in relay.records)
                             row = {'id': run_id, 'binary': label, 'repeat': repeat, 'category': case.category,
                                    'case': case.name, 'passed': passed, 'exit_code': process.returncode,
                                    'timed_out': timed_out, 'host_preserved': preserved_host,
+                                   'has_execution_evidence': executed,
                                    'seconds': round(elapsed, 3), 'first_observation_seconds': first,
                                    'peak_sum_rss_kib': peak[0], 'provider_requests': len(relay.records),
                                    'tokens': tokens,
@@ -253,7 +270,7 @@ def main():
                             report['runs'].append(row)
                             raw = {'question': case.question, 'expected': case.expected, 'actual': actual,
                                    'stdout': stdout, 'stderr': stderr, 'requests': relay.records,
-                                   'execution_log': log_path.read_text() if log_path.exists() else ''}
+                                   'execution_log': execution_log}
                             (private / (run_id + '.json')).write_text(json.dumps(raw, ensure_ascii=False, indent=2).replace(key, '[redacted]'))
                             report['provider_settings_preserved'] = all(sha(path) == old for path, old in preserved.items())
                             args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')

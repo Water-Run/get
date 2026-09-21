@@ -15,7 +15,8 @@ def fixture():
             for index in range(8):
                 for repeat in range(1, 4):
                     runs.append(dict(binary=label, category=category, case=f'{category}-{index}',
-                                     repeat=repeat, passed=True, policy_rejections=0, host_preserved=True))
+                                     repeat=repeat, passed=True, policy_rejections=0, host_preserved=True,
+                                     has_execution_evidence=True, exit_code=0, timed_out=False))
     return dict(schema_version=4, version='4.0.0', status='passed',
                 linux_payload_sha256=digest, live_configuration_preserved=True,
                 replays=[dict(model='fixture-model', shell='fish', platform='linux',
@@ -54,6 +55,11 @@ class ProviderGateTests(unittest.TestCase):
     def test_rejections_have_an_independent_task_gate(self):
         record = fixture()
         for row in record['replays'][0]['runs'][120:123]: row['policy_rejections'] = 1
+        with self.assertRaises(ValueError): validate_attestation(record, '4.0.0', 'a' * 64)
+
+    def test_unsupported_success_claim_is_rejected(self):
+        record = fixture()
+        record['replays'][0]['runs'][-1]['has_execution_evidence'] = False
         with self.assertRaises(ValueError): validate_attestation(record, '4.0.0', 'a' * 64)
 
 

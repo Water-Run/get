@@ -150,6 +150,15 @@ class Handler(BaseHTTPRequestHandler):
             self._query_completion("read_environment", {
                 "names": ["GET_V4_FIXTURE_LABEL", "GET_V4_FIXTURE_MISSING"]})
             return
+        if "v4 corroboration cli" in user_text:
+            calls = [{"id": str(index), "type": "function", "function": {
+                "name": "read_file", "arguments": json.dumps({
+                    "path": path, "required": True, "evidence_key": "file_content"})}}
+                for index, path in enumerate(["answer.md", "."])]
+            self._write(200, {"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": calls}}],
+                "usage": {"total_tokens": 9}})
+            return
         if "v4 absent file cli" in user_text:
             self._query_completion("read_file", {
                 "path": "ABSENT_FILE", "required": True})

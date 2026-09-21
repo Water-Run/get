@@ -36,12 +36,16 @@ func answerEvidenceStatus*(values: seq[ToolObservation]): tuple[code: int, parti
   var anyEvidence = false
   var required = initTable[string, bool]()
   var latest = initTable[string, bool]()
+  var proven = initTable[string, bool]()
   for value in values:
     let success = observationSucceeded(value)
     anyEvidence = anyEvidence or success
     let key = if value.evidenceKey.len > 0: value.evidenceKey else: value.callId
     latest[key] = success
-    if value.required or required.hasKey(key): required[key] = success
+    # Several readers may establish the same fact. A failed corroboration must
+    # not erase successful sibling evidence, regardless of batch result order.
+    proven[key] = proven.getOrDefault(key) or success
+    if value.required or required.hasKey(key): required[key] = proven[key]
   for success in latest.values:
     result.partial = result.partial or not success
   if not anyEvidence: result.code = 1

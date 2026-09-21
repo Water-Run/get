@@ -12,7 +12,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[options, strutils, unittest]
+import std/[json, options, strutils, unittest]
 
 import harness_protocol
 import harness_types
@@ -207,6 +207,19 @@ suite "harness action protocol":
       policyRejected: false
     ))
     check noMatch.contains("Exit 1 means no lines matched")
+
+  test "failed required observations name the exact fact to repair":
+    var observation = ToolObservation(callId: "order", toolName: "run_process",
+      command: "getconf BYTE_ORDER", exitCode: 2, status: osUnavailable,
+      required: true, evidenceKey: "byte_order")
+    let hint = parseJson(observationJson(observation))["interpretation_hint"].getStr
+    check hint.contains("evidence_key exactly \"byte_order\"")
+    observation.status = osNoMatch
+    observation.exitCode = 1
+    check not observationJson(observation).contains("repairs this required fact")
+    observation.status = osUnavailable
+    observation.required = false
+    check not observationJson(observation).contains("repairs this required fact")
 
 ## Verifies stable harness configuration parsing and budgets.
 suite "harness kinds and budgets":

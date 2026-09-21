@@ -16,6 +16,7 @@
 import std/[json, options, strformat, strutils]
 
 import harness_types
+import observations
 import tool_registry
 
 # ---------------------------------------------------------------------------
@@ -568,7 +569,12 @@ func observationJson*(observation: ToolObservation): string =
   if observation.sampledAt.len > 0: node["sampled_at"] = %observation.sampledAt
   if observation.source.len > 0: node["source"] = %observation.source
   if observation.stderr.len > 0: node["stderr"] = %observation.stderr
-  let hint = implObservationHint(observation)
+  var hint = implObservationHint(observation)
+  if observation.required and observation.evidenceKey.len > 0 and
+      not observationSucceeded(observation):
+    hint.add(" If a different reader repairs this required fact, keep its " &
+      "evidence_key exactly " & $(%observation.evidenceKey) &
+      "; a different key represents a different fact.")
   if observation.proposedCommand.len > 0:
     node["proposed_command"] = %observation.proposedCommand
   if hint.len > 0:
