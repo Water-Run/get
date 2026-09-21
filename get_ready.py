@@ -2,7 +2,7 @@
 """
 get_ready.py -- installer for `get`.
 
-The v3.0 release package is intentionally flat:
+The release package is intentionally flat:
 
     get_ready.py
     get-linux-x64
@@ -18,7 +18,6 @@ The v3.0 release package is intentionally flat:
     OPENSSL-LICENSE.txt
     ZLIB-LICENSE.txt
     THIRD_PARTY_NOTICES.md
-    RELEASE_NOTES.md
     BUILDINFO.json
     SHA256SUMS
 

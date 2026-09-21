@@ -2,7 +2,7 @@
 
 [中文](README-zh.md)
 
-`get` turns a natural-language question into a read-only local query. v4 adds environment, file, search, and direct-process tools, ordinary Git status/diff, and isolated scripts and composition on capable Linux hosts. Model names remain opaque service identifiers.
+Ask this computer a question in ordinary language. `get` inspects the machine and answers from what it finds. It is a query tool: it reads the host, it does not change it. Model names are opaque service identifiers.
 
 ```bash
 get "IP address of this device"
@@ -10,18 +10,7 @@ get "code structure in the current directory"
 get "current git branch and uncommitted files"
 ```
 
-## What changed in v4
-
-- Named environment reads distinguish missing, empty, and redacted values without a four-variable limit.
-- Built-in file paging, literal content search, path globs, and common ignore rules handle spaces and Unicode paths.
-- Literal argv avoids shell quoting. Complex shell queries and short scripts use a fully probed Linux isolation backend.
-- Git status/diff use a private metadata snapshot with executable filters, external diff, and submodule inspection disabled.
-- Defaults are six inspection turns, sixteen actual starts, and four concurrent calls. Rejections and reuse count separately; local failures can recover.
-- Automatic queries have a 120-second total deadline with time reserved for an answer. stdout/stderr, paging, and truncation are separate observations.
-- New, reviewed, and cached plans share one authorization path and one event stream for terminal output and diagnostics.
-- Native tools/JSON fallback, TLS verification, HTTP reuse, durable persistence, and Markdown output remain available.
-
-## Installation
+## Install
 
 Download a package from [GitHub Releases](https://github.com/Water-Run/get/releases), keep its files together, then run:
 
@@ -30,13 +19,12 @@ python get_ready.py
 get version
 ```
 
-The installer can retain an existing configuration while replacing the binary. A v2 configuration is migrated automatically: `instance=true` becomes `harness=direct`; otherwise the new default is `harness=auto`.
+The installer can keep an existing configuration while replacing the binary.
 
 On Windows, `get-windows-x64.exe`, `libcrypto-3.dll`, `libssl-3.dll`, and
 `zlib1.dll` must remain beside the installer; all four are installed together.
-The DLLs provide OpenSSL 3.5.7 LTS and zlib 1.3.2; their provenance and licenses
-are included in `THIRD_PARTY_NOTICES.md`, `OPENSSL-LICENSE.txt`, and
-`ZLIB-LICENSE.txt`.
+The DLLs provide OpenSSL 3.5.7 LTS and zlib 1.3.2. Provenance and licenses are
+in `THIRD_PARTY_NOTICES.md`, `OPENSSL-LICENSE.txt`, and `ZLIB-LICENSE.txt`.
 
 ## Setup
 
@@ -51,7 +39,15 @@ get isok
 
 API keys are never printed or logged. On Linux the key file is mode `0600`; on Windows it is protected with DPAPI.
 
-## Harness strategies
+## How a query works
+
+The model receives your question and a set of typed readers. It gathers evidence, then answers.
+
+`read_environment`, `read_file`, and `search_files` handle common reads. `run_process` takes a literal argv; `run_shell` uses the configured shell. Ordinary Git status and diff use a private metadata snapshot.
+
+Search supports path globs, literal content matching, paging, and common `.gitignore` / `.ignore` / `.rgignore` rules. It is a bounded reader, not a complete Git or ripgrep replacement; hitting a scan limit returns an explicit incomplete result.
+
+Four harness strategies control how evidence is gathered:
 
 | Strategy | Behavior | Typical model calls |
 |---|---|---:|
@@ -60,12 +56,9 @@ API keys are never printed or logged. On Linux the key file is mode `0600`; on W
 | `loop` | Serial observation feedback for dependent work | 1–4 |
 | `parallel` | Concurrent independent read-only calls | 1–4 |
 
-`auto` is the default. `max-rounds` limits inspection turns; a separate final turn has no tools. Tool limits stay enforced. If the provider cannot finish, get returns a bounded account of available evidence with a nonzero exit status.
+`auto` is the default. `max-rounds` limits inspection turns; a separate final turn has no tools. If the provider cannot finish, get returns a bounded account of available evidence with a nonzero exit status.
 
-In `auto`, `loop`, and `parallel`, a command denied by the mandatory policy is
-not executed. The denial is returned as a typed observation so the model can
-propose a simpler safe command within the existing turn/tool budget; every
-replacement is validated from scratch. `direct` never retries a denial.
+In `auto`, `loop`, and `parallel`, a command denied by the mandatory policy is not executed. The denial is returned as a typed observation so the model can propose a simpler safe command within the existing turn and tool budget; every replacement is validated from scratch. `direct` never retries a denial.
 
 ```bash
 get set harness auto
@@ -73,33 +66,29 @@ get "compare disk and memory usage" --harness parallel
 get "show the current directory" --harness direct
 ```
 
-The tool protocol is configured separately:
+Tool encoding is independent of the harness:
 
 ```bash
-get set tool-protocol auto     # native tools, fallback on provider rejection
+get set tool-protocol auto     # native tools; JSON fallback if the provider rejects them
 get set tool-protocol native   # require native function tools
 get set tool-protocol json     # explicit structured JSON actions
 ```
 
-When a query explicitly says `without tools` or `without calling a tool`, get
-uses enforced text-only routing: the provider receives no tool definition,
-textual tool actions are rejected, and an older cached command is ignored.
+When a query explicitly says `without tools` or `without calling a tool`, get uses text-only routing: the provider receives no tool definition, textual tool actions are rejected, and a cached command is ignored. Markdown code examples are always answer text. Only explicit JSON or native tool actions enter the execution boundary.
 
 ## Query boundary
 
-`read_environment`, `read_file`, and `search_files` handle common reads directly. `run_process` accepts literal argv; `run_shell` uses the configured shell dialect. Search supports path globs, literal content matching, paging, and common `.gitignore` / `.ignore` / `.rgignore` rules. It is a bounded reader, not a complete Git/ripgrep replacement; scan limits produce an explicit incomplete result.
-
-Known host readers retain argument checks and see real process, device, network, and service state. On Linux, other computation is enabled only after a complete isolation probe: bubblewrap namespaces, read-only host mounts, seccomp, and resource ceilings prevent network/control-socket access and host process/device control. Writes are confined to private query scratch space, cleaned by the parent. Missing capabilities never fall back to an unrestricted script.
+Known host readers check their arguments and see real process, device, network, and service state. On Linux, general scripts and complex shell computation run only after a complete isolation probe: bubblewrap namespaces, read-only host mounts, seccomp, and resource ceilings. That backend cannot reach the network or control sockets, and cannot control host processes or devices. Writes stay in private query scratch space, which the parent process cleans. Missing capabilities never fall back to an unrestricted script.
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Typed environment/files/search and known host queries | Supported | Supported | Supported |
+| Typed environment, files, search, and known host queries | Supported | Supported | Supported |
 | Ordinary Git status/diff snapshot | Supported | Supported | Supported |
-| General scripts and complex shell computation | Only after the full isolation probe | Not yet supported | Not yet supported |
+| General scripts and complex shell computation | After the full isolation probe | Not yet supported | Not yet supported |
 
-Git snapshots retain the worktree, index, and basic line-ending/file-mode semantics without writing the real index. Executable filters, textconv, fsmonitor, and submodule inspection are disabled. Global excludes, upstream configuration, and custom filtered results may differ from interactive Git; observations identify the snapshot source. Use literal process arguments or a single literal Git status/diff shell call for this adapter.
+Git snapshots keep the worktree, index, and basic line-ending and file-mode semantics without writing the real index. Executable filters, textconv, fsmonitor, and submodule inspection are disabled. Global excludes, upstream configuration, and custom filtered results may differ from interactive Git; observations name the snapshot source. Use literal process arguments or a single literal Git status/diff shell call for this adapter.
 
-Every proposal validates tool arguments and selects an allowed backend, then applies an explicitly configured `command-pattern`, optional `double-check`, and optional `manual-confirm`. Reviewed edits and cached plans are authorized again. Confirmation cannot enable host mutation. Both review and confirmation default to off.
+Every proposal validates tool arguments and selects an allowed backend, then applies an explicitly configured `command-pattern`, optional `double-check`, and optional `manual-confirm`. Reviewed edits and cached plans are authorized again. Confirmation cannot enable host mutation. Review and confirmation default to off.
 
 A failed step can recover locally. No matches, missing environment values, and differences found by diff have distinct semantics. Existing observations can be reused; explicit `fresh` requests resample. Failure of all required evidence produces a nonzero exit status even if the model supplies prose. Recovery is limited to two failed-step revisions per query.
 
@@ -133,12 +122,12 @@ Run `get config` to display all settings, `get config --<option>` for one value,
 | `hide-process` | `false` | Suppress progress and observations |
 | `system-proxy` | `false` | Prefer Windows Internet Settings over terminal proxy variables |
 | `cache` | `true` | Enable deterministic caching |
-| `cache-expiry` | `30` | Cache lifetime; `false` disables expiry |
+| `cache-expiry` | `30` | Cache lifetime in days; `false` disables expiry |
 | `cache-max-entries` | `1000` | Cache cap; `false` disables the cap |
 | `log-max-entries` | `1000` | Log cap; `false` disables the cap |
 | `vivid` | `true` | ANSI colors and progress animation |
 | `markdown` | `true` | Render model Markdown in interactive terminals; pipes retain source text |
-| `instance` | `false` | v2 alias for `harness=direct` |
+| `instance` | `false` | Alias: `true` selects `harness=direct` |
 
 Harness and command safety limits require positive integers and cannot be disabled. Omit a value to reset it:
 
@@ -165,7 +154,7 @@ get set command-pattern ""                 # clear an existing supplemental rege
 --double-check / --no-double-check
 --harness <auto|direct|loop|parallel>
 --protocol <auto|native|json>
---instance / --no-instance          compatibility aliases
+--instance / --no-instance          aliases for direct / loop
 --hide-process / --no-hide-process
 --system-proxy / --no-system-proxy
 --vivid / --no-vivid
@@ -180,33 +169,24 @@ Terminal `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` variables are honored by d
 
 ## Markdown output
 
-Use `get set markdown true` (default), `get set markdown false`, or per-query
-`--markdown` / `--no-markdown`. Inspect it with `get config --markdown`;
-omitting the value resets the default.
+Use `get set markdown true` (default), `get set markdown false`, or per-query `--markdown` / `--no-markdown`. Inspect it with `get config --markdown`; omitting the value resets the default.
 
-The built-in renderer handles headings, emphasis, lists, quotes, code fences,
-links, and tables with Chinese column widths. It requires no external program.
-`vivid=false` or `NO_COLOR` disables rendering colors while retaining layout.
-Pipes, redirected output, and `TERM=dumb` retain the Markdown source. Raw
-command output is never interpreted as Markdown. Cached answers keep their
-source text and respect the current rendering setting.
+The built-in renderer handles headings, emphasis, lists, quotes, code fences, links, and tables with Chinese column widths. It requires no external program. `vivid=false` or `NO_COLOR` disables rendering colors while retaining layout. Pipes, redirected output, and `TERM=dumb` retain the Markdown source. Raw command output is never interpreted as Markdown. Cached answers keep their source text and respect the current rendering setting.
 
-Markdown code examples and old HTML action markers are always answer text. `legacy` configuration values migrate to `json`; explicit JSON/native tool actions still pass the safety gate.
+## Cache
 
-## Cache behavior
+Caching does not spend a model call deciding what to cache. A successful single-step query stores a typed plan for the current context.
 
-Caching does not spend a model call deciding what to cache. Schema 4 stores typed query plans; old entries do not share the new capability context.
-
-- A successful single-step raw query stores a context-specific typed plan.
 - A cache hit performs zero model calls, revalidates the command, and re-executes it so dynamic information stays current.
-- Explicit text-only requests never execute a cached command; a cached final
-  text result may still be returned without a provider or tool call.
+- Explicit text-only requests never execute a cached command; a cached final text result may still be returned without a provider or tool call.
 - `--cache` may store a final text result when there is no reusable plan; hits show its original sample time.
 - Multi-step results are not guessed into a cache entry.
-- SHA-256 keys include v4, tool/backend capabilities, execution limits, working directory, provider URL, model, harness, protocol, shell, custom prompt, command policy, OS, and architecture. Older entries cannot collide.
+- SHA-256 keys include tool and backend capabilities, execution limits, working directory, provider URL, model, harness, protocol, shell, custom prompt, command policy, OS, and architecture.
 - Writers hold a short cross-process lock around read-modify-write, so simultaneous `get` processes do not lose entries.
 - Snapshots are flushed and atomically replaced with mode `0600` on POSIX. A last-good `.bak` snapshot is used automatically if the primary is damaged.
 - Files and fields are schema-validated and size-bounded; expiry, duplicate replacement, and oldest-entry eviction are deterministic.
+
+Configuration, key, log, and cache writes are serialized across processes.
 
 ```bash
 get cache
@@ -241,10 +221,9 @@ python get_test.py --binary .ci/get --provider-config ~/.config/get \
   --shell bash --report .ci/provider-replay.json
 ```
 
-Always select the newly built binary explicitly: historical executables in the
-working tree or on PATH may belong to a different release.
+Always select the newly built binary explicitly. Development binaries belong in `.ci/`. Live configuration, credentials, and the installed program are left unchanged.
 
-Local persistence workers are capped at four. Full native platform suites run in CI. The provider replay uses isolated configuration, a mixed-language fixture with nested build/dependency directories, exact observable answers and an optional `--real-project` replay.
+Local persistence workers are capped at four. Full native platform suites run in CI. The provider replay uses isolated configuration, a mixed-language fixture with nested build/dependency directories, exact observable answers, and an optional `--real-project` replay.
 
 Focused tests under `tests/` cover protocol parsing, native tool payloads, state transitions, configuration migration, mandatory policy, bounded execution, and real parallel execution.
 

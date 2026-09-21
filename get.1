@@ -43,15 +43,11 @@ get \- get anything from your computer
 .SH DESCRIPTION
 .B get
 sends a natural-language query to an OpenAI-compatible model and performs
-read-only local inspection when a shell command is required.
-Version 4 uses one typed
-.I model/action/policy/tool/observation
-state machine instead of separate instance and marker-driven agent paths.
+read-only local inspection when a tool is required.
 .PP
 Provider-native function tools are preferred.
-Structured JSON is used as a compatibility fallback. Markdown code blocks and
-old HTML action markers are answer text. Legacy configuration values migrate
-to the JSON protocol. Model names are opaque identifiers, without rankings.
+Structured JSON is used as a fallback. Markdown code blocks are answer text.
+Model names are opaque identifiers.
 .PP
 Queries that explicitly request no tool use are routed as text-only: no tool
 definition is sent, textual tool actions are rejected, and cached commands are
@@ -186,10 +182,10 @@ Use auto, direct, loop, or parallel for this query.
 Use auto, native, or json tool encoding for this query.
 .TP
 .B \-\-instance
-Compatibility alias for direct.
+Alias for direct.
 .TP
 .B \-\-no\-instance
-Compatibility alias for loop.
+Alias for loop.
 .TP
 .B \-\-hide\-process
 Suppress progress and intermediate observations.
@@ -313,7 +309,7 @@ NO_COLOR or vivid=false disables renderer colors, while preserving layout.
 Cached answers are rendered using the current setting.
 .TP
 .BI "instance " bool
-v2 compatibility alias. true selects direct; false selects auto when stored.
+Alias for harness. true selects direct; false selects auto when stored.
 .
 .SH TOOL PROTOCOL
 The native tools are read_environment, read_file, search_files, run_process,
@@ -323,7 +319,7 @@ facts; fresh requests a new sample. run_readonly_shell is a compatibility alias.
 .PP
 With tool-protocol auto, provider HTTP 400/404/422 errors that identify
 unsupported tool fields trigger one structured-JSON retry for that run.
-Native mode does not fall back. Legacy mode sends no native tool definition.
+Native mode does not fall back.
 .PP
 Transport failures before an HTTP response retry up to three times within the
 original request timeout. HTTP responses, request timeouts, and parsing errors
@@ -372,8 +368,8 @@ access metadata. HTTP readers permit checked GET/HEAD forms, whose remote
 semantics depend on the server.
 .
 .SH CACHE
-The v4 cache performs no classifier model call. Schema 4 stores typed plans.
-A successful single-step raw query stores a context-specific typed plan.
+The cache performs no classifier model call.
+A successful single-step query stores a context-specific typed plan.
 A hit uses zero model calls, validates the command again, and re-executes it.
 This keeps dynamic information current.
 An explicit text-only request never executes a cached command, though a cached
@@ -388,7 +384,7 @@ schema-validated.
 .PP
 The \-\-cache flag may store a terminal text answer when no reusable command
 exists; hits show its original sample time. Multi-step results are not guessed into cache entries.
-Versioned keys include working directory, provider URL, model, harness,
+Keys include working directory, provider URL, model, harness,
 protocol, shell, custom prompt, policy configuration, OS, and architecture.
 .
 .SH NETWORK

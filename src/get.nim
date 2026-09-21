@@ -60,7 +60,7 @@ query flags (per-invocation overrides):
   --double-check               enable safety review
   --no-double-check            skip safety review
   --instance                   fast single-call mode
-  --no-instance                compatibility alias for loop
+  --no-instance                alias for loop
   --harness <kind>             auto, direct, loop, or parallel
   --protocol <kind>            auto, native, or json
   --hide-process               suppress intermediate output
@@ -84,7 +84,7 @@ set options:
                        (true/false, default: false)
   double-check       second model safety review
                        (true/false, default: false)
-  instance           v2 compatibility alias for direct
+  instance           alias for harness=direct
                        (true/false, default: false)
   harness            orchestration strategy
                        (auto/direct/loop/parallel, default: auto)

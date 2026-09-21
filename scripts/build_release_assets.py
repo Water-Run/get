@@ -52,9 +52,9 @@ def main():
     declared = checksums(flat["SHA256SUMS"])
     assert set(declared) == set(flat) - {"SHA256SUMS"}
     assert all(digest(flat[name]) == checksum for name, checksum in declared.items())
-    common = ["BUILDINFO.json", "PROVIDER_VALIDATION.json", "CODE_REVIEW-v3.md",
-              "LICENSE", "README.md", "README-zh.md", "RELEASE_NOTES.md",
-              "VALIDATION.md", "THIRD_PARTY_NOTICES.md",
+    common = ["BUILDINFO.json", "PROVIDER_VALIDATION.json",
+              "LICENSE", "README.md", "README-zh.md",
+              "THIRD_PARTY_NOTICES.md",
               "get_ready.py", "get.1"]
     platforms = {
         "linux-x64": ["get-linux-x64"],
