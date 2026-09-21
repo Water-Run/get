@@ -63,8 +63,8 @@ func queryToolDefinitions*(): seq[LlmToolDefinition] =
     "Read named host environment values. Missing names are null; credential values are masked.",
     "Read a page of a local text file with line numbers and a continuation position.",
     "List files by glob or search literal contents, honoring ignore files by default. Supports pagination.",
-    "Run a query executable with literal arguments, without shell expansion. Captures bounded output.",
-    "Run a bounded observational shell command in the configured dialect. General computation requires an isolated backend."
+    "Run a query executable with literal arguments, without shell expansion. Prefer for single commands and host process/network/device diagnostics. Ordinary Git status/diff use a private metadata snapshot with executable helpers disabled. Captures bounded output.",
+    "Run a bounded observational shell command in the configured dialect. General computation isolates the entire command, so process/network/device views may not be host views. For host diagnostics and Git status/diff, prefer separate run_process calls; inspect their output before composing further computation."
   ]
   for index, name in QUERY_TOOL_NAMES:
     result.add(LlmToolDefinition(name: name, description: descriptions[index],

@@ -565,15 +565,18 @@ func observationJson*(observation: ToolObservation): string =
   node["has_more"] = %observation.moreData
   node["feedback_compacted"] = %observation.feedbackCompacted
   node["original_output_bytes"] = %observation.originalOutputBytes
-  if observation.evidenceKey.len > 0: node["evidence_key"] = %observation.evidenceKey
+  let evidenceKey = if observation.evidenceKey.len > 0: observation.evidenceKey
+    elif observation.required: observation.callId
+    else: ""
+  if evidenceKey.len > 0: node["evidence_key"] = %evidenceKey
   if observation.sampledAt.len > 0: node["sampled_at"] = %observation.sampledAt
   if observation.source.len > 0: node["source"] = %observation.source
   if observation.stderr.len > 0: node["stderr"] = %observation.stderr
   var hint = implObservationHint(observation)
-  if observation.required and observation.evidenceKey.len > 0 and
+  if observation.required and evidenceKey.len > 0 and
       not observationSucceeded(observation):
     hint.add(" If a different reader repairs this required fact, keep its " &
-      "evidence_key exactly " & $(%observation.evidenceKey) &
+      "evidence_key exactly " & $(%evidenceKey) &
       "; a different key represents a different fact.")
   if observation.proposedCommand.len > 0:
     node["proposed_command"] = %observation.proposedCommand

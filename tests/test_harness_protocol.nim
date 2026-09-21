@@ -214,6 +214,10 @@ suite "harness action protocol":
       required: true, evidenceKey: "byte_order")
     let hint = parseJson(observationJson(observation))["interpretation_hint"].getStr
     check hint.contains("evidence_key exactly \"byte_order\"")
+    observation.evidenceKey = ""
+    let fallback = parseJson(observationJson(observation))
+    check fallback["evidence_key"].getStr == "order"
+    check fallback["interpretation_hint"].getStr.contains("evidence_key exactly \"order\"")
     observation.status = osNoMatch
     observation.exitCode = 1
     check not observationJson(observation).contains("repairs this required fact")
