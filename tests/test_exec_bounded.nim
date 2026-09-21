@@ -11,7 +11,7 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[envvars, os, strutils, unittest]
+import std/[envvars, os, sequtils, strutils, tempfiles, unittest]
 
 import exec
 import command_policy
@@ -22,7 +22,7 @@ suite "bounded command execution":
     check shellArgsForTest("bash", "pwd") ==
       @["--noprofile", "--norc", "-c", "pwd"]
     check shellArgsForTest("fish", "pwd") ==
-      @["--no-config", "-c", "pwd"]
+      @["--no-config", "--private", "-c", "pwd"]
     check shellArgsForTest("zsh", "pwd") == @["-f", "-c", "pwd"]
     check shellArgsForTest("cmd", "ver") ==
       @["/D", "/Q", "/V:OFF", "/C", "ver"]
@@ -362,6 +362,32 @@ suite "bounded command execution":
         "bash", 3, 4096, readOnlySandbox = true)
       check value.exitCode == 0
       check value.output.strip() == "py 2\nrs 1"
+
+    test "fish startup keeps XDG state private and preserves query values":
+      if findExe("fish").len == 0:
+        skip()
+      else:
+        let root = createTempDir("get-fish-startup-", "")
+        let names = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]
+        var previous: array[3, string]
+        var present: array[3, bool]
+        for index, name in names:
+          present[index] = existsEnv(name)
+          previous[index] = getEnv(name)
+          putEnv(name, root / ("space ' " & name))
+        defer:
+          for index, name in names:
+            if present[index]: putEnv(name, previous[index])
+            else: delEnv(name)
+          removeDir(root)
+        for sandboxed in [false, true]:
+          let value = executeCommandBounded(
+            "printf '%s\\n' \"$XDG_CONFIG_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\"",
+            "fish", 3, 4096, readOnlySandbox = sandboxed)
+          check value.exitCode == 0
+          check value.stderr.len == 0
+          check value.stdout.strip == names.mapIt(root / ("space ' " & it)).join("\n")
+          for name in names: check not dirExists(getEnv(name))
 
     test "tool discovery and xargs line counts preserve the source and cwd":
       let original = getCurrentDir()

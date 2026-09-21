@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 sys.path.insert(0, str(Path(__file__).parent / 'tests/replay'))
 from v4_cases import make_cases
@@ -55,6 +55,9 @@ class Recorder:
         self.endpoint = endpoint.rstrip('/') + '/chat/completions'
         self.records = []
         self.started = time.monotonic()
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs): return None
+        self.opener = build_opener(NoRedirect)
         recorder = self
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -73,7 +76,7 @@ class Recorder:
                     'Authorization': self.headers.get('Authorization', ''),
                     'Content-Type': 'application/json', 'Accept-Encoding': 'identity'})
                 try:
-                    with urlopen(request, timeout=130) as response:
+                    with recorder.opener.open(request, timeout=130) as response:
                         code, payload = response.status, response.read(16 * 1024 * 1024)
                 except HTTPError as error:
                     code, payload = error.code, error.read(1024 * 1024)
@@ -158,6 +161,8 @@ def main():
               'configuration': {'max_rounds': 6, 'max_tool_calls': 16, 'max_parallel': 4,
                                 'command_timeout': 30, 'query_timeout': 120},
               'metric_notes': {'misrejection': 'conservative upper bound: any policy-rejected proposal in a task',
+                               'budgets': 'identical supplied settings; v3.2 ignores queryTimeout; external process bound is 145 seconds for both',
+                               'transport': 'private loopback recorder forwards to the real provider with TLS verification and no redirects',
                                'memory': 'sum of process-tree RSS sampled every 30 ms; shared pages counted per process',
                                'first_observation': 'runtime event when available; otherwise upper bound at next model request'},
               'runs': []}

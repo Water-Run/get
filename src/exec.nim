@@ -313,7 +313,7 @@ func implBuildShellArgs(
     # /V:OFF makes delayed !VAR! expansion deterministic and unavailable.
     result = @["/D", "/Q", "/V:OFF", "/C", command]
   elif lower.contains("fish"):
-    result = @["--no-config", "-c", command]
+    result = @["--no-config", "--private", "-c", command]
   elif lower.contains("zsh"):
     result = @["-f", "-c", command]
   elif lower.contains("bash"):
@@ -1259,6 +1259,22 @@ proc implExecuteBounded(
             scratch.replace("\\", "\\\\").replace("\"", "\\\"") & "\"))"
           args = @["-p", profile, shellExecutable] & args
   let childEnvironment = implSanitizedEnvironment()
+  if directExecutable.len == 0 and extractFilename(shellExecutable).toLowerAscii() == "fish":
+    # Older fish initializes XDG directories even with --no-config. Give its
+    # startup bookkeeping private storage, then restore the real environment
+    # before the authorized query. HOME and query path expansion are unchanged.
+    if scratch.len == 0:
+      scratch = expandFilename(createTempDir("get-fish-query-", ""))
+      setFilePermissions(scratch, {fpUserRead, fpUserWrite, fpUserExec})
+    var restore = ""
+    for name in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]:
+      if childEnvironment.hasKey(name):
+        let quoted = "'" & childEnvironment[name].replace("\\", "\\\\").replace("'", "\\'") & "'"
+        restore.add("set --global --export -- " & name & " " & quoted & "; ")
+      else:
+        restore.add("set --erase --global -- " & name & "; ")
+      childEnvironment[name] = scratch
+    args[^1] = restore & args[^1]
   childEnvironment["PWD"] = workDir
   if isolatedCompute:
     for name in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
