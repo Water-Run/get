@@ -1,4 +1,4 @@
-## Tests get v3 defaults and configuration migration.
+## Tests configuration defaults and migration.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -6,7 +6,7 @@
 ## :File: test_config_v3.nim
 ## :License: AGPL-3.0
 ##
-## This suite validates latency-oriented defaults, v2 instance migration, and
+## This suite validates defaults, the removal of schema-4 keys, and
 ## normalization of externally edited hard resource limits without disk IO.
 
 {.experimental: "strictFuncs".}
@@ -20,14 +20,14 @@ import config
 when defined(windows):
   import utils
 
-## Verifies v3 configuration defaults and migration behavior.
-suite "v3 configuration":
-  test "defaults to automatic one-pass behavior":
+## Verifies configuration defaults and migration behavior.
+suite "configuration schema 5":
+  test "defaults keep review and confirmation off":
     let value = defaultConfig()
-    check value.schemaVersion == 4
-    check value.harness == "auto"
+    check value.schemaVersion == 5
     check value.toolProtocol == "auto"
     check not value.doubleCheck
+    check not value.manualConfirm
     check value.markdown
     check value.maxRounds == 6
     check value.maxToolCalls == 16
@@ -41,25 +41,19 @@ suite "v3 configuration":
     check not parseConfigForTest("{\"markdown\":false}").markdown
     check parseConfigForTest("{\"markdown\":\"false\"}").markdown
 
-  test "migrates an enabled v2 instance flag to direct":
-    let value = parseConfigForTest(
-      "{\"instance\":true}")
-    check value.harness == "direct"
-    check value.instance
-
-  test "migrates a disabled v2 instance flag to auto":
-    let value = parseConfigForTest(
-      "{\"instance\":false}")
-    check value.harness == "auto"
-    check not value.instance
-    check value.schemaVersion == 4
+  test "removed keys are dropped and other settings are kept":
+    let value = parseConfigForTest("""{
+      "schemaVersion":4, "instance":true, "harness":"direct", "vivid":false,
+      "commandPattern":"\\brm\\b", "model":"kept-model", "markdown":false
+    }""")
+    check value.schemaVersion == 5
+    check value.model == "kept-model"
+    check not value.markdown
     check value.url == DEFAULT_URL
-    check value.model == DEFAULT_MODEL
     check value.shell.len > 0
 
-  test "normalizes invalid strategies and disabled hard limits":
+  test "normalizes an invalid protocol and disabled hard limits":
     let value = parseConfigForTest("""{
-      "harness":"unknown",
       "toolProtocol":"unknown",
       "maxRounds":0,
       "maxToolCalls":-1,
@@ -67,7 +61,6 @@ suite "v3 configuration":
       "commandTimeout":0,
       "maxOutputBytes":0
     }""")
-    check value.harness == "auto"
     check value.toolProtocol == "auto"
     check value.maxRounds == 6
     check value.maxToolCalls == 16

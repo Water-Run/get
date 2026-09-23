@@ -1,30 +1,35 @@
-## Query orchestration independent of CLI argument parsing and process exit.
-## All fresh and cached plans are owned by this service.
+## One query, from cache lookup to the final answer.
+##
+## 1. Compute the cache identity. An answer hit is printed as is. A plan hit
+##    runs its reads again through the current authorization, and the loop
+##    continues from those fresh observations. A query that disables tools
+##    never runs a cached plan.
+## 2. Run the query loop. Every call is authorized first: the read-only
+##    policy, then the optional second-model review, then the optional
+##    confirmation. A refused call does not run and leaves a ``denied``
+##    observation. Allowed calls run up to ``max-parallel`` at a time.
+## 3. Print the answer on stdout, write one log record, and store the plan
+##    (or, with ``--cache``, the answer) for next time.
 {.experimental: "strictFuncs".}
-import std/[json, os, strformat, strutils, options, times, monotimes]
+import std/[json, os, strutils, options, times, monotimes]
 import cache, config, exec, harness_executor, harness_prompt
 import harness_protocol, harness_runtime, harness_types, llm, logger, prompt
 import style, sysinfo, utils
 import query_policy, tool_registry, query_events
 
-type QueryCancelledError = object of GetError
+## Seconds of the query deadline kept for the model to answer after tools.
+const ANSWER_RESERVE_SEC = 20
 
 # ---------------------------------------------------------------------------
-# Private helpers — LLM call wrappers
+# Private helpers — model calls and authorization
 # ---------------------------------------------------------------------------
 
-## Sends an LLM request and returns the response.
-##
-## :param messages: Conversation messages to send.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :returns: The LLM response.
+## Sends one auxiliary request (the optional review) outside the loop.
 proc implLlmCall(
   messages: seq[LlmMessage],
   cfg: Config,
   key: string,
-  sk: StyleKind = skSimp
+  sk: StyleKind
 ): LlmResponse =
   let req = LlmRequest(
     model: cfg.model,
@@ -42,14 +47,7 @@ proc implLlmCall(
     preferSystemProxy = cfg.systemProxy
   )
 
-# ---------------------------------------------------------------------------
-# Private helpers — shell and pattern resolution
-# ---------------------------------------------------------------------------
-
 ## Resolves the effective shell.
-##
-## :param cfg: The loaded configuration.
-## :returns: A non-empty shell name.
 func implEffectiveShell(cfg: Config): string =
   result =
     if cfg.shell.len > 0: cfg.shell
@@ -58,35 +56,11 @@ func implEffectiveShell(cfg: Config): string =
     raise newException(GetError,
       "configured shell is outside the supported trusted set")
 
-## Resolves the optional supplemental forbidden-command pattern.
+## Asks a second model to review a proposed shell command.
 ##
-## :param cfg: The loaded configuration.
-## :returns: The pattern string to use.
-proc implEffectivePattern(cfg: Config): string =
-  if cfg.commandPattern.isSome:
-    let pat = cfg.commandPattern.get
-    if pat.len == 0:
-      return ""
-    return pat
-  # v3's syntax-aware mandatory policy is authoritative by default. The old
-  # whole-command keyword regex confused dangerous executable names with
-  # ordinary search text and is now opt-in only.
-  result = DEFAULT_COMMAND_PATTERN
-
-# ---------------------------------------------------------------------------
-# Private helpers — safety checks
-# ---------------------------------------------------------------------------
-
-## Performs the double-check safety review on a command.
-##
-## :param command: The command to review.
-## :param query: The original user query.
-## :param info: System information snapshot.
-## :param cfg: The loaded configuration.
-## :param key: The API key.
-## :param sk: The active output style.
-## :returns: The approved (possibly revised) command.
-proc implDoubleCheck(
+## :returns: The approved command, possibly narrowed by the reviewer.
+## :raises: GetError: If the review rejects the command or gives no approval.
+proc implReviewShellCommand(
   command: string,
   query: string,
   info: SysInfo,
@@ -94,46 +68,39 @@ proc implDoubleCheck(
   key: string,
   sk: StyleKind
 ): string =
-  if not cfg.hideProcess:
-    styleProgress(sk, "double-checking command...")
-  let msgs = buildDoubleCheckMessages(
-    command, query, info)
-  let resp = implLlmCall(msgs, cfg, key, sk)
-  let stripped = resp.content.strip()
-  let verdictWords = stripped.splitWhitespace(maxsplit = 1)
+  let resp = implLlmCall(buildDoubleCheckMessages(command, query, info),
+    cfg, key, sk)
+  let verdictWords = resp.content.strip().splitWhitespace(maxsplit = 1)
   let verdict = if verdictWords.len > 0:
       verdictWords[0].strip(
         chars = {'`', '*', '_', '.', ',', ':', ';', '!', '?'})
     else:
       ""
   if cmpIgnoreCase(verdict, "UNSAFE") == 0:
-    styleError(sk,
-      "error: command deemed unsafe by review")
-    raise newException(GetError, "query command was rejected")
+    raise newException(GetError, "the review judged this command unsafe")
   let revised = extractCodeBlock(resp.content)
-  if revised.isSome:
-    result = revised.get
-  else:
-    raise newException(GetError,
-      "safety review returned no explicit command approval")
+  if revised.isNone:
+    raise newException(GetError, "the review returned no approved command")
+  result = revised.get
 
-proc authorizeExecution(call: ToolCall, shell: string): QueryDecision =
+proc implAuthorizeExecution(call: ToolCall, shell: string): QueryDecision =
   result = authorizeQuery(call, shell)
   if result.kind in {qdUnsupported, qdDenied} and
       call.invocationKind in {tikShell, tikProcess} and isolatedComputeAvailable():
     result = authorizeQuery(call, shell, isolatedAvailable = true)
 
-proc authorizeConfiguredQuery(call: ToolCall, query: string, cfg: Config,
-    key: string, info: SysInfo, sk: StyleKind, pattern: string): QueryDecision =
-  result = authorizeExecution(call, implEffectiveShell(cfg))
+## Authorizes one call under the current switches: the read-only policy, then
+## the optional review, then the optional confirmation.
+proc implAuthorize(call: ToolCall, query: string, cfg: Config,
+    key: string, info: SysInfo, sk: StyleKind): QueryDecision =
+  result = implAuthorizeExecution(call, implEffectiveShell(cfg))
   if result.kind != qdAllowed: return
   var checked = call
-  if pattern.len > 0 and not validateCommandPattern(checked.command, pattern):
-    return QueryDecision(kind: qdDenied, reason: "query matches user-configured forbidden pattern")
   if cfg.doubleCheck:
     try:
       if checked.invocationKind == tikShell:
-        checked.command = implDoubleCheck(checked.command, query, info, cfg, key, sk)
+        checked.command = implReviewShellCommand(checked.command, query, info,
+          cfg, key, sk)
       else:
         let response = implLlmCall(@[
           LlmMessage(role: "system", content:
@@ -143,20 +110,21 @@ proc authorizeConfiguredQuery(call: ToolCall, query: string, cfg: Config,
           LlmMessage(role: "user", content: $(%*{"query": query,
             "tool": checked.toolName, "arguments": checked.argumentsJson}))], cfg, key, sk)
         if response.content.strip != "APPROVED":
-          return QueryDecision(kind: qdDenied, reason: "optional review did not approve the query")
+          return QueryDecision(kind: qdDenied, reason: "the review did not approve this call")
     except GetError as error:
       return QueryDecision(kind: qdDenied, reason: error.msg)
-    result = authorizeExecution(checked, implEffectiveShell(cfg))
+    result = implAuthorizeExecution(checked, implEffectiveShell(cfg))
     if result.kind != qdAllowed: return
-    if pattern.len > 0 and not validateCommandPattern(checked.command, pattern):
-      return QueryDecision(kind: qdDenied, reason: "reviewed query matches user-configured forbidden pattern")
-  if cfg.manualConfirm and not confirmExecution(checked.command, sk, cfg.hideProcess):
-    raise newException(QueryCancelledError, "query cancelled")
+  if cfg.manualConfirm and
+      not confirmExecution(callTarget(checked), sk):
+    return QueryDecision(kind: qdDenied, reason: "declined at the confirmation prompt")
 
-proc executeConfiguredBatch(calls: seq[ToolCall], query: string, cfg: Config,
-    key: string, info: SysInfo, sk: StyleKind, pattern: string, budget: RunBudget,
-    maxParallel: int, prior: var seq[ToolObservation],
-    eventSink: HarnessEventSink = nil): seq[ToolObservation] =
+## Authorizes and runs one batch. Results come back in call order; a call
+## identical to an earlier one in this query is answered from that sample
+## unless it asks for a fresh one.
+proc implExecuteBatch(calls: seq[ToolCall], query: string, cfg: Config,
+    key: string, info: SysInfo, sk: StyleKind, budget: RunBudget,
+    maxParallel: int, prior: var seq[ToolObservation]): seq[ToolObservation] =
   result = newSeq[ToolObservation](calls.len)
   var plans: seq[AuthorizedQuery]
   var indexes: seq[int]
@@ -164,11 +132,7 @@ proc executeConfiguredBatch(calls: seq[ToolCall], query: string, cfg: Config,
     var reused = false
     if not call.fresh:
       for previous in prior:
-        let proposed = if previous.proposedCommand.len > 0:
-          previous.proposedCommand else: previous.command
-        if previous.identity == queryIdentity(call) or
-            (previous.identity.len == 0 and call.argumentsJson.len == 0 and
-              previous.toolName == call.toolName and proposed == call.command):
+        if previous.identity.len > 0 and previous.identity == queryIdentity(call):
           result[index] = previous
           result[index].callId = call.id
           result[index].required = call.required
@@ -192,7 +156,7 @@ proc executeConfiguredBatch(calls: seq[ToolCall], query: string, cfg: Config,
         continue
       reviewConfig.timeout = int(remaining)
       if cfg.timeout > 0: reviewConfig.timeout = min(cfg.timeout, reviewConfig.timeout)
-    let decision = authorizeConfiguredQuery(call, query, reviewConfig, key, info, sk, pattern)
+    let decision = implAuthorize(call, query, reviewConfig, key, info, sk)
     if decision.kind != qdAllowed:
       result[index] = ToolObservation(callId: call.id, toolName: call.toolName,
         command: call.command, required: call.required, exitCode: 126,
@@ -203,13 +167,7 @@ proc executeConfiguredBatch(calls: seq[ToolCall], query: string, cfg: Config,
     else:
       indexes.add(index)
       plans.add(decision.plan)
-      if not eventSink.isNil:
-        eventSink(HarnessEvent(kind: hekToolAuthorized, callId: call.id,
-          message: decision.plan.call.command))
   if plans.len > 0:
-    if not eventSink.isNil:
-      eventSink(HarnessEvent(kind: hekBatchStarted,
-        message: "executing " & $plans.len & " query(s)..."))
     let values = executeAuthorizedBatch(plans, implEffectiveShell(cfg), budget, maxParallel)
     for position, value in values:
       let index = indexes[position]
@@ -220,44 +178,30 @@ proc executeConfiguredBatch(calls: seq[ToolCall], query: string, cfg: Config,
         result[index].proposedCommand = calls[index].command
   for observation in result:
     prior.add(observation)
-    if cfg.log:
-      logExecution(query, observation.command, observation.output,
-        observation.exitCode, cfg.logMaxEntries)
 
 # ---------------------------------------------------------------------------
-# Private helpers — v3 unified harness flow
+# Private helpers — budget, protocol fallback, cache
 # ---------------------------------------------------------------------------
 
-## Builds enforced run limits from v3 configuration.
-##
-## :param cfg: Effective runtime configuration.
-## :param kind: Selected harness strategy.
-## :returns: A positive turn/tool/parallel budget and command bounds.
-func implHarnessBudget(cfg: Config, kind: HarnessKind): RunBudget =
-  let defaults = defaultRunBudget(kind)
+## Builds the query's limits from configuration.
+func implBudget(cfg: Config): RunBudget =
+  let defaults = defaultRunBudget()
   result = RunBudget(
     maxTurns:
-      if kind == hkDirect: 1
-      elif cfg.maxRounds > 0: cfg.maxRounds
+      if cfg.maxRounds > 0: cfg.maxRounds
       else: defaults.maxTurns,
     maxToolCalls:
-      if kind == hkDirect: 1
-      elif cfg.maxToolCalls > 0: cfg.maxToolCalls
+      if cfg.maxToolCalls > 0: cfg.maxToolCalls
       else: defaults.maxToolCalls,
     maxParallel:
-      if kind in {hkDirect, hkLoop}: 1
-      elif cfg.maxParallel > 0: cfg.maxParallel
+      if cfg.maxParallel > 0: cfg.maxParallel
       else: defaults.maxParallel,
     commandTimeoutSec: max(cfg.commandTimeout, 0),
     maxOutputBytes: max(cfg.maxOutputBytes, 0),
-    totalTimeoutSec: (if cfg.queryTimeout > 0: cfg.queryTimeout else: DEFAULT_QUERY_TIMEOUT),
-    answerReserveSec: min(DEFAULT_ANSWER_RESERVE, max(1, cfg.queryTimeout div 5))
+    totalTimeoutSec: (if cfg.queryTimeout > 0: cfg.queryTimeout else: DEFAULT_QUERY_TIMEOUT)
   )
 
 ## Detects provider errors that specifically indicate unsupported tool fields.
-##
-## :param message: Sanitized LLM API error message.
-## :returns: True only for compatible client errors mentioning tool features.
 func implCanFallbackTools(message: string): bool =
   let lower = toLowerAscii(message)
   let isClientError =
@@ -269,128 +213,104 @@ func implCanFallbackTools(message: string): bool =
     lower.contains("function")
   result = isClientError and namesToolField
 
-## Stores a deterministic v3 cache entry without another model request.
-##
-## Successful single-command raw results cache the context-specific command so
-## future hits re-run it through the safety gate. Explicit ``--cache`` also
-## permits a final text result to be stored. Multi-step runs are not guessed.
-##
-## :param context: Precomputed versioned cache hashes.
-## :param query: Original user query.
-## :param value: Completed harness result.
-## :param forceResult: Whether the user explicitly requested caching.
-## :param cfg: Effective cache limits.
-## :param sk: Active terminal style.
-proc implStoreHarnessCache(
-  context: CacheContext,
-  query: string,
-  value: HarnessResult,
-  forceResult: bool,
-  cfg: Config,
-  sk: StyleKind
-) =
-  if not context.useCache or value.exitCode != 0:
-    return
-  var entry = CacheEntry()
-  var shouldStore = false
-  if value.termination == htRawToolResult and
-      value.observations.len == 1 and
-      not value.observations[0].timedOut and
-      not value.observations[0].truncated:
-    entry = CacheEntry(
-      hash: context.contextHash,
-      scope: csContext,
-      cacheMode: cmPlan,
-      query: query,
-      command: cachedQueryPlan(value.observations[0]),
-      output: "",
-      timestamp: epochTime().int64
-    )
-    shouldStore = true
-  elif forceResult and value.output.len > 0:
-    entry = CacheEntry(
-      hash: context.contextHash,
-      scope: csContext,
-      cacheMode: cmResult,
-      query: query,
-      command: "",
-      output: value.output,
-      isMarkdown: value.termination == htAnswer,
-      timestamp: epochTime().int64
-    )
-    shouldStore = true
-  if not shouldStore:
-    return
-  try:
-    putCacheEntry(
-      entry,
-      cfg.cacheMaxEntries,
-      cfg.cacheExpiry
-    )
-  except CacheError as error:
-    if not cfg.hideProcess:
-      styleWarning(sk,
-        "warning: cache write skipped — " & error.msg)
-    return
-  if not cfg.hideProcess:
-    let label =
-      if entry.cacheMode in {cmCommand, cmPlan}:
-        "cache: context command stored"
-      else:
-        "cache: context result stored"
-    styleProgress(sk, label)
+## Reads worth replaying next time: those that ran and produced evidence.
+func implPlanObservations(values: seq[ToolObservation]): seq[ToolObservation] =
+  for value in values:
+    if not value.notExecuted and not value.policyRejected and
+        not value.timedOut and value.status in {osCompleted, osNoMatch, osFinding}:
+      result.add(value)
 
-## Runs one query through the unified v3 harness.
-##
-## :param query: Original natural-language request.
-## :param cfg: Effective configuration after CLI overrides.
-## :param key: API bearer token.
-## :param sk: Active terminal style.
-## :param shell: Effective shell executable.
-## :param info: Fast local environment snapshot.
-## :param effectivePattern: Active forbidden-command regex.
-## :param cacheContext: Versioned cache state for deterministic storage.
-## :param forceCache: Whether the user explicitly requested result caching.
-## :param toolsDisabled: Whether this request explicitly forbids tool use.
-proc implHarnessFlow(
+## Stores the plan behind a clean answer, and the answer text too when the
+## user asked for ``--cache``. A failed write only warns.
+proc implStoreCache(context: CacheContext, query: string, value: HarnessResult,
+    forceResult: bool, cfg: Config, sk: StyleKind) =
+  if not context.useCache or value.exitCode != 0 or
+      value.termination != htAnswer:
+    return
+  var entries: seq[CacheEntry] = @[]
+  let reads = implPlanObservations(value.observations)
+  if reads.len > 0:
+    entries.add(CacheEntry(hash: context.key, cacheMode: cmPlan, query: query,
+      plan: encodeCachedQueryPlan(reads), timestamp: epochTime().int64))
+  if forceResult and value.output.len > 0:
+    entries.add(CacheEntry(hash: context.key, cacheMode: cmResult, query: query,
+      output: value.output, isMarkdown: true, timestamp: epochTime().int64))
+  for entry in entries:
+    try:
+      putCacheEntry(entry, cfg.cacheMaxEntries, cfg.cacheExpiry)
+    except CacheError as error:
+      if not cfg.hideProcess:
+        styleWarning(sk, "warning: cache write skipped: " & error.msg)
+      return
+
+# ---------------------------------------------------------------------------
+# Private helpers — the query
+# ---------------------------------------------------------------------------
+
+## Prints the outcome: the answer on stdout; a stop reason and the collected
+## observations on stderr.
+proc implReport(value: HarnessResult, cfg: Config, sk: StyleKind) =
+  case value.termination
+  of htAnswer:
+    styleResult(sk, value.output, markdown = cfg.markdown)
+    if value.exitCode != 0:
+      styleError(sk, "error: " & value.reason)
+  of htRefused:
+    styleError(sk, value.output)
+  else:
+    styleError(sk, "stopped: " & value.reason)
+    if value.observations.len > 0:
+      stderr.writeLine(value.output)
+
+proc implRunQuery(
   query: string,
   cfg: Config,
   key: string,
   sk: StyleKind,
   shell: string,
   info: SysInfo,
-  effectivePattern: string,
   cacheContext: CacheContext,
+  cachedPlan: seq[ToolCall],
   forceCache: bool,
   toolsDisabled: bool
 ): int =
-  let kind = parseHarnessKind(cfg.harness)
   let protocol = parseToolProtocolKind(cfg.toolProtocol)
-  var budget = implHarnessBudget(cfg, kind)
+  var budget = implBudget(cfg)
   let queryDeadline = getMonoTime() + initDuration(seconds = budget.totalTimeoutSec)
-  budget.executionDeadline = queryDeadline - initDuration(seconds = budget.answerReserveSec)
+  budget.executionDeadline = queryDeadline - initDuration(
+    seconds = min(ANSWER_RESERVE_SEC, max(1, budget.totalTimeoutSec div 5)))
   proc remainingRequestTime(): int =
     let remaining = (queryDeadline - getMonoTime()).inMilliseconds
     if remaining <= 0: raise newException(GetError, "whole-query deadline reached")
     result = int(max(1'i64, remaining div 1000))
     if cfg.timeout > 0: result = min(result, cfg.timeout)
-  var initialMessages = buildHarnessMessages(
-    info,
-    query,
-    shell,
-    kind,
-    budget,
-    cfg.systemPrompt,
-    cfg.commandPattern,
-    toolsDisabled
-  )
-  initialMessages[0].content.add("\nConfigured model identifier: " & cfg.model &
+  var messages = buildHarnessMessages(info, query, shell, budget,
+    cfg.systemPrompt, toolsDisabled)
+  messages[0].content.add("\nConfigured model identifier: " & cfg.model &
     ". This is configuration metadata, not a verified backend version.")
   if not toolsDisabled:
-    initialMessages[0].content.add("\nIsolated computation available: " &
+    messages[0].content.add("\nIsolated computation available: " &
       $isolatedComputeAvailable() & ". If unavailable, use native reading tools " &
       "and known host queries; report an unsupported computation as a gap. " &
       "Process/network/device views from isolated computations are not host observations.")
+
+  let events = queryEventSink(cfg, sk)
+  var prior: seq[ToolObservation] = @[]
+  var seeded: seq[ToolObservation] = @[]
+  if cachedPlan.len > 0:
+    seeded = implExecuteBatch(cachedPlan, query, cfg, key, info, sk, budget,
+      min(budget.maxParallel, cachedPlan.len), prior)
+    var values = newJArray()
+    for index, observation in seeded:
+      events(HarnessEvent(kind: hekToolCompleted, callId: observation.callId,
+        tool: observation.toolName, target: callTarget(cachedPlan[index]),
+        status: observation.status, message: $observation.status,
+        elapsedMs: (if observation.notExecuted: -1 else: observation.elapsedMs)))
+      values.add(parseJson(observationJson(observation)))
+    messages.add(LlmMessage(role: "user", content:
+      "These reads answered this question before and were just run again. " &
+      "Fresh observations (JSON): " & $values))
+
   let session = newLlmSession(
     cfg.url,
     key,
@@ -421,12 +341,8 @@ proc implHarnessFlow(
       parallelToolCalls: useNative and allowParallel
     )
     try:
-      return sendLlmRequest(
-        session,
-        request,
-        spinnerLabel = "requesting",
-        timeoutOverrideSec = remainingRequestTime()
-      )
+      return sendLlmRequest(session, request,
+        timeoutOverrideSec = remainingRequestTime())
     except LlmApiError as error:
       if protocol != tpkAuto or not useNative or
           not implCanFallbackTools(error.msg):
@@ -434,81 +350,53 @@ proc implHarnessFlow(
       nativeUnavailable = true
       if not cfg.hideProcess:
         styleWarning(sk,
-          "warning: provider rejected native tools; " &
-          "using structured JSON compatibility")
+          "warning: provider rejected native tools; using strict JSON actions")
       request.tools = @[]
       request.parallelToolCalls = false
-      result = sendLlmRequest(
-        session,
-        request,
-        spinnerLabel = "retrying without native tools",
-        timeoutOverrideSec = remainingRequestTime()
-      )
+      result = sendLlmRequest(session, request,
+        timeoutOverrideSec = remainingRequestTime())
       result.providerRequests += 1
 
-  let events = queryEventSink(cfg, sk)
-  var priorToolObservations: seq[ToolObservation] = @[]
   let runTools: ToolBatchProc = proc(calls: seq[ToolCall],
       maxParallel: int): seq[ToolObservation] =
-    executeConfiguredBatch(calls, query, cfg, key, info, sk, effectivePattern,
-      budget, maxParallel, priorToolObservations, events)
+    implExecuteBatch(calls, query, cfg, key, info, sk, budget, maxParallel, prior)
 
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_THIN)
   let value = runHarness(
-    initialMessages,
+    messages,
     HarnessRunOptions(
-      kind: kind,
       protocol: protocol,
       budget: budget,
       toolsDisabled: toolsDisabled,
       eventSink: events
     ),
     modelTurn,
-    runTools
+    runTools,
+    seedObservations = seeded
   )
-  let summary = querySummary(value.metrics, value.partial, value.exitCode)
-  events(HarnessEvent(kind: hekRunSummary, message: summary,
-    elapsedMs: value.metrics.elapsedMs))
+  events(HarnessEvent(kind: hekRunSummary, elapsedMs: value.metrics.elapsedMs,
+    message: querySummary(value.metrics, value.partial, value.exitCode)))
+  implReport(value, cfg, sk)
   if cfg.log:
-    logExecution(query, "(run summary)", summary, value.exitCode, cfg.logMaxEntries)
-  if not cfg.hideProcess:
-    styleSeparator(sk, DIV_SECTION)
-  if value.output.len > 0:
-    if value.exitCode == 0:
-      styleResult(sk, value.output,
-        markdown = cfg.markdown and value.termination == htAnswer)
-    else:
-      styleError(sk, value.output)
-      for observation in value.observations:
-        if observation.policyRejected:
-          styleError(sk, observation.output)
-          break
-  if cfg.log and value.observations.len == 0:
-    logExecution(
-      query,
-      "(none)",
-      value.output,
-      value.exitCode,
-      cfg.logMaxEntries
-    )
-  implStoreHarnessCache(
-    cacheContext,
-    query,
-    value,
-    forceCache,
-    cfg,
-    sk
-  )
+    logQuery(QueryRecord(query: query, rounds: value.metrics.modelTurns,
+      toolCalls: value.metrics.toolCalls, denied: value.metrics.toolRejections,
+      cacheHit: (if cachedPlan.len > 0: "plan" else: "none"),
+      exitCode: value.exitCode, elapsedMs: value.metrics.elapsedMs),
+      cfg.logMaxEntries)
+  # A plan hit is not written back: the stored plan is already this one.
+  if cachedPlan.len == 0:
+    implStoreCache(cacheContext, query, value, forceCache, cfg, sk)
   result = value.exitCode
 
-proc implExecuteQuery(
-  query: string,
-  cfg: Config,
-  noCache: bool,
-  forceCache: bool
-): int =
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
+## Runs one query and returns its process exit code: 0 success, 1 general
+## failure, 124 timeout, 126 authorization refused with no acceptable
+## alternative.
+proc executeQuery*(query: string, cfg: Config,
+    noCache = false, forceCache = false): int =
+  let started = getMonoTime()
   let key = loadKey()
   if key.isNone:
     raise newException(GetError,
@@ -523,110 +411,42 @@ proc implExecuteQuery(
       "model is not configured." &
       " Run: get set model <model>")
 
-  let sk = toStyleKind(cfg.vivid)
-
+  let sk = detectStyle()
   let shell = implEffectiveShell(cfg)
-  let cwd = getCurrentDir()
   let info = collectFastSysInfo(shell)
-  let effectivePattern = implEffectivePattern(cfg)
   let toolsDisabled = explicitlyDisablesTools(query)
 
-  # Build cache context.  When cache is disabled, all fields
-  # remain at zero/false and no cache logic is executed.
-  let useCache = cfg.cache and (not noCache)
-  if (not cfg.cache) and (not cfg.hideProcess):
-    styleWarning(sk,
-      "warning: cache is disabled in config; " &
-      "all cache logic is bypassed")
-  var cc = CacheContext(
-    useCache: useCache,
-    globalHash: "",
-    contextHash: "")
-
-  if useCache:
+  var context = CacheContext(useCache: cfg.cache and not noCache)
+  var cachedPlan: seq[ToolCall] = @[]
+  if context.useCache:
     let executionIdentity = $(%*{
       "tools": TOOL_SCHEMA_REVISION, "isolated": isolatedComputeAvailable(),
       "review": cfg.doubleCheck, "confirm": cfg.manualConfirm,
       "rounds": cfg.maxRounds, "calls": cfg.maxToolCalls, "parallel": cfg.maxParallel,
       "command_timeout": cfg.commandTimeout, "query_timeout": cfg.queryTimeout,
       "output_bytes": cfg.maxOutputBytes})
-    cc.globalHash = computeGlobalHashV3(
-      query, shell, cfg.model, cfg.url, cfg.harness,
-      cfg.toolProtocol,
-      cfg.systemPrompt, cfg.commandPattern, executionIdentity)
-    cc.contextHash = computeContextHashV3(
-      query, cwd, shell, cfg.model,
-      cfg.url, cfg.harness, cfg.toolProtocol,
-      cfg.systemPrompt,
-      cfg.commandPattern, executionIdentity)
-
-    let store = loadCache()
-    let hit = lookupCache(
-      store, cc.globalHash, cc.contextHash,
-      cfg.cacheExpiry)
+    context.key = computeCacheKey(query, getCurrentDir(), shell, cfg.model,
+      cfg.url, cfg.toolProtocol, cfg.systemPrompt, executionIdentity)
+    let hit = lookupCache(loadCache(), context.key, cfg.cacheExpiry)
     if hit.isSome:
       case hit.get.cacheMode
       of cmResult:
         if not cfg.hideProcess:
-          let label =
-            if hit.get.scope == csGlobal:
-              "(cached: global result)"
-            else:
-              "(cached: context result)"
-          styleProgress(sk, label & "; sampled " & $fromUnix(hit.get.timestamp).utc)
+          styleProgress(sk, "cached answer from " &
+            fromUnix(hit.get.timestamp).local.format("yyyy-MM-dd HH:mm"))
         styleResult(sk, hit.get.output,
           markdown = cfg.markdown and hit.get.isMarkdown)
-        return
-      of cmCommand, cmPlan:
-        # Commands written by an older prompt cannot bypass an explicit
-        # text-only request. Ignore that hit and ask without tool access.
+        if cfg.log:
+          logQuery(QueryRecord(query: query, cacheHit: "result",
+            elapsedMs: (getMonoTime() - started).inMilliseconds),
+            cfg.logMaxEntries)
+        return 0
+      of cmPlan:
         if not toolsDisabled:
-          if not cfg.hideProcess:
-            let label =
-              if hit.get.scope == csGlobal:
-                "(cached: global command)"
-              else:
-                "(cached: context command)"
-            styleProgress(sk, label)
-            styleCommand(sk, "command",
-              hit.get.command)
-          var call: ToolCall
           try:
-            call = if hit.get.cacheMode == cmPlan: decodeCachedQueryPlan(hit.get.command)
-              else: ToolCall(id: "cached-1", toolName: LEGACY_SHELL_TOOL,
-                command: hit.get.command, invocationKind: tikShell, resultMode: trmReturnRaw)
+            cachedPlan = decodeCachedQueryPlan(hit.get.plan)
           except CatchableError:
-            return implHarnessFlow(query, cfg, key.get, sk, shell, info,
-              effectivePattern, cc, forceCache, toolsDisabled)
-          var prior: seq[ToolObservation]
-          var cacheBudget = implHarnessBudget(cfg, hkDirect)
-          cacheBudget.executionDeadline = getMonoTime() +
-            initDuration(seconds = cacheBudget.totalTimeoutSec)
-          let values = executeConfiguredBatch(@[call], query, cfg, key.get,
-            info, sk, effectivePattern, cacheBudget, 1, prior, queryEventSink(cfg, sk))
-          let observation = values[0]
-          if observation.output.len > 0:
-            styleResult(sk, observation.output.strip())
-          return (if observation.timedOut: 124
-            elif observation.truncated: 1 else: observation.exitCode)
+            cachedPlan = @[]
 
-
-  result = implHarnessFlow(
-    query,
-    cfg,
-    key.get,
-    sk,
-    shell,
-    info,
-    effectivePattern,
-    cc,
-    forceCache,
-    toolsDisabled
-  )
-
-proc executeQuery*(query: string, cfg: Config,
-    noCache = false, forceCache = false): int =
-  try:
-    result = implExecuteQuery(query, cfg, noCache, forceCache)
-  except QueryCancelledError:
-    result = 0
+  result = implRunQuery(query, cfg, key.get, sk, shell, info, context,
+    cachedPlan, forceCache, toolsDisabled)

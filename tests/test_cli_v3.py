@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for the get v3 CLI against a local mock provider."""
+"""End-to-end tests for the get CLI against a local mock provider."""
 
 from __future__ import annotations
 
@@ -88,7 +88,6 @@ class GetV3CliTests(unittest.TestCase):
             ("set", "shell", os.environ.get(
                 "GET_V3_TEST_SHELL",
                 "powershell" if cls.target_os == "windows" else "bash")),
-            ("set", "vivid", "false"),
             ("set", "hide-process", "true"),
             ("set", "log", "false"),
             ("set", "cache", "true"),
@@ -157,16 +156,44 @@ class GetV3CliTests(unittest.TestCase):
                 self.assertIn("<!-- FINAL -->", result.stdout)
                 self.assertFalse((self.work / "never-run").exists())
 
-    def test_01d_tool_budget_reserves_a_tool_free_answer(self) -> None:
-        self.assertEqual(self.run_get("set", "max-rounds", "1").returncode, 0)
+    def test_01d_calls_past_the_tool_budget_get_a_result_without_running(self) -> None:
         self.assertEqual(self.run_get("set", "max-tool-calls", "1").returncode, 0)
         try:
             result = self.run_get("budget finalization", "--no-cache")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "budget-answer-ok")
         finally:
-            self.run_get("set", "max-rounds")
             self.run_get("set", "max-tool-calls")
+
+    def test_01e_removed_options_are_rejected(self) -> None:
+        for args in [("set", "vivid", "true"), ("set", "harness", "loop"),
+                     ("set", "instance", "true"), ("set", "command-pattern", "x"),
+                     ("answer-only", "--harness", "direct"),
+                     ("answer-only", "--vivid"), ("answer-only", "--instance")]:
+            with self.subTest(args=args):
+                result = self.run_get(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unknown option", result.stderr)
+
+    def test_01f_process_lines_have_four_columns(self) -> None:
+        result = self.run_get("parallel cli", "--no-cache", "--no-hide-process")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line for line in result.stderr.splitlines()
+                 if line.startswith("run_shell")]
+        self.assertEqual(len(lines), 2, result.stderr)
+        for line in lines:
+            self.assertEqual(line[:15], "run_shell      ")
+            self.assertEqual(line[31:43], "ok          ")
+            self.assertTrue(line[43:].endswith("ms"))
+        self.assertNotIn("===", result.stderr)
+        self.assertNotIn("---", result.stderr)
+        self.assertNotIn("\x1b", result.stderr)
+
+    def test_01g_a_denial_without_alternative_exits_126(self) -> None:
+        result = self.run_get("denied only cli", "--no-cache", "--no-hide-process")
+        self.assertEqual(result.returncode, 126, result.stderr)
+        self.assertEqual(result.stdout.strip(), "could not read")
+        self.assertIn("denied", result.stderr)
 
     def test_02_native_continuation(self) -> None:
         result = self.run_get("continue cli", "--no-cache")
@@ -188,15 +215,15 @@ class GetV3CliTests(unittest.TestCase):
 
     def test_04_parallel_native_calls(self) -> None:
         result = self.run_get(
-            "parallel cli", "--harness", "parallel", "--no-cache")
+            "parallel cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("parallel-a", result.stdout)
         self.assertIn("parallel-b", result.stdout)
 
-    def test_04b_qwen_textual_tool_call(self) -> None:
+    def test_04b_textual_tool_call_markers_are_answer_text(self) -> None:
         result = self.run_get("qwen textual cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "qwen-text-ok")
+        self.assertTrue(result.stdout.startswith("[Tool call] run_shell"))
 
     def test_04c_platform_performance_snapshot(self) -> None:
         result = self.run_get("performance snapshot cli", "--no-cache")
@@ -204,29 +231,19 @@ class GetV3CliTests(unittest.TestCase):
         self.assertTrue(result.stdout.strip())
 
     def test_05_mandatory_policy_blocks_redirection(self) -> None:
-        result = self.run_get("unsafe policy cli", "--harness", "direct", "--no-cache")
+        result = self.run_get("unsafe policy cli", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.work / "never-run").exists())
 
-    def test_05a_dangerous_words_are_not_default_false_positives(self) -> None:
+    def test_05a_dangerous_words_are_not_false_positives(self) -> None:
         result = self.run_get("danger words are data", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "danger-word-rm-delete")
 
-        configured = self.run_get(
-            "set", "command-pattern", r"\b(rm|delete)\b")
-        self.assertEqual(configured.returncode, 0, configured.stderr)
-        try:
-            blocked = self.run_get("danger words are data", "--no-cache")
-            self.assertNotEqual(blocked.returncode, 0)
-            self.assertIn("forbidden pattern", blocked.stderr.lower())
-        finally:
-            restored = self.run_get("set", "command-pattern")
-            self.assertEqual(restored.returncode, 0, restored.stderr)
-
-    def test_05b_textual_tool_call_cannot_bypass_policy(self) -> None:
-        result = self.run_get("qwen textual unsafe cli", "--harness", "direct", "--no-cache")
-        self.assertNotEqual(result.returncode, 0)
+    def test_05b_textual_tool_call_never_executes(self) -> None:
+        result = self.run_get("qwen textual unsafe cli", "--no-cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[Tool call]", result.stdout)
         self.assertFalse((self.work / "never-run").exists())
 
     def test_05c_adversarial_commands_preserve_host_state(self) -> None:
@@ -241,7 +258,7 @@ class GetV3CliTests(unittest.TestCase):
                     marker.write_bytes(b"preserved host state\n")
                     before = marker.stat()
                     result = self.run_get(f"adversarial policy {case_name}",
-                                          "--harness", "direct", "--no-cache")
+                                          "--no-cache")
                     # A shell may return success after a blocked mutation, or a
                     # historical rejection case may be a harmless computation.
                     # The invariant is the real host side effect, not rejection.
@@ -261,7 +278,7 @@ class GetV3CliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported shell", result.stderr.lower())
 
-    def test_05e_auto_harness_recovers_from_policy_rejection(self) -> None:
+    def test_05e_policy_rejection_is_recovered_in_the_loop(self) -> None:
         result = self.run_get("policy recovery cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "policy-recovered")
@@ -296,7 +313,7 @@ class GetV3CliTests(unittest.TestCase):
         marker.write_bytes(b"preserved after review\n")
         try:
             result = self.run_get("force unsafe review", "--double-check",
-                                  "--harness", "direct", "--no-cache")
+                                  "--no-cache")
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(marker.read_bytes(), b"preserved after review\n")
         finally:
@@ -306,27 +323,27 @@ class GetV3CliTests(unittest.TestCase):
         result = self.run_get(
             "review rejects punctuation", "--double-check", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("deemed unsafe", result.stderr.lower())
+        self.assertIn("judged this command unsafe", result.stderr.lower())
 
     def test_06b1_safe_review_rewrite_executes_and_caches_the_actual_command(self) -> None:
         query = "safe review rewrite cli"
-        result = self.run_get(query, "--double-check", "--harness", "direct", "--cache")
+        result = self.run_get(query, "--double-check", "--cache")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "reviewed-ok")
         cache_path = self.host_config_root / "get" / "cache.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        entry = next(item for item in payload["entries"] if item["query"] == query)
-        self.assertEqual(entry["cacheMode"], "plan")
-        plan = json.loads(entry["command"])
-        self.assertIn("reviewed-ok", plan["arguments"]["command"])
-        cached = self.run_get(query, "--double-check", "--harness", "direct", "--cache")
+        entry = next(item for item in payload["entries"]
+                     if item["query"] == query and item["cacheMode"] == "plan")
+        plan = json.loads(entry["plan"])
+        self.assertIn("reviewed-ok", plan[0]["arguments"]["command"])
+        cached = self.run_get(query, "--double-check", "--cache")
         self.assertEqual(cached.returncode, 0, cached.stderr)
         self.assertEqual(cached.stdout.strip(), "reviewed-ok")
 
     def test_06b2_invalid_review_does_not_approve_a_command(self) -> None:
         result = self.run_get("invalid review verdict", "--double-check", "--no-cache")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no explicit command approval", result.stderr)
+        self.assertIn("no approved command", result.stderr)
 
     def test_07_connectivity_probe_requires_an_exact_acknowledgment(self) -> None:
         ready = self.run_get("isok")
@@ -402,7 +419,7 @@ class GetV3CliTests(unittest.TestCase):
                 os.close(slave)
 
         query = "markdown answer without tools terminal"
-        rendered = terminal(query, "--markdown", "--vivid", "--cache")
+        rendered = terminal(query, "--markdown", "--cache")
         self.assertIn("\x1b[1m\x1b[36mReport", rendered)
         self.assertNotIn("```", rendered)
         source = terminal(query, "--no-markdown", "--cache")
@@ -412,10 +429,9 @@ class GetV3CliTests(unittest.TestCase):
         self.assertNotIn("\x1b", plain)
         self.assertIn("• ready", plain)
         self.assertNotIn("# Report", plain)
-        raw = terminal("markdown raw", "--harness", "direct", "--markdown", "--cache")
-        self.assertEqual(raw, "# raw\n**literal**\n")
-        cached_raw = terminal("markdown raw", "--harness", "direct", "--markdown", "--cache")
-        self.assertEqual(cached_raw, raw)
+        dumb = terminal(query, "--markdown", "--cache", extra_env={"TERM": "dumb"})
+        self.assertIn("# Report", dumb)
+        self.assertNotIn("\x1b", dumb)
 
     def test_06c_transient_transport_is_retried_three_times(self) -> None:
         Handler.transient_failures = 0
@@ -446,17 +462,19 @@ class GetV3CliTests(unittest.TestCase):
         finally:
             self.assertEqual(self.run_get("set", "query-timeout").returncode, 0)
 
-    def test_07_command_deadline_returns_124(self) -> None:
+    def test_07_command_deadline_stops_the_child(self) -> None:
         self.assertEqual(
             self.run_get("set", "command-timeout", "1").returncode, 0)
         try:
             started = time.monotonic()
-            result = self.run_get("slow command cli", "--harness", "direct", "--no-cache")
+            result = self.run_get("slow command cli", "--no-cache",
+                                  "--no-hide-process")
             elapsed = time.monotonic() - started
-            self.assertEqual(result.returncode, 124, result.stderr)
-            # Wine process creation and taskkill emulation add several seconds;
-            # the exit code still proves the one-second child deadline fired.
-            self.assertLess(elapsed, 12.0 if self.under_wine else 2.0)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertIn(" timeout ", result.stderr)
+            # Wine process creation and taskkill emulation add several seconds.
+            # A repeated identical call is answered from the first sample.
+            self.assertLess(elapsed, 12.0 if self.under_wine else 3.0)
         finally:
             self.assertEqual(
                 self.run_get("set", "command-timeout").returncode, 0)
@@ -465,7 +483,7 @@ class GetV3CliTests(unittest.TestCase):
         self.assertEqual(
             self.run_get("set", "max-output-bytes", "100").returncode, 0)
         try:
-            result = self.run_get("large output cli", "--harness", "direct", "--no-cache")
+            result = self.run_get("large output cli", "--no-cache")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("truncated", result.stderr.lower())
         finally:
@@ -528,15 +546,15 @@ class GetV3CliTests(unittest.TestCase):
                     expected_proxy_requests,
                 )
 
-    def test_10_cached_command_retains_output_cap(self) -> None:
-        first = self.run_get("large output cached cli", "--harness", "direct")
+    def test_10_changed_limits_do_not_reuse_a_cached_plan(self) -> None:
+        first = self.run_get("large output cached cli")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(
             self.run_get("set", "max-output-bytes", "100").returncode,
             0,
         )
         try:
-            second = self.run_get("large output cached cli", "--harness", "direct")
+            second = self.run_get("large output cached cli")
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("truncated", second.stderr.lower())
         finally:
@@ -601,8 +619,9 @@ class GetV3CliTests(unittest.TestCase):
         entry = next(item for item in payload["entries"] if item["query"] == query)
         # Reuse an actual current identity, rather than duplicating the hash
         # implementation or accidentally testing a stale, nonmatching version.
-        entry.update(cacheMode="command", output="", isMarkdown=False,
-                     command="echo cached-command-executed")
+        entry.update(cacheMode="plan", output="", isMarkdown=False,
+                     plan=json.dumps([{"tool": "run_shell", "arguments": {
+                         "command": "echo cached-command-executed"}}]))
         cache_path.write_text(json.dumps(payload), encoding="utf-8")
         result = self.run_get(query)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -640,7 +659,7 @@ class GetV3CliTests(unittest.TestCase):
                         results)
         cache_path = self.host_config_root / "get" / "cache.json"
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schemaVersion"], 4)
+        self.assertEqual(payload["schemaVersion"], 5)
         self.assertEqual(payload["hashAlgorithm"], "sha256")
         stored_queries = {entry["query"] for entry in payload["entries"]}
         missing_queries = sorted(set(queries) - stored_queries)
@@ -648,7 +667,8 @@ class GetV3CliTests(unittest.TestCase):
             missing_queries,
             f"missing cache entries: {missing_queries}; results={results!r}",
         )
-        self.assertFalse(Path(str(cache_path) + ".lock").exists())
+        # The lock is a persistent sidecar file, never a leftover directory.
+        self.assertFalse(Path(str(cache_path) + ".lock").is_dir())
         self.assertFalse(list(cache_path.parent.glob("cache.json.tmp.*")))
         if self.target_os != "windows":
             self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
@@ -736,6 +756,56 @@ class GetV3CliTests(unittest.TestCase):
         result = self.run_get("v4 isolated computation cli", "--no-cache")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"sum": 45})
+
+    def test_09v5_log_is_one_json_line_per_query(self) -> None:
+        self.assertEqual(self.run_get("set", "log", "true").returncode, 0)
+        try:
+            self.assertEqual(self.run_get("log", "--clean").returncode, 0)
+            result = self.run_get("duplicate reader suppression cli", "--no-cache")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            log_path = self.host_config_root / "get" / "get.log"
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0])
+            self.assertEqual(record["query"], "duplicate reader suppression cli")
+            self.assertEqual(record["tool_calls"], 1)
+            self.assertEqual(record["denied"], 0)
+            self.assertEqual(record["cache_hit"], "none")
+            self.assertEqual(record["exit_code"], 0)
+            self.assertGreaterEqual(record["rounds"], 2)
+            self.assertNotIn("duplicate-evidence", lines[0])
+            shown = self.run_get("log")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertIn("duplicate reader suppression cli", shown.stdout)
+        finally:
+            self.run_get("set", "log", "false")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX install layout")
+    def test_09v5_uninstall_removes_program_and_path_but_keeps_settings(self) -> None:
+        if self.target_os != "linux":
+            self.skipTest("Linux install layout")
+        home = self.root / "uninstall-home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/share/man/man1").mkdir(parents=True)
+        (home / ".local/bin/get").write_text("binary", encoding="utf-8")
+        (home / ".local/share/man/man1/get.1").write_text("man", encoding="utf-8")
+        (home / ".bashrc").write_text(
+            "alias ll='ls -l'\n\n# >>> get installer >>>\nexport PATH=x\n"
+            "# <<< get installer <<<\n", encoding="utf-8")
+        config = home / ".config"
+        env = {"HOME": str(home), "XDG_CONFIG_HOME": str(config)}
+        self.assertEqual(self.run_get("set", "model", "kept", env_override=env).returncode, 0)
+        result = self.run_get("uninstall", env_override=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home / ".local/bin/get").exists())
+        self.assertFalse((home / ".local/share/man/man1/get.1").exists())
+        self.assertEqual((home / ".bashrc").read_text(encoding="utf-8"),
+                         "alias ll='ls -l'\n")
+        self.assertTrue((config / "get/config.json").is_file())
+        purge = self.run_get("uninstall", "--purge", env_override=env)
+        self.assertEqual(purge.returncode, 0, purge.stderr)
+        self.assertFalse((config / "get").exists())
+        self.assertNotEqual(self.run_get("uninstall", "--all", env_override=env).returncode, 0)
 
     def test_14_corrupt_primary_recovers_from_last_good_copy(self) -> None:
         cache_path = self.host_config_root / "get" / "cache.json"

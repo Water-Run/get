@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic local OpenAI-compatible provider for get v3 integration tests."""
+"""Deterministic local OpenAI-compatible provider for get integration tests."""
 
 from __future__ import annotations
 
@@ -129,14 +129,14 @@ class Handler(BaseHTTPRequestHandler):
             "mixed policy batch", "large feedback cli", "duplicate reader suppression",
             "continue"))
         if successful and "budget finalization" in user_text:
-            completed = (not has_tools and len(observations) == 2 and
+            completed = (len(observations) == 2 and
                          any(item.get("exit_code") == 125 for item in observations))
             self._completion(content="budget-answer-ok" if completed
                              else "budget-proposal-accounting-incorrect")
             return
         if "budget finalization" in user_text and not observations:
-            self._tool_completion([("budget-first", output("evidence"), "continue"),
-                                   ("budget-skipped", output("not-needed"), "continue")])
+            self._tool_completion([("budget-first", output("evidence")),
+                                   ("budget-skipped", output("not-needed"))])
             return
         if successful and not special:
             self._completion(content="\n".join(item["output"] for item in successful))
@@ -146,6 +146,13 @@ class Handler(BaseHTTPRequestHandler):
                 "read-only policy or execution limit prevented inspection"}))
             return
 
+        if "denied only cli" in user_text:
+            if observations:
+                self._completion(content="could not read")
+            else:
+                self._query_completion("run_shell", {
+                    "command": "pwd", "shell": "/tmp/untrusted-shell"})
+            return
         if "v4 environment cli" in user_text:
             self._query_completion("read_environment", {
                 "names": ["GET_V4_FIXTURE_LABEL", "GET_V4_FIXTURE_MISSING"]})
@@ -220,9 +227,7 @@ class Handler(BaseHTTPRequestHandler):
         if "markdown raw" in user_text:
             self._tool_completion([(
                 "raw-markdown", "type answer.md" if is_cmd else
-                "Get-Content answer.md" if is_windows else "cat answer.md",
-                "return_raw",
-            )])
+                "Get-Content answer.md" if is_windows else "cat answer.md")])
             return
         if "fallback" in user_text and has_tools:
             self._write(400, {"error": {"message": "unknown field tools"}})
@@ -242,23 +247,21 @@ class Handler(BaseHTTPRequestHandler):
             for case_name, command in ADVERSARIAL_COMMANDS.items():
                 if case_name in user_text:
                     self._tool_completion([
-                        ("attack-1", command, "return_raw"),
+                        ("attack-1", command),
                     ])
                     return
         if "qwen textual unsafe" in user_text and has_tools:
             self._completion(content=(
-                "[Tool call] run_readonly_shell "
+                "[Tool call] run_shell "
                 "{command: echo unsafe > never-run, "
-                "purpose: integration safety test, "
-                "result_mode: return_raw}"
+                "purpose: integration safety test}"
             ))
             return
         if "qwen textual" in user_text and has_tools:
             self._completion(content=(
-                "[Tool call] run_readonly_shell "
+                "[Tool call] run_shell "
                 f"{{command: {output('qwen-text-ok')}, "
-                "purpose: integration compatibility test, "
-                "result_mode: return_raw}"
+                "purpose: integration compatibility test}"
             ))
             return
         if "unknown native recovery" in user_text and any(
@@ -266,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             feedback = [json.loads(message["content"])
                         for message in messages if message.get("role") == "tool"]
             if feedback[-1].get("policy_rejected"):
-                self._tool_completion([("recovered-reader", output("unknown-tool-recovered"), "continue")])
+                self._tool_completion([("recovered-reader", output("unknown-tool-recovered"))])
             else:
                 self._completion(content="unknown-tool-recovered"
                                  if "unknown-tool-recovered" in feedback[-1].get("output", "")
@@ -295,7 +298,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if "malformed protocol recovery" in user_text \
-                and "protocol correction" in user_text:
+                and "nothing was executed" in user_text:
             self._completion(content=json.dumps({
                 "type": "answer",
                 "text": "protocol-recovered",
@@ -320,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._tool_completion([
                 (f"duplicate-{len(feedback) + 1}",
-                 output("duplicate-evidence"), "continue"),
+                 output("duplicate-evidence")),
             ])
             return
         if "performance snapshot" in user_text and has_tools:
@@ -332,13 +335,12 @@ class Handler(BaseHTTPRequestHandler):
                 "top -bn1 | head -n 15"
             )
             self._tool_completion([
-                ("performance-1", command, "return_raw"),
+                ("performance-1", command),
             ])
             return
         if "danger words are data" in user_text and has_tools:
             self._tool_completion([
-                ("danger-words-1", output("danger-word-rm-delete"),
-                 "return_raw"),
+                ("danger-words-1", output("danger-word-rm-delete")),
             ])
             return
         if "large feedback cli" in user_text and has_tools:
@@ -364,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                 "cat large-feedback.txt"
             )
             self._tool_completion([
-                ("feedback-1", command, "continue"),
+                ("feedback-1", command),
             ])
             return
         if "continue" in user_text and any(
@@ -377,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
                      or json.loads(message.get("content", "{}")).get("exit_code") != 0)
                 for message in messages):
             self._tool_completion([
-                ("recovered-2", output("policy-recovered"), "return_raw"),
+                ("recovered-2", output("policy-recovered")),
             ])
             return
         if "mixed policy batch" in user_text and any(
@@ -396,29 +398,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         if "parallel" in user_text and has_tools:
             self._tool_completion([
-                ("parallel-a", output("parallel-a"), "return_raw"),
-                ("parallel-b", output("parallel-b"), "return_raw"),
+                ("parallel-a", output("parallel-a")),
+                ("parallel-b", output("parallel-b")),
             ])
             return
         if "continue" in user_text and has_tools:
             self._tool_completion([
-                ("continue-1", output("evidence"), "continue"),
+                ("continue-1", output("evidence")),
             ])
             return
         if "unsafe policy" in user_text and has_tools:
             self._tool_completion([
-                ("unsafe-1", "printf unsafe > ./never-run", "return_raw"),
+                ("unsafe-1", "printf unsafe > ./never-run"),
             ])
             return
         if "policy recovery" in user_text and has_tools:
             self._tool_completion([
-                ("rejected-1", "printf unsafe > ./never-run", "return_raw"),
+                ("rejected-1", "printf unsafe > ./never-run"),
             ])
             return
         if "mixed policy batch" in user_text and has_tools:
             self._tool_completion([
-                ("mixed-safe", output("mixed-safe-marker"), "continue"),
-                ("mixed-unsafe", "printf unsafe > ./never-run", "continue"),
+                ("mixed-safe", output("mixed-safe-marker")),
+                ("mixed-unsafe", "printf unsafe > ./never-run"),
             ])
             return
         if "slow command" in user_text and has_tools:
@@ -428,7 +430,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sleep 10"
             )
             self._tool_completion([
-                ("slow-1", slow_command, "return_raw"),
+                ("slow-1", slow_command),
             ])
             return
         if "large output" in user_text and has_tools:
@@ -436,8 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                 ("large-1",
                  "systeminfo" if is_cmd else
                  "Get-Process | Format-List *" if is_windows else
-                 "seq 1 5000",
-                 "return_raw"),
+                 "seq 1 5000"),
             ])
             return
         if "fallback" in user_text:
@@ -445,14 +446,14 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "tool_calls",
                 "calls": [{
                     "id": "fallback-1",
-                    "command": output("fallback-ok"),
-                    "result_mode": "return_raw",
+                    "tool": "run_shell",
+                    "arguments": {"command": output("fallback-ok")},
                 }],
             })
             self._completion(content=content)
             return
         self._tool_completion([
-            ("native-1", output("native-ok"), "return_raw"),
+            ("native-1", output("native-ok")),
         ])
 
     def _completion(self, content: str) -> None:
@@ -473,18 +474,17 @@ class Handler(BaseHTTPRequestHandler):
             "usage": {"total_tokens": 9},
         })
 
-    def _tool_completion(self, calls: list[tuple[str, str, str]]) -> None:
+    def _tool_completion(self, calls: list[tuple[str, str]]) -> None:
         tool_calls = []
-        for call_id, command, result_mode in calls:
+        for call_id, command in calls:
             tool_calls.append({
                 "id": call_id,
                 "type": "function",
                 "function": {
-                    "name": "run_readonly_shell",
+                    "name": "run_shell",
                     "arguments": json.dumps({
                         "command": command,
                         "purpose": "integration test",
-                        "result_mode": result_mode,
                     }),
                 },
             })

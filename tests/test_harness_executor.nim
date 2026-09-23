@@ -40,24 +40,21 @@ suite "harness tool executor":
       let calls = @[
         ToolCall(
           id: "first",
-          toolName: READ_ONLY_SHELL_TOOL,
+          toolName: "run_shell",
           command: probe & "first 1000",
-          purpose: "first probe",
-          resultMode: trmReturnRaw
+          purpose: "first probe"
         ),
         ToolCall(
           id: "second",
-          toolName: READ_ONLY_SHELL_TOOL,
+          toolName: "run_shell",
           command: probe & "second 200",
-          purpose: "second probe",
-          resultMode: trmReturnRaw
+          purpose: "second probe"
         ),
         ToolCall(
           id: "third",
-          toolName: READ_ONLY_SHELL_TOOL,
+          toolName: "run_shell",
           command: probe & "third 200",
-          purpose: "third probe",
-          resultMode: trmReturnRaw
+          purpose: "third probe"
         )
       ]
       let budget = RunBudget(
@@ -94,17 +91,15 @@ suite "harness tool executor":
       let calls = @[
         ToolCall(
           id: "first",
-          toolName: READ_ONLY_SHELL_TOOL,
+          toolName: "run_shell",
           command: "echo first",
-          purpose: "first probe",
-          resultMode: trmReturnRaw
+          purpose: "first probe"
         ),
         ToolCall(
           id: "second",
-          toolName: READ_ONLY_SHELL_TOOL,
+          toolName: "run_shell",
           command: "echo second",
-          purpose: "second probe",
-          resultMode: trmReturnRaw
+          purpose: "second probe"
         )
       ]
       let budget = RunBudget(

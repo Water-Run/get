@@ -1,4 +1,4 @@
-## Production-grade deterministic caching for the get v3 harness.
+## Query cache for the get tool.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -6,25 +6,26 @@
 ## :File: cache.nim
 ## :License: AGPL-3.0
 ##
-## Cache identity is provider- and policy-aware, persistence is atomic, and
-## every read is size-bounded and schema-validated. Writers use a small
-## cross-process lock so concurrent get invocations cannot lose updates.
-## A last-good backup provides transparent recovery from a damaged primary.
+## An entry is keyed by the query, working directory, provider, and every
+## setting that changes what a query may do. A ``plan`` entry holds the reads
+## that answered a query; a hit runs them again through authorization. A
+## ``result`` entry holds answer text and is returned without a request.
+## Persistence is atomic, every read is size-bounded and schema-validated,
+## writers share a ``file_lock`` sidecar, and a last-good ``.bak`` copy is read
+## when the primary is damaged. A failed write only warns.
 
 {.experimental: "strictFuncs".}
 
 import std/[algorithm, json, options, os, strformat, strutils, tables, times]
 
-when not defined(windows):
-  import std/monotimes
-
 when defined(posix):
   import std/posix
 elif defined(windows):
-  import std/[widestrs, winlean]
+  import std/winlean
 
 import checksums/sha2
 
+import file_lock
 import style
 import utils
 
@@ -32,42 +33,24 @@ import utils
 # Constants
 # ---------------------------------------------------------------------------
 
-## On-disk cache schema. Older hashes are intentionally invalidated by SHA-256.
-const CACHE_SCHEMA_VERSION* = 4
+## On-disk cache schema. Files with another schema are not read.
+const CACHE_SCHEMA_VERSION* = 5
 
-## Semantic identity of the built-in Harness, prompt, protocol, and mandatory
-## read-only policy. Bump this when a behavior change could make a cached result
-## or command incompatible even though the JSON schema itself remains v3.
-const CACHE_IDENTITY_REVISION* = "get-v4-query-boundary-20260921"
+## Semantic identity of the loop, prompt, tools, and read-only policy. Bump it
+## when a behavior change could make a cached plan or answer wrong; older
+## entries then stop matching and are not migrated.
+const CACHE_IDENTITY_REVISION* = "get-v5-query-loop-20260923"
 
 ## Hard input bound protecting startup from an unexpectedly large cache file.
 const MAX_CACHE_FILE_BYTES* = 64 * 1024 * 1024
 
 ## Bounds for individual persisted values.
 const MAX_CACHE_QUERY_CHARS* = 32_768
-const MAX_CACHE_COMMAND_CHARS* = 32_768
+const MAX_CACHE_PLAN_CHARS* = 262_144
 const MAX_CACHE_OUTPUT_BYTES* = 4 * 1024 * 1024
 
-## Cross-process writer lock behavior.
+## How long a writer waits for the cache lock.
 const CACHE_LOCK_WAIT_MS = 10_000
-when not defined(windows):
-  const CACHE_LOCK_POLL_MS = 10
-  const CACHE_STALE_LOCK_SECONDS = 120
-
-when defined(windows):
-  ## ``winlean`` intentionally exposes only the small Win32 surface needed by
-  ## Nim's runtime.  Cache persistence additionally needs a crash-safe named
-  ## mutex so independent CLI processes cannot lose a read-modify-write.
-  const WAIT_ABANDONED = 0x00000080'i32
-
-  proc createMutexW(
-    attributes: pointer,
-    initialOwner: WINBOOL,
-    name: WideCString
-  ): Handle {.stdcall, dynlib: "kernel32", importc: "CreateMutexW".}
-
-  proc releaseMutex(handle: Handle): WINBOOL {.
-    stdcall, dynlib: "kernel32", importc: "ReleaseMutex".}
 
 ## Timestamps farther into the future are treated as malformed.
 const MAX_CACHE_CLOCK_SKEW_SECONDS = 86_400'i64
@@ -80,48 +63,33 @@ const MAX_CACHE_CLOCK_SKEW_SECONDS = 86_400'i64
 type
   CacheError* = object of GetError
 
-  CacheLock = object
-    when defined(windows):
-      handle: Handle
-    else:
-      path: string
-
-## Whether a cache entry applies globally or to one working directory.
-type
-  CacheScope* = enum
-    csGlobal  ## Valid regardless of working directory.
-    csContext ## Valid only for the original context.
-
 ## Behavior when a cache entry is hit.
 type
   CacheMode* = enum
-    cmPlan    ## Revalidate a typed query plan with current capabilities.
-    cmCommand ## Revalidate and re-execute the cached command.
+    cmPlan    ## Run the cached reads again, then ask the model.
     cmResult  ## Return the cached text without a provider request.
 
 ## A single validated cache entry.
 type
   CacheEntry* = object
-    hash*: string         ## SHA-256 global or context identity.
-    scope*: CacheScope    ## Global or context scope.
-    cacheMode*: CacheMode ## Command or final-result behavior.
+    hash*: string         ## SHA-256 identity of the query and its context.
+    cacheMode*: CacheMode ## Plan or answer text.
     query*: string        ## Original user query text.
-    command*: string      ## Generated shell command for cmCommand.
-    output*: string       ## Final output for cmResult.
+    plan*: string         ## JSON array of reads for cmPlan.
+    output*: string       ## Answer text for cmResult.
     isMarkdown*: bool     ## Model answer, rendered only at terminal display time.
     timestamp*: int64     ## Unix epoch seconds when created.
 
-## In-memory representation of the v3 cache file.
+## In-memory representation of the cache file.
 type
   CacheStore* = object
     entries*: seq[CacheEntry] ## Validated, de-duplicated entries.
 
-## Minimal cache state carried by the unified query dispatcher.
+## Cache state carried through one query.
 type
   CacheContext* = object
-    useCache*: bool      ## Whether this invocation uses the cache.
-    globalHash*: string  ## Identity without working directory.
-    contextHash*: string ## Identity including working directory.
+    useCache*: bool  ## Whether this invocation uses the cache.
+    key*: string     ## Identity of this query in this context.
 
 # ---------------------------------------------------------------------------
 # Private helpers — identity and validation
@@ -133,27 +101,14 @@ func implSha256(value: string): string =
   state.update(value)
   result = $state.digest()
 
-func implScopeToStr(scope: CacheScope): string =
-  case scope
-  of csGlobal: result = "global"
-  of csContext: result = "context"
-
 func implModeToStr(mode: CacheMode): string =
   case mode
   of cmPlan: result = "plan"
-  of cmCommand: result = "command"
   of cmResult: result = "result"
-
-func implParseScope(value: string): Option[CacheScope] =
-  case toLowerAscii(value.strip())
-  of "global": result = some(csGlobal)
-  of "context": result = some(csContext)
-  else: result = none(CacheScope)
 
 func implParseMode(value: string): Option[CacheMode] =
   case toLowerAscii(value.strip())
   of "plan": result = some(cmPlan)
-  of "command": result = some(cmCommand)
   of "result": result = some(cmResult)
   else: result = none(CacheMode)
 
@@ -186,21 +141,21 @@ func implValidEntry(entry: CacheEntry, nowEpoch: int64): bool =
   if not implValidHash(entry.hash) or
       entry.query.len == 0 or
       entry.query.len > MAX_CACHE_QUERY_CHARS or
-      entry.command.len > MAX_CACHE_COMMAND_CHARS or
+      entry.plan.len > MAX_CACHE_PLAN_CHARS or
       entry.output.len > MAX_CACHE_OUTPUT_BYTES or
       entry.query.contains('\0') or
-      entry.command.contains('\0') or
+      entry.plan.contains('\0') or
       entry.output.contains('\0') or
       not implFreshTimestamp(entry.timestamp, nowEpoch, 0):
     return false
   case entry.cacheMode
-  of cmCommand, cmPlan:
-    result = entry.command.strip().len > 0
+  of cmPlan:
+    result = entry.plan.strip().len > 0
   of cmResult:
     result = entry.output.len > 0
 
 func implEntryKey(entry: CacheEntry): string =
-  result = $entry.scope & ":" & entry.hash
+  result = implModeToStr(entry.cacheMode) & ":" & entry.hash
 
 func implCmpEntry(a, b: CacheEntry): int =
   result = cmp(a.timestamp, b.timestamp)
@@ -210,26 +165,19 @@ func implCmpEntry(a, b: CacheEntry): int =
 ## Parses one entry and rejects malformed or oversized fields.
 proc implParseEntry(
   node: JsonNode,
-  defaultScope: CacheScope,
   nowEpoch: int64
 ): Option[CacheEntry] =
   if node.kind != JObject:
     return none(CacheEntry)
   try:
-    let scope =
-      if node{"scope"}.isNil:
-        some(defaultScope)
-      else:
-        implParseScope(node{"scope"}.getStr(""))
     let mode = implParseMode(node{"cacheMode"}.getStr(""))
-    if scope.isNone or mode.isNone:
+    if mode.isNone:
       return none(CacheEntry)
     let entry = CacheEntry(
       hash: node{"hash"}.getStr(""),
-      scope: scope.get,
       cacheMode: mode.get,
       query: node{"query"}.getStr(""),
-      command: node{"command"}.getStr(""),
+      plan: node{"plan"}.getStr(""),
       output: node{"output"}.getStr(""),
       isMarkdown: node{"isMarkdown"}.getBool(false),
       timestamp: node{"timestamp"}.getBiggestInt(0).int64
@@ -259,69 +207,35 @@ proc implNormalizeEntries(entries: seq[CacheEntry]): seq[CacheEntry] =
 # Public API — cache identity
 # ---------------------------------------------------------------------------
 
-## Computes a v3 global key across provider, strategy, protocol, and policy.
-proc computeGlobalHashV3*(
-  query: string,
-  shell: string,
-  model: string,
-  providerUrl: string,
-  harness: string,
-  toolProtocol: string,
-  systemPrompt: Option[string],
-  commandPattern: Option[string],
-  executionIdentity: string = ""
-): string =
-  let customInstruction =
-    if systemPrompt.isSome: systemPrompt.get
-    else: ""
-  let filterPattern =
-    if commandPattern.isSome and commandPattern.get.len > 0:
-      "custom:" & commandPattern.get
-    else:
-      "semantic-policy-only"
-  result = implSha256($(%*[
-    CACHE_IDENTITY_REVISION,
-    executionIdentity,
-    query.strip(),
-    shell,
-    model,
-    providerUrl,
-    harness,
-    toolProtocol,
-    customInstruction,
-    filterPattern,
-    hostOS,
-    hostCPU
-  ]))
-
-## Computes a v3 context key by adding the working directory.
-proc computeContextHashV3*(
+## Computes the identity of a query in its working directory.
+##
+## :param executionIdentity: Tool revision, isolation, review and confirmation
+##   switches, and budgets, as canonical JSON.
+proc computeCacheKey*(
   query: string,
   cwd: string,
   shell: string,
   model: string,
   providerUrl: string,
-  harness: string,
   toolProtocol: string,
   systemPrompt: Option[string],
-  commandPattern: Option[string],
   executionIdentity: string = ""
 ): string =
-  let globalHash = computeGlobalHashV3(
-    query,
+  let customInstruction =
+    if systemPrompt.isSome: systemPrompt.get
+    else: ""
+  result = implSha256($(%*[
+    CACHE_IDENTITY_REVISION,
+    executionIdentity,
+    query.strip(),
+    cwd,
     shell,
     model,
     providerUrl,
-    harness,
     toolProtocol,
-    systemPrompt,
-    commandPattern,
-    executionIdentity
-  )
-  result = implSha256($(%*[
-    "get-v3-context",
-    globalHash,
-    cwd
+    customInstruction,
+    hostOS,
+    hostCPU
   ]))
 
 # ---------------------------------------------------------------------------
@@ -332,14 +246,7 @@ proc implDecodeCache(content: string): CacheStore =
   let node = parseJson(content)
   let nowEpoch = epochTime().int64
   var parsed: seq[CacheEntry] = @[]
-  if node.kind == JArray:
-    # v2 arrays are read only for graceful migration. Their 32-character
-    # hashes fail v3 validation and therefore cannot collide with v3 entries.
-    for item in node:
-      let entry = implParseEntry(item, csContext, nowEpoch)
-      if entry.isSome:
-        parsed.add(entry.get)
-  elif node.kind == JObject:
+  if node.kind == JObject:
     let entriesNode = node{"entries"}
     if entriesNode.isNil or entriesNode.kind != JArray:
       raise newException(CacheError,
@@ -355,7 +262,7 @@ proc implDecodeCache(content: string): CacheStore =
       raise newException(CacheError,
         "cache hash algorithm is unsupported")
     for item in entriesNode:
-      let entry = implParseEntry(item, csContext, nowEpoch)
+      let entry = implParseEntry(item, nowEpoch)
       if entry.isSome:
         parsed.add(entry.get)
   else:
@@ -408,60 +315,20 @@ proc implLoadCacheUnlocked(path: string): CacheStore =
 # Private helpers — lock and atomic persistence
 # ---------------------------------------------------------------------------
 
-proc implAcquireCacheLock(path: string): CacheLock =
-  when defined(windows):
-    # Directory creation is not a reliable cross-process mutex on every
-    # Windows-compatible runtime (notably Wine under heavy contention).  A
-    # named kernel mutex is atomic, releases automatically after a crash, and
-    # makes a successful cache write mean that its update was actually merged.
-    let mutexName = "Local\\get-cache-v3-" &
-      implSha256(toLowerAscii(path))
-    let handle = createMutexW(nil, 0'i32, newWideCString(mutexName))
-    if handle == 0:
-      raise newException(CacheError,
-        "cannot create the cache writer mutex")
-    let waitResult = waitForSingleObject(handle, CACHE_LOCK_WAIT_MS.int32)
-    if waitResult notin [WAIT_OBJECT_0, WAIT_ABANDONED]:
-      discard closeHandle(handle)
-      if waitResult == WAIT_TIMEOUT:
-        raise newException(CacheError,
-          "cache is busy; retry the operation")
-      raise newException(CacheError,
-        "cannot acquire the cache writer mutex")
-    result = CacheLock(handle: handle)
-  else:
-    result.path = path & ".lock"
-    let started = getMonoTime()
-    while true:
-      try:
-        if not existsOrCreateDir(result.path):
-          return
-        try:
-          let age = epochTime().int64 -
-            getLastModificationTime(result.path).toUnix
-          if age > CACHE_STALE_LOCK_SECONDS:
-            removeDir(result.path)
-            continue
-        except OSError, IOError:
-          discard
-      except OSError, IOError:
-        discard
-      if (getMonoTime() - started).inMilliseconds >=
-          CACHE_LOCK_WAIT_MS:
-        raise newException(CacheError,
-          "cache is busy; retry the operation")
-      sleep(CACHE_LOCK_POLL_MS)
+proc implAcquireCacheLock(path: string): FileLock =
+  let lockPath = path & ".lock"
+  # Versions before 5 used a lock directory at this path.
+  if dirExists(lockPath):
+    try: removeDir(lockPath)
+    except OSError: discard
+  try:
+    result = acquireFileLock(lockPath, CACHE_LOCK_WAIT_MS)
+  except FileLockError as error:
+    raise newException(CacheError, "cache is busy; retry the operation (" &
+      error.msg & ")")
 
-proc implReleaseCacheLock(lock: CacheLock) =
-  when defined(windows):
-    if lock.handle != 0:
-      discard releaseMutex(lock.handle)
-      discard closeHandle(lock.handle)
-  else:
-    try:
-      removeDir(lock.path)
-    except OSError, IOError:
-      discard
+proc implReleaseCacheLock(lock: FileLock) =
+  releaseFileLock(lock)
 
 ## Loads the primary cache, transparently falling back to the last-good copy.
 proc loadCache*(): CacheStore =
@@ -470,7 +337,7 @@ proc loadCache*(): CacheStore =
     # Windows does not permit replacing a file while another process has it
     # open without delete sharing.  Readers therefore join the same short
     # critical section as atomic replacement; writers call the unlocked helper
-    # below after they have already acquired this mutex.
+    # below after they have already acquired this lock.
     let lock = implAcquireCacheLock(path)
     try:
       result = implLoadCacheUnlocked(path)
@@ -486,10 +353,9 @@ proc implEncodeCache(store: CacheStore): string =
   for entry in entries:
     entryArray.add(%*{
       "hash": entry.hash,
-      "scope": implScopeToStr(entry.scope),
       "cacheMode": implModeToStr(entry.cacheMode),
       "query": entry.query,
-      "command": entry.command,
+      "plan": entry.plan,
       "output": entry.output,
       "isMarkdown": entry.isMarkdown,
       "timestamp": entry.timestamp
@@ -590,35 +456,25 @@ proc pruneCacheStore*(
     kept = kept[kept.len - maxEntries .. ^1]
   store.entries = kept
 
-## Returns the newest non-expired match using context-result, global-result,
-## context-command, then global-command priority.
+## Returns the newest non-expired match for ``key``, preferring answer text
+## over a plan.
 proc lookupCache*(
   store: CacheStore,
-  globalHash: string,
-  contextHash: string,
+  key: string,
   expiryDays: int
 ): Option[CacheEntry] =
   let nowEpoch = epochTime().int64
-  var candidates: array[4, Option[CacheEntry]]
+  var candidates: array[CacheMode, Option[CacheEntry]]
   for entry in store.entries:
-    if not implFreshTimestamp(
-        entry.timestamp, nowEpoch, expiryDays):
+    if entry.hash != key or
+        not implFreshTimestamp(entry.timestamp, nowEpoch, expiryDays):
       continue
-    var slot = -1
-    if entry.scope == csContext and
-        entry.hash == contextHash:
-      slot = if entry.cacheMode == cmResult: 0 else: 2
-    elif entry.scope == csGlobal and
-        entry.hash == globalHash:
-      slot = if entry.cacheMode == cmResult: 1 else: 3
-    if slot >= 0 and
-        (candidates[slot].isNone or
-         entry.timestamp > candidates[slot].get.timestamp):
-      candidates[slot] = some(entry)
-  for candidate in candidates:
-    if candidate.isSome:
-      return candidate
-  result = none(CacheEntry)
+    if candidates[entry.cacheMode].isNone or
+        entry.timestamp > candidates[entry.cacheMode].get.timestamp:
+      candidates[entry.cacheMode] = some(entry)
+  if candidates[cmResult].isSome:
+    return candidates[cmResult]
+  result = candidates[cmPlan]
 
 ## Adds or replaces one identity and applies expiry and age-based caps.
 proc addCacheEntry*(
@@ -634,7 +490,7 @@ proc addCacheEntry*(
   var kept: seq[CacheEntry] = @[]
   for existing in store.entries:
     if existing.hash != entry.hash or
-        existing.scope != entry.scope:
+        existing.cacheMode != entry.cacheMode:
       kept.add(existing)
   kept.add(entry)
   store.entries = kept
@@ -709,27 +565,15 @@ proc displayCacheInfo*(
   styleKeyValue(sk, "cache",
     if cacheEnabled: "enabled" else: "disabled")
   styleKeyValue(sk, "schema-version", $CACHE_SCHEMA_VERSION)
-  styleKeyValue(sk, "entries", $store.entries.len)
-  var globalCommands = 0
-  var globalResults = 0
-  var contextCommands = 0
-  var contextResults = 0
+  var plans = 0
+  var results = 0
   for entry in store.entries:
-    case entry.scope
-    of csGlobal:
-      if entry.cacheMode in {cmCommand, cmPlan}:
-        globalCommands += 1
-      else:
-        globalResults += 1
-    of csContext:
-      if entry.cacheMode in {cmCommand, cmPlan}:
-        contextCommands += 1
-      else:
-        contextResults += 1
-  styleKeyValue(sk, "global-command entries", $globalCommands)
-  styleKeyValue(sk, "global-result entries", $globalResults)
-  styleKeyValue(sk, "context-command entries", $contextCommands)
-  styleKeyValue(sk, "context-result entries", $contextResults)
+    case entry.cacheMode
+    of cmPlan: plans += 1
+    of cmResult: results += 1
+  styleKeyValue(sk, "entries", $store.entries.len)
+  styleKeyValue(sk, "plan-entries", $plans)
+  styleKeyValue(sk, "result-entries", $results)
   styleKeyValue(sk, "max-entries", formatIntOrDisable(maxEntries))
   styleKeyValue(sk, "expiry",
     if expiryDays <= 0: "never" else: fmt"{expiryDays} days")

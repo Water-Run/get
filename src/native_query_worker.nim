@@ -10,7 +10,7 @@ proc dispatchNativeQueryWorker*() =
   if paramCount() != 5: quit(126)
   enterQueryWorker()
   try:
-    let call = decodeCachedQueryPlan(paramStr(2))
+    let call = decodeQueryCall(paramStr(2))
     let gitReader = gitQueryWords(call, call.shell).len > 0
     if call.invocationKind notin {tikReadFile, tikSearchFiles} and not gitReader: quit(126)
     let timeout = parseJson(paramStr(3)).getInt

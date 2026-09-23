@@ -48,12 +48,13 @@ suite "v4 typed query tools":
       expect ValueError:
         discard parseNativeToolCall("bad", name, raw)
 
-  test "legacy shell tool remains an explicit protocol alias":
-    let call = parseNativeToolCall("old", "run_readonly_shell",
-      """{"command":"pwd","result_mode":"return_raw"}""")
-    check call.invocationKind == tikShell
-    check call.command == "pwd"
-    check call.resultMode == trmReturnRaw
+  test "the old shell tool name and result modes are gone":
+    expect ValueError:
+      discard parseNativeToolCall("old", "run_readonly_shell",
+        """{"command":"pwd"}""")
+    expect ValueError:
+      discard parseNativeToolCall("old", "run_shell",
+        """{"command":"pwd","result_mode":"return_raw"}""")
 
   test "tool schemas and argument validation reject unknown fields together":
     for definition in queryToolDefinitions():
@@ -69,12 +70,12 @@ suite "v4 native observations":
     let missing = parseNativeToolCall("absent", "read_file", $(%*{
       "path": root / "absent.txt", "required": true}))
     let value = executeAuthorizedBatch(@[authorizeQuery(missing, "bash").plan],
-      "bash", defaultRunBudget(hkAuto), 1)[0]
+      "bash", defaultRunBudget(), 1)[0]
     check value.status == osNoMatch
     check value.exitCode == 0
     check not parseJson(value.output)["exists"].getBool
     let directory = parseNativeToolCall("directory", "read_file", $(%*{"path": root}))
-    let invalid = executeBuiltinQuery(directory, defaultRunBudget(hkAuto))
+    let invalid = executeBuiltinQuery(directory, defaultRunBudget())
     check invalid.status == osUnavailable
     check invalid.exitCode != 0
 
@@ -91,7 +92,7 @@ suite "v4 native observations":
         "GET_V4_FIXTURE_MISSING","GET_V4_FIXTURE_TOKEN"]}""")
     let decision = authorizeQuery(call, "bash")
     check decision.kind == qdAllowed
-    let value = executeBuiltinQuery(decision.plan.call, defaultRunBudget(hkAuto))
+    let value = executeBuiltinQuery(decision.plan.call, defaultRunBudget())
     let data = parseJson(value.output)["values"]
     check data["GET_V4_FIXTURE_LABEL"].getStr == "value with spaces; $(echo data)"
     check data["GET_V4_FIXTURE_EMPTY"].getStr == ""
@@ -105,7 +106,7 @@ suite "v4 native observations":
     writeFile(path, "zero\none\ntwo\nthree\nfour\n")
     let call = parseNativeToolCall("file", "read_file", $(%*{
       "path": path, "start_line": 2, "limit": 2}))
-    let value = executeBuiltinQuery(call, defaultRunBudget(hkAuto))
+    let value = executeBuiltinQuery(call, defaultRunBudget())
     check value.exitCode == 0
     let data = parseJson(value.output)
     check data["lines"].len == 2
@@ -116,7 +117,7 @@ suite "v4 native observations":
     check data["has_more"].getBool
     let second = parseNativeToolCall("next", "read_file", $(%*{
       "path": path, "start_line": data["next_line"].getInt, "limit": 2}))
-    let last = parseJson(executeBuiltinQuery(second, defaultRunBudget(hkAuto)).output)
+    let last = parseJson(executeBuiltinQuery(second, defaultRunBudget()).output)
     check last["lines"][0]["text"].getStr == "three"
     check not last["has_more"].getBool
 
@@ -134,17 +135,17 @@ suite "v4 native observations":
     writeFile(root / "nested" / "build" / "generated.nim", "excluded\n")
     let call = parseNativeToolCall("list", "search_files", $(%*{
       "path": root, "pattern": "*.nim", "limit": 1}))
-    let data = parseJson(executeBuiltinQuery(call, defaultRunBudget(hkAuto)).output)
+    let data = parseJson(executeBuiltinQuery(call, defaultRunBudget()).output)
     check data["observed_matches"].getInt == 1
     check data["matches"][0]["path"].getStr == "src/app.nim"
     check data["complete"].getBool
     let allFiles = parseNativeToolCall("all", "search_files", $(%*{
       "path": root, "pattern": "*.nim", "include_ignored": true, "limit": 1}))
-    let allData = parseJson(executeBuiltinQuery(allFiles, defaultRunBudget(hkAuto)).output)
+    let allData = parseJson(executeBuiltinQuery(allFiles, defaultRunBudget()).output)
     check allData["observed_matches"].getInt == 3
     check allData["has_more"].getBool
     let py = parseNativeToolCall("py", "search_files", $(%*{"path": root, "pattern": "*.py"}))
-    let pyData = parseJson(executeBuiltinQuery(py, defaultRunBudget(hkAuto)).output)
+    let pyData = parseJson(executeBuiltinQuery(py, defaultRunBudget()).output)
     check pyData["observed_matches"].getInt == 1
     check pyData["matches"][0]["path"].getStr == "keep.py"
 
@@ -154,12 +155,12 @@ suite "v4 native observations":
     writeFile(root / "data.txt", "first\n[needle].*\nlast\n")
     let call = parseNativeToolCall("match", "search_files", $(%*{
       "path": root, "pattern": "[needle].*", "content": true}))
-    let data = parseJson(executeBuiltinQuery(call, defaultRunBudget(hkAuto)).output)
+    let data = parseJson(executeBuiltinQuery(call, defaultRunBudget()).output)
     check data["observed_matches"].getInt == 1
     check data["matches"][0]["line"].getInt == 2
     let absent = parseNativeToolCall("absent", "search_files", $(%*{
       "path": root, "pattern": "absent", "content": true}))
-    check executeBuiltinQuery(absent, defaultRunBudget(hkAuto)).status == osNoMatch
+    check executeBuiltinQuery(absent, defaultRunBudget()).status == osNoMatch
 
   when defined(posix):
     test "FIFO reads fail promptly instead of waiting for a writer":
@@ -168,7 +169,7 @@ suite "v4 native observations":
       let fifo = root / "pipe"
       require mkfifo(fifo.cstring, Mode(0o600)) == 0
       let call = parseNativeToolCall("fifo", "read_file", $(%*{"path": fifo}))
-      let value = executeBuiltinQuery(call, defaultRunBudget(hkAuto))
+      let value = executeBuiltinQuery(call, defaultRunBudget())
       check value.status == osUnavailable
       check value.output.contains("regular file")
 
@@ -181,7 +182,7 @@ suite "v4 native observations":
         "executable": "printf", "args": ["%s", text], "cwd": root}))
       let decision = authorizeQuery(call, "bash")
       require decision.kind == qdAllowed
-      let values = executeAuthorizedBatch(@[decision.plan], "bash", defaultRunBudget(hkAuto), 1)
+      let values = executeAuthorizedBatch(@[decision.plan], "bash", defaultRunBudget(), 1)
       check values[0].exitCode == 0
       check values[0].output == text
       check not fileExists(marker)
@@ -201,6 +202,6 @@ suite "v4 process observation semantics":
   when defined(posix):
     test "a literal process can report a false condition without failing evidence":
       let call = parseNativeToolCall("missing", "run_process", """{"executable":"test","args":["-e","/GET_V4_NONEXISTENT_FIXTURE_PATH"]}""")
-      let values = executeToolBatch(@[call], "bash", defaultRunBudget(hkAuto), 1)
+      let values = executeToolBatch(@[call], "bash", defaultRunBudget(), 1)
       check values[0].exitCode == 1
       check values[0].status == osNoMatch

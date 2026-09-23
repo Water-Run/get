@@ -1,26 +1,24 @@
-## Tests compact prompt construction for the get v3 harness.
+## Tests compact prompt construction for the query loop.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-08-24
+## :Date: 2026-09-23
 ## :File: test_harness_prompt.nim
 ## :License: AGPL-3.0
 ##
-## This suite guards the direct-first prompt contract and prevents accidental
-## reintroduction of the large eager v2 environment/tool inventory.
+## This suite keeps the prompt short, free of removed strategies and special
+## cases, and prevents reintroducing an eager environment/tool inventory.
 
 {.experimental: "strictFuncs".}
 
 import std/[options, strutils, unittest]
 
 import harness_prompt
-import harness_protocol
 import harness_types
 import sysinfo
 
-## Verifies prompt size, strategy guidance, and native tool schema.
-suite "compact v3 harness prompt":
-  test "automatic prompt stays compact and direct-first":
+suite "query prompt":
+  test "the prompt stays compact and describes one loop":
     let info = SysInfo(
       os: "linux",
       arch: "amd64",
@@ -33,58 +31,34 @@ suite "compact v3 harness prompt":
       shellVersion: "",
       availableTools: @[]
     )
-    let messages = buildHarnessMessages(
-      info,
-      "show cwd",
-      "bash",
-      hkAuto,
-      defaultRunBudget(hkAuto),
-      none(string),
-      none(string)
-    )
+    let messages = buildHarnessMessages(info, "show cwd", "bash",
+      defaultRunBudget(), none(string))
+    let system = messages[0].content
     check messages.len == 2
-    check messages[0].content.len < 3500
-    check messages[0].content.contains("local_date=2026-08-24")
-    check messages[0].content.contains("timezone=Asia/Shanghai")
-    check messages[0].content.contains(".venv")
-    check messages[0].content.contains("one answer turn")
-    check not messages[0].content.contains("Available tools:")
-    check not messages[0].content.contains("<!-- CONTINUE -->")
+    check messages[1].content == "show cwd"
+    check system.len < 3500
+    check system.contains("local_date=2026-08-24")
+    check system.contains("timezone=Asia/Shanghai")
+    check system.contains(".venv")
+    check system.contains("6 model turns")
+    check not system.contains("Available tools:")
+    check not system.contains("<!-- CONTINUE -->")
+    check not system.contains("answer turn")
+    check not system.contains("return_raw")
+    check not system.contains("run_readonly_shell")
 
-  test "includes only an explicit supplemental regex":
-    let info = collectFastSysInfo("bash")
-    let messages = buildHarnessMessages(
-      info,
-      "inspect",
-      "bash",
-      hkDirect,
-      defaultRunBudget(hkDirect),
-      none(string),
-      some("\\bssh\\b")
-    )
-    check messages[0].content.contains("\\bssh\\b")
-    check messages[0].content.contains("returned verbatim")
-    check messages[0].content.contains("otherwise answer directly")
-
-  test "native shell tool has bounded structured arguments":
-    let tool = shellToolDefinition()
-    check tool.name == "run_readonly_shell"
-    check tool.parametersJson.contains("additionalProperties")
-    check tool.parametersJson.contains("result_mode")
-
-  test "weather receives an explicit timezone fallback only when relevant":
+  test "weather has no special case":
     var info = collectFastSysInfo("bash")
     info.timeZone = "Asia/Shanghai"
-    let weather = buildHarnessMessages(
-      info, "今天天气", "bash", hkAuto, defaultRunBudget(hkAuto),
-      none(string), none(string))
-    check weather[1].content.contains("timezone Asia/Shanghai")
-    check weather[1].content.contains("if no place is named")
-    check weather[1].content.contains("curl -q -fsSL --max-time 15")
-    let ordinary = buildHarnessMessages(
-      info, "show cwd", "bash", hkAuto, defaultRunBudget(hkAuto),
-      none(string), none(string))
-    check ordinary[1].content == "show cwd"
+    let weather = buildHarnessMessages(info, "今天天气", "bash",
+      defaultRunBudget(), none(string))
+    check weather[1].content == "今天天气"
+    check not weather[0].content.toLowerAscii.contains("weather")
+
+  test "a configured system prompt is appended":
+    let messages = buildHarnessMessages(collectFastSysInfo("bash"), "inspect",
+      "bash", defaultRunBudget(), some("Prefer metric units."))
+    check messages[0].content.contains("Prefer metric units.")
 
   test "explicit no-tool intent is detected without quoted false positives":
     check explicitlyDisablesTools(
@@ -99,19 +73,11 @@ suite "compact v3 harness prompt":
       "Find files containing `不要调用工具`")
 
   test "text-only prompt omits every tool protocol instruction":
-    let info = collectFastSysInfo("bash")
-    let messages = buildHarnessMessages(
-      info,
-      "Without tools, answer 42",
-      "bash",
-      hkAuto,
-      defaultRunBudget(hkAuto),
-      none(string),
-      none(string),
-      toolsDisabled = true
-    )
+    let messages = buildHarnessMessages(collectFastSysInfo("bash"),
+      "Without tools, answer 42", "bash", defaultRunBudget(), none(string),
+      toolsDisabled = true)
     let system = messages[0].content
     check system.contains("No tools are available")
     check system.contains("text only")
-    check not system.contains(READ_ONLY_SHELL_TOOL)
+    check not system.contains("run_shell")
     check not system.contains("tool_calls")

@@ -33,7 +33,7 @@ suite "v4 Git snapshot queries":
       let decision = authorizeQuery(call, "bash")
       require decision.kind == qdAllowed
       check decision.plan.backend == qbGitSnapshot
-      let values = executeAuthorizedBatch(@[decision.plan], "bash", defaultRunBudget(hkAuto), 1)
+      let values = executeAuthorizedBatch(@[decision.plan], "bash", defaultRunBudget(), 1)
       checkpoint values[0].output
       require values[0].exitCode == 0
       check "snapshot" in values[0].source
@@ -49,7 +49,7 @@ suite "v4 Git snapshot queries":
     let shellCall = parseNativeToolCall("shell", "run_shell", $(%*{
       "command": "git status --porcelain", "cwd": root}))
     let value = executeAuthorizedBatch(@[authorizeQuery(shellCall, "bash").plan],
-      "bash", defaultRunBudget(hkAuto), 1)[0]
+      "bash", defaultRunBudget(), 1)[0]
     check value.exitCode == 0
     check "tracked.txt" in value.output
     check not fileExists(marker)

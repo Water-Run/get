@@ -1,4 +1,4 @@
-## Structured action protocol for the get v3 harness runtime.
+## Structured action protocol for the get query loop.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -8,8 +8,8 @@
 ##
 ## This module validates provider-native tool arguments and structured JSON
 ## actions before they enter the harness state machine.  It also contains the
-## explicit structured text decoder, allowing the runtime itself to
-## operate exclusively on typed actions.
+## strict JSON text decoder used when a provider rejects native tools, so the
+## loop itself operates only on typed actions.
 
 {.experimental: "strictFuncs".}
 
@@ -22,9 +22,6 @@ import tool_registry
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-## Stable name of the built-in read-only shell tool exposed to models.
-const READ_ONLY_SHELL_TOOL* = "run_readonly_shell"
 
 ## Maximum command characters accepted from one model tool call.
 const MAX_COMMAND_CHARS* = 32_768
@@ -86,207 +83,20 @@ func implOptionalString(
       fmt"field '{fieldName}' must be a string")
   result = value.getStr().strip()
 
-## Returns whether a character can appear in a relaxed tool-call field name.
-func implIsFieldChar(value: char): bool =
-  result = value in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', '-'}
-
-## Decodes one string value from a narrowly scoped relaxed object.
-##
-## Qwen-compatible servers can occasionally render a provider tool call as
-## assistant text with unquoted keys and values.  Quoted values still use JSON
-## escaping; single-quoted values are accepted without escape interpretation.
-proc implDecodeRelaxedValue(
-  rawValue: string,
-  fieldName: string
-): string =
-  let value = rawValue.strip()
-  if value.len == 0:
-    raise newException(ValueError,
-      fmt"empty relaxed tool-call field '{fieldName}'")
-  if value[0] == '"':
-    var decoded: JsonNode
-    try:
-      decoded = parseJson(value)
-    except JsonParsingError:
-      raise newException(ValueError,
-        fmt"invalid quoted value for relaxed tool-call field '{fieldName}'")
-    if decoded.kind != JString:
-      raise newException(ValueError,
-        fmt"relaxed tool-call field '{fieldName}' must be a string")
-    return decoded.getStr()
-  if value[0] == '\'':
-    if value.len < 2 or value[^1] != '\'':
-      raise newException(ValueError,
-        fmt"unterminated value for relaxed tool-call field '{fieldName}'")
-    return value[1 ..< value.len - 1]
-  result = value
-
-## Parses the object payload used by Qwen's textual ``[Tool call]`` rendering.
-##
-## Field boundaries are recognised only at top-level commas followed by another
-## ``name:`` pair.  This preserves ordinary commas in shell commands while
-## keeping the accepted compatibility grammar deliberately small.
-proc implParseRelaxedCallObject(payload: string): JsonNode =
-  if payload.len < 2 or payload[0] != '{' or payload[^1] != '}':
-    raise newException(ValueError,
-      "relaxed tool call must contain one braced object")
-  let body = payload[1 ..< payload.len - 1]
-  result = newJObject()
-  var cursor = 0
-  while cursor < body.len:
-    while cursor < body.len and body[cursor].isSpaceAscii:
-      inc cursor
-    if cursor >= body.len:
-      break
-
-    let keyStart = cursor
-    while cursor < body.len and implIsFieldChar(body[cursor]):
-      inc cursor
-    if cursor == keyStart:
-      raise newException(ValueError,
-        "relaxed tool-call field name is invalid")
-    let fieldName = body[keyStart ..< cursor]
-    while cursor < body.len and body[cursor].isSpaceAscii:
-      inc cursor
-    if cursor >= body.len or body[cursor] != ':':
-      raise newException(ValueError,
-        fmt"relaxed tool-call field '{fieldName}' is missing ':'")
-    inc cursor
-
-    let valueStart = cursor
-    var valueEnd = body.len
-    var quote = '\0'
-    var escaped = false
-    var nesting = 0
-    while cursor < body.len:
-      let current = body[cursor]
-      if quote != '\0':
-        if escaped:
-          escaped = false
-        elif current == '\\':
-          escaped = true
-        elif current == quote:
-          quote = '\0'
-        inc cursor
-        continue
-      if current in {'"', '\''}:
-        quote = current
-      elif current in {'(', '[', '{'}:
-        inc nesting
-      elif current in {')', ']', '}'}:
-        if nesting == 0:
-          raise newException(ValueError,
-            "unbalanced relaxed tool-call value")
-        dec nesting
-      elif current == ',' and nesting == 0:
-        var lookahead = cursor + 1
-        while lookahead < body.len and body[lookahead].isSpaceAscii:
-          inc lookahead
-        let nextKeyStart = lookahead
-        while lookahead < body.len and implIsFieldChar(body[lookahead]):
-          inc lookahead
-        let hasNextKey = lookahead > nextKeyStart
-        while lookahead < body.len and body[lookahead].isSpaceAscii:
-          inc lookahead
-        if hasNextKey and lookahead < body.len and body[lookahead] == ':':
-          valueEnd = cursor
-          break
-      inc cursor
-
-    if quote != '\0' or nesting != 0:
-      raise newException(ValueError,
-        "unterminated relaxed tool-call value")
-    if fieldName notin ["command", "purpose", "result_mode"]:
-      raise newException(ValueError,
-        fmt"unsupported relaxed tool-call field '{fieldName}'")
-    if result.hasKey(fieldName):
-      raise newException(ValueError,
-        fmt"duplicate relaxed tool-call field '{fieldName}'")
-    result[fieldName] = %implDecodeRelaxedValue(
-      body[valueStart ..< valueEnd], fieldName)
-
-    if valueEnd < body.len:
-      cursor = valueEnd + 1
-    else:
-      cursor = body.len
-
-func implParseCallNode(
-  node: JsonNode,
-  index: int,
-  defaultMode: ToolResultMode
-): ToolCall
-
-## Decodes a Qwen-style textual tool call when it occupies the whole response.
-##
-## The compatibility path is intentionally constrained to the built-in
-## read-only shell tool.  All decoded commands still pass through the mandatory
-## command policy before execution.
-proc implParseBracketToolAction(
-  content: string
-): Option[HarnessAction] =
-  const Marker = "[tool call]"
-  let candidate = content.strip()
-  if not candidate.toLowerAscii().startsWith(Marker):
-    return none(HarnessAction)
-
-  let remainder = candidate[Marker.len .. ^1].strip()
-  var nameEnd = 0
-  while nameEnd < remainder.len and
-      implIsFieldChar(remainder[nameEnd]):
-    inc nameEnd
-  if nameEnd == 0:
-    raise newException(ValueError,
-      "textual tool call is missing a tool name")
-  let toolName = remainder[0 ..< nameEnd]
-  if not knownQueryTool(toolName):
-    raise newException(ValueError,
-      fmt"unsupported tool '{toolName}'")
-  let payload = remainder[nameEnd .. ^1].strip()
-  if payload.len < 2 or payload[0] != '{' or payload[^1] != '}':
-    raise newException(ValueError,
-      "textual tool call must end with one braced object")
-
-  var arguments: JsonNode
-  try:
-    arguments = parseJson(payload)
-  except JsonParsingError:
-    arguments = implParseRelaxedCallObject(payload)
-  if arguments.kind != JObject:
-    raise newException(ValueError,
-      "textual tool-call arguments must be an object")
-
-  let call = implParseCallNode(
-    %*{
-      "id": "text-tool-1",
-      "tool": toolName,
-      "arguments": arguments
-    },
-    0,
-    trmReturnRaw
-  )
-  result = some(HarnessAction(
-    kind: hakToolCalls,
-    text: "",
-    calls: @[call]
-  ))
-
 ## Decodes one tool-call object from the structured action format.
 ##
 ## :param node: JSON object describing the call.
 ## :param index: Zero-based index used for a fallback call identifier.
-## :param defaultMode: Result mode inherited from the enclosing action.
 ## :returns: A validated ToolCall.
 ## :raises: ValueError: If the call is malformed or names an unknown tool.
 func implParseCallNode(
   node: JsonNode,
-  index: int,
-  defaultMode: ToolResultMode
+  index: int
 ): ToolCall =
   if node.kind != JObject:
     raise newException(ValueError,
       "each tool call must be a JSON object")
-  let toolName = implOptionalString(
-    node, "tool", READ_ONLY_SHELL_TOOL)
+  let toolName = implRequiredString(node, "tool")
   if not knownQueryTool(toolName):
     raise newException(ValueError,
       fmt"unsupported tool '{toolName}'")
@@ -297,12 +107,12 @@ func implParseCallNode(
   let source = if not argsNode.isNil: argsNode else: node
   var arguments = newJObject()
   for key, value in source:
-    if argsNode.isNil and key in ["id", "tool", "type", "after"]:
+    if argsNode.isNil and key in ["id", "tool", "type"]:
       continue
     arguments[key] = value
   let rawId = implOptionalString(node, "id", "local-" & $(index + 1))
   let idValue = if rawId.len > 0: rawId else: "local-" & $(index + 1)
-  result = parseQueryArguments(toolName, idValue, arguments, defaultMode)
+  result = parseQueryArguments(toolName, idValue, arguments)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -319,8 +129,7 @@ func implParseCallNode(
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     let call = parseNativeToolCall(
-##       "call-1", "run_readonly_shell",
-##       "{\"command\":\"uname -a\",\"result_mode\":\"return_raw\"}")
+##       "call-1", "run_shell", "{\"command\":\"uname -a\"}")
 ##     assert call.command == "uname -a"
 proc parseNativeToolCall*(
   callId: string,
@@ -345,8 +154,7 @@ proc parseNativeToolCall*(
       "tool": toolName,
       "arguments": node
     },
-    0,
-    trmReturnRaw
+    0
   )
 
 ## Parses a strict JSON action returned as assistant text.
@@ -413,9 +221,6 @@ proc parseStructuredAction*(
       calls: @[]
     ))
   of "tool", "tool_calls":
-    let globalModeText = implOptionalString(
-      node, "after", "return_raw")
-    let globalMode = parseToolResultMode(globalModeText)
     var calls: seq[ToolCall] = @[]
     let callsNode = node{"calls"}
     if not callsNode.isNil:
@@ -423,10 +228,9 @@ proc parseStructuredAction*(
         raise newException(ValueError,
           "'calls' must be a non-empty array")
       for index in 0 ..< callsNode.len:
-        calls.add(implParseCallNode(
-          callsNode[index], index, globalMode))
+        calls.add(implParseCallNode(callsNode[index], index))
     else:
-      calls.add(implParseCallNode(node, 0, globalMode))
+      calls.add(implParseCallNode(node, 0))
     result = some(HarnessAction(
       kind: hakToolCalls,
       text: "",
@@ -455,9 +259,7 @@ proc decodeTextAction*(content: string): HarnessAction =
   let structured = parseStructuredAction(content)
   if structured.isSome:
     return structured.get
-  let bracketCall = implParseBracketToolAction(content)
-  if bracketCall.isSome:
-    return bracketCall.get
+  # Plain text is the answer; only strict JSON selects a tool action.
   result = HarnessAction(kind: hakAnswer, text: content.strip(), calls: @[])
 
 ## Serialises a tool observation for model feedback.
@@ -468,7 +270,7 @@ proc decodeTextAction*(content: string): HarnessAction =
 ## .. code-block:: nim
 ##   runnableExamples:
 ##     let value = observationJson(ToolObservation(
-##       callId: "c", toolName: "run_readonly_shell",
+##       callId: "c", toolName: "run_shell",
 ##       command: "pwd", output: "/tmp", exitCode: 0,
 ##       elapsedMs: 1, timedOut: false, truncated: false,
 ##       policyRejected: false))

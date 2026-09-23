@@ -1,23 +1,26 @@
-## Unified state-machine runtime for all get v3 harness strategies.
+## The query loop.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-08-24
+## :Date: 2026-09-23
 ## :File: harness_runtime.nim
 ## :License: AGPL-3.0
 ##
-## This module owns model/action/tool/observation transitions independently
-## of terminal rendering and provider transport. Direct, loop, parallel, and
-## automatic behavior are policies over the same typed and budgeted loop.
+## One loop serves every query: ask the model; stop when it answers; otherwise
+## authorize and run the whole batch of calls, return the observations in call
+## order, and ask again. The model and tool boundaries are injected so the loop
+## is independent of terminal rendering and provider transport. Every stop
+## keeps the observations collected so far.
 
 {.experimental: "strictFuncs".}
 
-import std/[json, monotimes, strformat, strutils, times]
+import std/[json, monotimes, strformat, tables, times]
 
 import harness_protocol
 import harness_types
 import observations
 import llm
+import tool_registry
 import utils
 
 const MAX_MODEL_FEEDBACK_BYTES = 12 * 1024
@@ -26,11 +29,11 @@ const MAX_MODEL_FEEDBACK_BYTES = 12 * 1024
 # Types
 # ---------------------------------------------------------------------------
 
-## Raised when a model violates the typed harness contract.
+## Raised when a model violates the typed action contract.
 type
   HarnessProtocolError* = object of GetError
 
-## Invokes one model turn using the supplied conversation and tool policy.
+## Invokes one model request using the supplied conversation and tool policy.
 type
   ModelTurnProc* = proc(
     messages: seq[LlmMessage],
@@ -45,11 +48,10 @@ type
     maxParallel: int
   ): seq[ToolObservation] {.closure.}
 
-## Configures one invocation of the unified harness state machine.
+## Configures one run of the query loop.
 type
   HarnessRunOptions* = object
-    kind*: HarnessKind             ## Strategy policy layered on the loop.
-    protocol*: ToolProtocolKind    ## Native or structured-text protocol.
+    protocol*: ToolProtocolKind    ## Native or strict-JSON tools.
     budget*: RunBudget             ## Hard turn, tool, timeout, and size limits.
     toolsDisabled*: bool           ## Deny native and textual tool actions.
     eventSink*: HarnessEventSink   ## Optional structured event receiver.
@@ -58,165 +60,92 @@ type
 # Private helpers
 # ---------------------------------------------------------------------------
 
-## Returns milliseconds elapsed since a monotonic start time.
-##
-## :param started: Monotonic start timestamp.
-## :returns: Non-negative elapsed milliseconds.
 proc implElapsedMs(started: MonoTime): int64 =
   result = (getMonoTime() - started).inMilliseconds
 
-## Emits an event when a sink was configured.
-##
-## :param options: Run options containing the optional sink.
-## :param event: Structured event to deliver.
 proc implEmit(options: HarnessRunOptions, event: HarnessEvent) =
   if not options.eventSink.isNil:
     options.eventSink(event)
 
-## Converts a provider response to the provider-independent action contract.
+## Converts a provider response to a typed action.
 ##
-## :param response: Parsed provider response.
-## :returns: Validated typed action.
-## :raises: HarnessProtocolError: If native arguments or fallback text is invalid.
-proc implDecodeResponse(
-  response: LlmResponse
-): HarnessAction =
+## A native call with invalid arguments keeps its provider ID and an empty
+## command. The executor rejects it without running anything, and the model
+## sees a matching result it can correct.
+proc implDecodeResponse(response: LlmResponse): HarnessAction =
   if response.toolCalls.len > 0:
     var calls: seq[ToolCall] = @[]
     for nativeCall in response.toolCalls:
       try:
         calls.add(parseNativeToolCall(
-          nativeCall.id,
-          nativeCall.name,
-          nativeCall.arguments
-        ))
+          nativeCall.id, nativeCall.name, nativeCall.arguments))
       except ValueError:
-        # Preserve the provider call ID so the next request can contain the
-        # required matching tool response, but leave the command empty.  The
-        # executor boundary treats this as a rejected protocol proposal and
-        # never sends it to a shell.  This lets a flaky model self-correct
-        # without weakening the only registered tool or aborting a long run.
-        calls.add(ToolCall(
-          id: nativeCall.id,
-          toolName: nativeCall.name,
-          command: "",
-          purpose: "invalid provider tool call",
-          resultMode: trmContinue
-        ))
-    return HarnessAction(
-      kind: hakToolCalls,
-      text: "",
-      calls: calls
-    )
+        calls.add(ToolCall(id: nativeCall.id, toolName: nativeCall.name,
+          command: "", purpose: "invalid provider tool call"))
+    return HarnessAction(kind: hakToolCalls, text: "", calls: calls)
   try:
     result = decodeTextAction(response.content)
   except ValueError as error:
     raise newException(HarnessProtocolError, error.msg)
 
-## Formats terminal observations in stable call order.
-##
-## :param observations: Tool results to expose to the user.
-## :returns: Clean terminal output, with labels for multi-call batches.
-func implFormatRawOutput(observations: seq[ToolObservation]): string =
-  if observations.len == 1:
-    let observation = observations[0]
-    let clean = observation.output.strip()
-    if clean.len > 0:
-      if observation.truncated:
-        return clean & "\n[output truncated at configured limit]"
-      return clean
-    if observation.truncated:
-      return "[output truncated at configured limit]"
-    if observation.timedOut:
-      return "command timed out"
-    if observation.exitCode != 0:
-      return fmt"command exited with code {observation.exitCode}"
-    return "(command completed with no output)"
-  var sections: seq[string] = @[]
-  for observation in observations:
-    var output = observation.output.strip()
-    if output.len == 0 and observation.timedOut:
-      output = "command timed out"
-    elif output.len == 0 and observation.exitCode != 0:
-      output = fmt"command exited with code {observation.exitCode}"
-    if observation.truncated:
-      output.add("\n[output truncated at configured limit]")
-    sections.add(fmt"[{observation.callId}] {observation.command}\n{output}")
-  result = sections.join("\n\n")
-
-## Returns the process-style exit code for a terminal observation batch.
-##
-## :param observations: Completed tool observations.
-## :returns: First non-zero code, timeout code 124, or zero.
-func implBatchExitCode(observations: seq[ToolObservation]): int =
-  for observation in observations:
-    if observation.timedOut:
-      return 124
-    if observation.truncated:
-      return 1
-    if observation.exitCode != 0:
-      return observation.exitCode
-  result = 0
-
-## Adds observations to a native or structured-text conversation.
-##
-## :param messages: Conversation to extend.
-## :param response: Assistant response that proposed the calls.
-## :param observations: Results to feed back.
+## Adds observations to a native or strict-JSON conversation.
 proc implAppendFeedback(
   messages: var seq[LlmMessage],
   response: LlmResponse,
   observations: seq[ToolObservation]
 ) =
-  func compactForModel(observation: ToolObservation): ToolObservation =
-    compactObservation(observation, MAX_MODEL_FEEDBACK_BYTES)
-
   if response.toolCalls.len > 0:
-    messages.add(LlmMessage(
-      role: "assistant",
-      content: response.content,
-      toolCallId: "",
-      toolCallsJson: response.toolCallsJson
-    ))
+    messages.add(LlmMessage(role: "assistant", content: response.content,
+      toolCallsJson: response.toolCallsJson))
     for observation in observations:
-      let feedbackObservation = compactForModel(observation)
-      messages.add(LlmMessage(
-        role: "tool",
-        content: observationJson(feedbackObservation),
-        toolCallId: observation.callId,
-        toolCallsJson: ""
-      ))
+      messages.add(LlmMessage(role: "tool", toolCallId: observation.callId,
+        content: observationJson(
+          compactObservation(observation, MAX_MODEL_FEEDBACK_BYTES))))
   else:
-    messages.add(LlmMessage(
-      role: "assistant",
-      content: response.content,
-      toolCallId: "",
-      toolCallsJson: ""
-    ))
+    messages.add(LlmMessage(role: "assistant", content: response.content))
     var values = newJArray()
     for observation in observations:
-      values.add(parseJson(observationJson(compactForModel(observation))))
-    messages.add(LlmMessage(
-      role: "user",
-      content: "Tool observations (JSON): " & $values,
-      toolCallId: "",
-      toolCallsJson: ""
-    ))
+      values.add(parseJson(observationJson(
+        compactObservation(observation, MAX_MODEL_FEEDBACK_BYTES))))
+    messages.add(LlmMessage(role: "user",
+      content: "Tool observations (JSON): " & $values))
 
-## Finalizes elapsed metrics on a result value.
-##
-## :param value: Result to update and return.
-## :param started: Run start timestamp.
-## :returns: Result with complete elapsed time.
-proc implFinish(value: HarnessResult, started: MonoTime): HarnessResult =
-  result = value
-  result.metrics.elapsedMs = implElapsedMs(started)
+proc implToolCallIds(toolCallsJson: string): seq[string] =
+  if toolCallsJson.len == 0:
+    return
+  try:
+    let node = parseJson(toolCallsJson)
+    if node.kind != JArray:
+      return
+    for item in node:
+      let idNode = item{"id"}
+      if not idNode.isNil and idNode.kind == JString and idNode.getStr.len > 0:
+        result.add(idNode.getStr)
+  except JsonParsingError:
+    discard
 
-## A bounded fallback preserves evidence if the final answer cannot be obtained.
+## Drops tool results that no longer answer an assistant tool call. Providers
+## reject such orphans, so the conversation is cleaned before each request.
+proc implStripOrphanToolResults(messages: seq[LlmMessage]): seq[LlmMessage] =
+  var pending: seq[string] = @[]
+  for message in messages:
+    if message.role == "assistant":
+      pending = implToolCallIds(message.toolCallsJson)
+      result.add(message)
+    elif message.role == "tool":
+      let index = pending.find(message.toolCallId)
+      if index >= 0:
+        pending.delete(index)
+        result.add(message)
+    else:
+      pending.setLen(0)
+      result.add(message)
+
+## Lists the observations collected before a stop, for the user.
 func implIncompleteOutput(observations: seq[ToolObservation]): string =
-  result = "Inspection incomplete: the available observations are listed below."
   if observations.len == 0:
-    return result & " No local evidence was collected."
+    return "No observations were collected."
+  result = "Observations collected before stopping:"
   for observation in observations:
     if result.len >= MAX_MODEL_FEEDBACK_BYTES:
       break
@@ -228,37 +157,49 @@ func implIncompleteOutput(observations: seq[ToolObservation]): string =
         ending -= 1
       preview = preview[0 ..< ending] & "\n[observation shortened]"
     section.add(if preview.len > 0: preview else: "exit " & $observation.exitCode)
+    if observation.truncated:
+      section.add("\n[output truncated at the configured limit]")
+    elif observation.timedOut:
+      section.add("\n[stopped at the command deadline]")
     var remaining = min(section.len, MAX_MODEL_FEEDBACK_BYTES - result.len)
     while remaining > 0 and remaining < section.len and
         (byte(section[remaining]) and 0xC0'u8) == 0x80'u8:
       remaining -= 1
     result.add(section[0 ..< remaining])
 
+## Builds a stopped result that keeps every observation.
+proc implStopped(
+  observations: seq[ToolObservation],
+  metrics: RunMetrics,
+  termination: HarnessTermination,
+  exitCode: int,
+  reason: string,
+  started: MonoTime
+): HarnessResult =
+  result = HarnessResult(output: implIncompleteOutput(observations),
+    exitCode: exitCode, observations: observations, metrics: metrics,
+    termination: termination, partial: true, reason: reason)
+  result.metrics.elapsedMs = implElapsedMs(started)
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-## Runs a query through the unified typed harness state machine.
+## Runs one query through the loop.
 ##
-## The model and tool boundaries are injected so the state machine can be
-## tested deterministically and used with any compatible provider or executor.
-##
-## :param initialMessages: System and user messages for the first turn.
-## :param options: Strategy, protocol, budget, and event configuration.
+## :param initialMessages: System and user messages for the first request.
+## :param options: Protocol, budget, and event configuration.
 ## :param modelTurn: Model request callback.
-## :param runTools: Central policy-and-execution callback.
+## :param runTools: Authorization-and-execution callback for one batch.
 ## :returns: Final output, observations, termination reason, and metrics.
 ## :raises: HarnessProtocolError: If a response violates the action contract.
-## :raises: GetError: If a required callback is absent or returns invalid data.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## :raises: GetError: If the first model request fails, or a callback misbehaves.
 proc runHarness*(
   initialMessages: seq[LlmMessage],
   options: HarnessRunOptions,
   modelTurn: ModelTurnProc,
-  runTools: ToolBatchProc
+  runTools: ToolBatchProc,
+  seedObservations: seq[ToolObservation] = @[]
 ): HarnessResult =
   if modelTurn.isNil or runTools.isNil:
     raise newException(GetError, "harness callbacks must be configured")
@@ -277,179 +218,98 @@ proc runHarness*(
 
   let started = getMonoTime()
   var messages = initialMessages
-  var observations: seq[ToolObservation] = @[]
-  var metrics = RunMetrics(
-    modelTurns: 0,
-    modelRequests: 0,
-    toolCalls: 0,
-    inputOutputTokens: 0,
-    elapsedMs: 0
-  )
-  implEmit(options, HarnessEvent(
-    kind: hekRunStarted,
-    turn: 0,
-    callId: "",
-    message: "run started",
-    elapsedMs: 0
-  ))
+  # Observations from a re-executed cached plan are already in the messages.
+  var observations = seedObservations
+  var metrics = RunMetrics()
+  for observation in seedObservations:
+    if not observation.notExecuted: metrics.toolCalls += 1
+    if observation.policyRejected: metrics.toolRejections += 1
+  # identity -> consecutive turns in which the same call was proposed
+  var streaks = initTable[string, int]()
+  implEmit(options, HarnessEvent(kind: hekRunStarted, message: "run started"))
 
-  var finishOnly = false
-  var recoveryPending = false
-  let totalTurns = options.budget.maxTurns + (if options.kind == hkDirect: 0 else: 1)
-  for turn in 1 .. totalTurns:
+  for turn in 1 .. options.budget.maxTurns:
     if options.budget.totalTimeoutSec > 0 and
-        implElapsedMs(started) >= int64(max(0, options.budget.totalTimeoutSec -
-          options.budget.answerReserveSec)) * 1000:
-      finishOnly = true
-    let finalizing = finishOnly or (options.kind != hkDirect and turn == totalTurns)
-    if recoveryPending and not finalizing:
-      metrics.recoveryTurns += 1
-      recoveryPending = false
-    if finalizing:
-      messages.add(LlmMessage(role: "user", content:
-        "Inspection is complete. No more tools are available. Answer the original " &
-        "question using the observations already collected. State missing evidence " &
-        "plainly; do not invent local facts or output another tool action."))
-    implEmit(options, HarnessEvent(
-      kind: hekModelStarted,
-      turn: turn,
-      callId: "",
-      message: "model turn started",
-      elapsedMs: implElapsedMs(started)
-    ))
-    let enableNative =
-      not options.toolsDisabled and not finalizing and options.protocol != tpkJson
-    let allowParallel = options.kind in {hkAuto, hkParallel} and
-      options.budget.maxParallel > 1 and
+        implElapsedMs(started) >= int64(options.budget.totalTimeoutSec) * 1000:
+      implEmit(options, HarnessEvent(kind: hekRunFailed, turn: turn,
+        message: "query deadline reached", elapsedMs: implElapsedMs(started)))
+      return implStopped(observations, metrics, htTimedOut, 124,
+        fmt"query deadline reached ({options.budget.totalTimeoutSec}s)", started)
+    messages = implStripOrphanToolResults(messages)
+    implEmit(options, HarnessEvent(kind: hekModelStarted, turn: turn,
+      message: "model turn started", elapsedMs: implElapsedMs(started)))
+    let enableNative = not options.toolsDisabled and options.protocol != tpkJson
+    let allowParallel = options.budget.maxParallel > 1 and
       options.budget.maxToolCalls - metrics.toolCalls > 1
     var response: LlmResponse
     try:
-      response = modelTurn(messages, enableNative, allowParallel and not finalizing)
-    except GetError:
-      if not finalizing or observations.len == 0:
+      response = modelTurn(messages, enableNative, allowParallel)
+    except GetError as error:
+      if observations.len == 0:
         raise
-      return implFinish(HarnessResult(output: implIncompleteOutput(observations),
-        exitCode: 1, observations: observations, metrics: metrics,
-        termination: htBudgetExhausted), started)
+      let timedOut = options.budget.totalTimeoutSec > 0 and
+        implElapsedMs(started) >= int64(options.budget.totalTimeoutSec) * 1000
+      return implStopped(observations, metrics,
+        (if timedOut: htTimedOut else: htModelFailed),
+        (if timedOut: 124 else: 1), error.msg, started)
     metrics.modelTurns += 1
     metrics.modelRequests += max(response.providerRequests, 1)
     metrics.inputOutputTokens += response.tokensUsed
-    implEmit(options, HarnessEvent(
-      kind: hekModelCompleted,
-      turn: turn,
-      callId: "",
-      message: response.finishReason,
-      elapsedMs: implElapsedMs(started)
-    ))
+    implEmit(options, HarnessEvent(kind: hekModelCompleted, turn: turn,
+      message: response.finishReason, elapsedMs: implElapsedMs(started)))
 
     var action: HarnessAction
     try:
       action = implDecodeResponse(response)
     except HarnessProtocolError:
-      # A malformed textual action cannot be associated with a native tool
-      # response, but it is also inert: no executor has seen it.  Auto/loop/
-      # parallel runs use one remaining bounded model turn to repair the wire
-      # format instead of failing an otherwise healthy long-running task.
-      # Direct mode remains exactly one turn and therefore fails immediately.
-      if finalizing:
-        return implFinish(HarnessResult(output: implIncompleteOutput(observations),
-          exitCode: 1, observations: observations, metrics: metrics,
-          termination: htBudgetExhausted), started)
-      if options.kind == hkDirect:
-        raise
+      # A bad textual action executed nothing. Correct it within the same
+      # turn cap; there is no separate repair mode.
       const MAX_INVALID_ACTION_CONTEXT = 4096
       var invalidText = response.content
       if invalidText.len > MAX_INVALID_ACTION_CONTEXT:
         var prefixBytes = MAX_INVALID_ACTION_CONTEXT
-        while prefixBytes > 0 and prefixBytes < invalidText.len and
+        while prefixBytes > 0 and
             (byte(invalidText[prefixBytes]) and 0xC0'u8) == 0x80'u8:
           prefixBytes -= 1
         invalidText = invalidText[0 ..< prefixBytes] &
           "\n[invalid action text compacted]"
-      messages.add(LlmMessage(
-        role: "assistant",
-        content: invalidText,
-        toolCallId: "",
-        toolCallsJson: ""
-      ))
-      messages.add(LlmMessage(
-        role: "user",
-        content: "Protocol correction: the previous textual action was " &
-          "invalid and nothing was executed. Return exactly one valid action " &
-          "using the declared read-only tool, or strict JSON with type " &
-          "answer/refuse/tool_calls. Do not include Markdown or commentary.",
-        toolCallId: "",
-        toolCallsJson: ""
-      ))
-      implEmit(options, HarnessEvent(
-        kind: hekActionProposed,
-        turn: turn,
-        callId: "",
-        message: "invalid textual action; requesting protocol correction",
-        elapsedMs: implElapsedMs(started)
-      ))
-      if metrics.recoveryTurns >= MAX_RECOVERY_TURNS:
-        finishOnly = true
-      else:
-        recoveryPending = true
+      messages.add(LlmMessage(role: "assistant", content: invalidText))
+      messages.add(LlmMessage(role: "user", content:
+        "The previous response was not a final answer or strict JSON " &
+        "tool action, and nothing was executed. Reply with the answer, or " &
+        "with strict JSON type answer, refuse, or tool_calls."))
+      implEmit(options, HarnessEvent(kind: hekActionProposed, turn: turn,
+        message: "invalid textual action", elapsedMs: implElapsedMs(started)))
       continue
-    implEmit(options, HarnessEvent(
-      kind: hekActionProposed,
-      turn: turn,
-      callId: "",
-      message: $action.kind,
-      elapsedMs: implElapsedMs(started)
-    ))
+    implEmit(options, HarnessEvent(kind: hekActionProposed, turn: turn,
+      message: $action.kind, elapsedMs: implElapsedMs(started)))
+
     case action.kind
     of hakAnswer:
       let evidence = answerEvidenceStatus(observations)
-      let value = HarnessResult(
-        output: action.text,
-        exitCode: evidence.code,
-        partial: evidence.partial,
-        finalCommand: "",
-        observations: observations,
-        metrics: metrics,
-        termination: htAnswer,
-        refused: false
-      )
-      implEmit(options, HarnessEvent(
-        kind: hekRunCompleted,
-        turn: turn,
-        callId: "",
-        message: "answer",
-        elapsedMs: implElapsedMs(started)
-      ))
-      return implFinish(value, started)
+      implEmit(options, HarnessEvent(kind: hekRunCompleted, turn: turn,
+        message: "answer", elapsedMs: implElapsedMs(started)))
+      result = HarnessResult(output: action.text, exitCode: evidence.code,
+        partial: evidence.partial, observations: observations,
+        metrics: metrics, termination: htAnswer)
+      if evidence.code != 0:
+        result.reason = "required evidence was not collected"
+      result.metrics.elapsedMs = implElapsedMs(started)
+      return
     of hakRefuse:
-      let value = HarnessResult(
-        output: action.text,
-        exitCode: 1,
-        finalCommand: "",
-        observations: observations,
-        metrics: metrics,
-        termination: htRefused,
-        refused: true
-      )
-      implEmit(options, HarnessEvent(
-        kind: hekRunCompleted,
-        turn: turn,
-        callId: "",
-        message: "refused",
-        elapsedMs: implElapsedMs(started)
-      ))
-      return implFinish(value, started)
+      implEmit(options, HarnessEvent(kind: hekRunCompleted, turn: turn,
+        message: "refused", elapsedMs: implElapsedMs(started)))
+      result = HarnessResult(output: action.text, exitCode: 1,
+        observations: observations, metrics: metrics, termination: htRefused,
+        refused: true)
+      result.metrics.elapsedMs = implElapsedMs(started)
+      return
     of hakToolCalls:
-      if finalizing:
-        return implFinish(HarnessResult(output: implIncompleteOutput(observations),
-          exitCode: 1, observations: observations, metrics: metrics,
-          termination: htBudgetExhausted), started)
       if options.toolsDisabled:
         raise newException(HarnessProtocolError,
           "tool calls are disabled for this request")
       if action.calls.len == 0:
-        raise newException(HarnessProtocolError,
-          "tool action contains no calls")
+        raise newException(HarnessProtocolError, "tool action contains no calls")
       var callIds: seq[string] = @[]
       for call in action.calls:
         if call.id.len == 0:
@@ -459,35 +319,35 @@ proc runHarness*(
           raise newException(HarnessProtocolError,
             fmt"duplicate tool call identifier '{call.id}'")
         callIds.add(call.id)
-      if options.kind == hkDirect and action.calls.len > 1:
-        raise newException(HarnessProtocolError,
-          "direct harness permits one tool call")
       let remainingCalls = options.budget.maxToolCalls - metrics.toolCalls
       if remainingCalls <= 0:
-        finishOnly = true
-        continue
+        return implStopped(observations, metrics, htBudgetExhausted, 1,
+          fmt"tool-call limit reached ({options.budget.maxToolCalls})", started)
+
+      var nextStreaks = initTable[string, int]()
+      for call in action.calls:
+        let identity = queryIdentity(call)
+        nextStreaks[identity] = streaks.getOrDefault(identity) + 1
+        if nextStreaks[identity] >= MAX_IDENTICAL_CALL_REPEATS:
+          return implStopped(observations, metrics, htRepeated, 1,
+            fmt"the same {call.toolName} call was repeated " &
+              fmt"{MAX_IDENTICAL_CALL_REPEATS} times", started)
+      streaks = nextStreaks
+
       metrics.toolProposals += action.calls.len
       let selectedCalls = action.calls[0 ..< min(action.calls.len,
         min(remainingCalls, MAX_PROPOSALS_PER_TURN))]
       for call in selectedCalls:
-        implEmit(options, HarnessEvent(
-          kind: hekToolProposed,
-          turn: turn,
-          callId: call.id,
-          message: call.purpose,
-          elapsedMs: implElapsedMs(started)
-        ))
-      let parallelism =
-        if options.kind in {hkAuto, hkParallel}:
-          min(options.budget.maxParallel, selectedCalls.len)
-        else:
-          1
-      var batch = runTools(selectedCalls, parallelism)
+        implEmit(options, HarnessEvent(kind: hekToolProposed, turn: turn,
+          callId: call.id, message: call.purpose, tool: call.toolName,
+          target: callTarget(call), elapsedMs: implElapsedMs(started)))
+      var batch = runTools(selectedCalls,
+        min(options.budget.maxParallel, selectedCalls.len))
       if batch.len != selectedCalls.len:
         raise newException(GetError,
           "tool executor returned an incomplete observation batch")
       for index, observation in batch:
-        let call = action.calls[index]
+        let call = selectedCalls[index]
         if observation.callId != call.id or
             observation.toolName != call.toolName or
             (if observation.proposedCommand.len > 0:
@@ -496,75 +356,34 @@ proc runHarness*(
           raise newException(GetError,
             "tool executor returned an observation that does not match " &
               "its proposed call")
-      for observation in batch:
+      for index, observation in batch:
         if observation.policyRejected:
           metrics.toolRejections += 1
         elif observation.status == osReused:
           metrics.toolReuses += 1
         elif not observation.notExecuted:
           metrics.toolCalls += 1
-      # Every native proposal still receives a matching observation. Calls
-      # outside the budget are inert; do not discard the useful permitted prefix.
+        implEmit(options, HarnessEvent(kind: hekToolCompleted, turn: turn,
+          callId: observation.callId, tool: observation.toolName,
+          target: callTarget(selectedCalls[index]), status: observation.status,
+          message: $observation.status,
+          elapsedMs: (if observation.notExecuted or observation.policyRejected: -1
+            else: observation.elapsedMs)))
+      # Every proposal gets a result, even past the budget, so the history
+      # stays well formed. Those extra calls do not run.
       for index in selectedCalls.len ..< action.calls.len:
         let call = action.calls[index]
         batch.add(ToolObservation(callId: call.id, toolName: call.toolName,
           command: call.command, output:
             "Tool budget reached: this proposal was not executed. Answer from " &
             "the available observations.", exitCode: 125, notExecuted: true,
-          status: osUnsupported, required: call.required, evidenceKey: call.evidenceKey))
+          status: osUnsupported, required: call.required,
+          evidenceKey: call.evidenceKey))
       for observation in batch:
         observations.add(observation)
-        implEmit(options, HarnessEvent(
-          kind: hekToolCompleted,
-          turn: turn,
-          callId: observation.callId,
-          message: $observation.exitCode,
-          elapsedMs: implElapsedMs(started)
-        ))
-
-      if options.kind == hkDirect:
-        let value = HarnessResult(
-          output: implFormatRawOutput(batch),
-          exitCode: implBatchExitCode(batch),
-          finalCommand: batch[^1].command,
-          observations: observations,
-          metrics: metrics,
-          termination: htRawToolResult,
-          refused: false
-        )
-        implEmit(options, HarnessEvent(
-          kind: hekRunCompleted,
-          turn: turn,
-          callId: "",
-          message: "raw tool result",
-          elapsedMs: implElapsedMs(started)
-        ))
-        return implFinish(value, started)
       implAppendFeedback(messages, response, batch)
-      finishOnly = metrics.toolCalls >= options.budget.maxToolCalls
-      for observation in batch:
-        if not observationSucceeded(observation):
-          if metrics.recoveryTurns >= MAX_RECOVERY_TURNS:
-            finishOnly = true
-          else:
-            recoveryPending = true
 
-  let value = HarnessResult(
-    output: implIncompleteOutput(observations),
-    exitCode: 1,
-    finalCommand:
-      if observations.len > 0: observations[^1].command
-      else: "",
-    observations: observations,
-    metrics: metrics,
-    termination: htBudgetExhausted,
-    refused: false
-  )
-  implEmit(options, HarnessEvent(
-    kind: hekRunFailed,
-    turn: options.budget.maxTurns,
-    callId: "",
-    message: "model-turn budget exhausted",
-    elapsedMs: implElapsedMs(started)
-  ))
-  result = implFinish(value, started)
+  implEmit(options, HarnessEvent(kind: hekRunFailed, turn: options.budget.maxTurns,
+    message: "model-turn budget exhausted", elapsedMs: implElapsedMs(started)))
+  result = implStopped(observations, metrics, htBudgetExhausted, 1,
+    fmt"model-request limit reached ({options.budget.maxTurns})", started)

@@ -27,30 +27,41 @@ func observationSucceeded*(value: ToolObservation): bool =
   if value.exitCode == 0: return true
   # Compatibility observations lack argv/status metadata. Interpret only a
   # single literal command, never the first stage of a compound expression.
-  if value.toolName in ["", "run_readonly_shell", "run_shell"]:
+  if value.toolName in ["", "run_shell"]:
     return queryResultStatus(ToolCall(command: value.command), value.exitCode) in
       {osNoMatch, osFinding}
 
+## Exit status of an answer given what the query observed: 0 when the evidence
+## holds, 126 when the only missing evidence was denied by authorization, and
+## 1 when evidence failed for any other reason.
 func answerEvidenceStatus*(values: seq[ToolObservation]): tuple[code: int, partial: bool] =
   if values.len == 0: return (0, false)
   var anyEvidence = false
   var required = initTable[string, bool]()
   var latest = initTable[string, bool]()
   var proven = initTable[string, bool]()
+  var deniedLast = initTable[string, bool]()
   for value in values:
     let success = observationSucceeded(value)
     anyEvidence = anyEvidence or success
     let key = if value.evidenceKey.len > 0: value.evidenceKey else: value.callId
     latest[key] = success
+    deniedLast[key] = value.policyRejected
     # Several readers may establish the same fact. A failed corroboration must
     # not erase successful sibling evidence, regardless of batch result order.
     proven[key] = proven.getOrDefault(key) or success
     if value.required or required.hasKey(key): required[key] = proven[key]
   for success in latest.values:
     result.partial = result.partial or not success
-  if not anyEvidence: result.code = 1
-  for success in required.values:
-    if not success: result.code = 1
+  var failed: seq[string] = @[]
+  if not anyEvidence:
+    for key in latest.keys: failed.add(key)
+  for key, success in required:
+    if not success and key notin failed: failed.add(key)
+  if failed.len == 0: return
+  result.code = 126
+  for key in failed:
+    if not deniedLast.getOrDefault(key): result.code = 1
 
 func compactObservation*(value: ToolObservation, maximum: int): ToolObservation =
   result = value

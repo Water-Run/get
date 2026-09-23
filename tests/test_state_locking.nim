@@ -27,7 +27,7 @@ if paramCount() > 0 and paramStr(1) == "--state-worker":
     of "log":
       for index in 0..<8:
         let tag = paramStr(4) & "-" & $index
-        logExecution(tag, tag, tag & "\n\nend", 0, parseInt(paramStr(5)))
+        logQuery(QueryRecord(query: tag, cacheHit: "none"), parseInt(paramStr(5)))
     else: quit(2)
   quit(0)
 
@@ -145,22 +145,16 @@ suite "serialized configuration and log updates":
           cleanup(workers)
         let content = readFile(getLogFilePath())
         var seen = initHashSet[string]()
-        for entry in content.strip().split("\n\n"):
-          let rows = entry.splitLines()
-          require rows.len == 4
-          let query = parseJson(rows[0].split("query: ", 1)[1]).getStr()
-          let command = parseJson(rows[1].split("command: ", 1)[1]).getStr()
-          let output = parseJson(rows[3].split("output: ", 1)[1]).getStr()
-          check command == query
-          check output == query & "\n\nend"
+        for line in content.strip().splitLines():
+          let query = parseJson(line)["query"].getStr()
           check query notin seen
           seen.incl(query)
         check seen.len == (if limit == 0: 32 else: limit)
 
   test "clean participates in the log writer lock":
     isolatedState:
-      logExecution("one", "pwd", "one", 0)
-      logExecution("two", "pwd", "two", 0)
+      logQuery(QueryRecord(query: "one"))
+      logQuery(QueryRecord(query: "two"))
       let initial = readFile(getLogFilePath())
       let marker = root / "clean-ready"
       let removed = root / "clean-count"

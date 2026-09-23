@@ -30,19 +30,16 @@ import utils
 # ---------------------------------------------------------------------------
 
 ## Default LLM API endpoint URL.
-const DEFAULT_URL* = "https://api.minimaxi.com/v1"
+const DEFAULT_URL* = "https://api.deepseek.com"
 
 ## Default LLM model identifier.
-const DEFAULT_MODEL* = "minimax-m3"
+const DEFAULT_MODEL* = "deepseek-flash"
 
 ## Default for manual-confirm.
 const DEFAULT_MANUAL_CONFIRM* = false
 
 ## Default for double-check.
 const DEFAULT_DOUBLE_CHECK* = false
-
-## Default for instance mode.
-const DEFAULT_INSTANCE* = false
 
 ## Default API request timeout in seconds.
 const DEFAULT_TIMEOUT* = 300
@@ -71,25 +68,19 @@ const DEFAULT_CACHE_MAX_ENTRIES* = 1000
 ## Default maximum number of log entries retained.
 const DEFAULT_LOG_MAX_ENTRIES* = 1000
 
-## Default vivid mode flag.
-const DEFAULT_VIVID* = true
-
 ## Render model Markdown when stdout is an interactive terminal.
 const DEFAULT_MARKDOWN* = true
 
-## Default maximum number of model turns in one harness run.
+## Default maximum number of model requests in one query.
 const DEFAULT_MAX_ROUNDS* = DEFAULT_HARNESS_TURNS
 
 ## Current on-disk configuration schema version.
-const DEFAULT_SCHEMA_VERSION* = 4
-
-## Default unified harness strategy.
-const DEFAULT_HARNESS* = "auto"
+const DEFAULT_SCHEMA_VERSION* = 5
 
 ## Default provider tool-call protocol.
 const DEFAULT_TOOL_PROTOCOL* = "auto"
 
-## Default maximum tool calls per harness run.
+## Default maximum tool calls per query.
 const DEFAULT_MAX_TOOL_CALLS* = DEFAULT_TOOL_CALLS
 
 ## Default maximum concurrent tool calls.
@@ -131,12 +122,9 @@ type
     model*: string                   ## LLM model identifier.
     manualConfirm*: bool             ## Prompt before executing.
     doubleCheck*: bool               ## Second model review.
-    instance*: bool                  ## v2 alias for the direct harness.
-    harness*: string                 ## Unified v3 harness strategy.
     toolProtocol*: string            ## Native, JSON, or automatic tools.
     timeout*: int                    ## Per-request timeout (s).
     maxToken*: int                   ## Max tokens per request.
-    commandPattern*: Option[string]  ## Forbidden-cmd regex.
     systemPrompt*: Option[string]    ## Custom system prompt.
     shell*: string                   ## Shell executable.
     log*: bool                       ## Log requests.
@@ -147,10 +135,9 @@ type
     cacheExpiry*: int                ## Cache expiry in days.
     cacheMaxEntries*: int            ## Max cached entries.
     logMaxEntries*: int              ## Max log entries.
-    vivid*: bool                     ## Vivid output mode.
     markdown*: bool                  ## Render model answers in interactive terminals.
-    maxRounds*: int                  ## Max inspection turns; one final answer turn follows.
-    maxToolCalls*: int               ## Max tool calls per harness run.
+    maxRounds*: int                  ## Max model requests per query.
+    maxToolCalls*: int               ## Max tool calls per query.
     maxParallel*: int                ## Max concurrent tool calls.
     queryTimeout*: int               ## Whole-query deadline, including final answer.
     commandTimeout*: int             ## Per-command deadline in seconds.
@@ -263,8 +250,7 @@ when defined(windows):
 func implDefaultShell(): string =
   result = defaultShell()
 
-## Shell names recognised as well-supported by the prompt
-## builder; anything outside this set is flagged in vivid mode.
+## Shell names recognised as well-supported by the prompt builder.
 const KNOWN_SHELLS = [
   "bash", "zsh", "fish", "sh",
   "powershell", "pwsh", "cmd"]
@@ -299,12 +285,10 @@ func isSupportedShell*(shell: string): bool =
   result = path in KNOWN_SHELLS
 
 # ---------------------------------------------------------------------------
-# Private helpers — semantic value classification (vivid mode)
+# Private helpers — semantic value classification
 # ---------------------------------------------------------------------------
 
-## Classifies a boolean value for vivid colouring: true is
-## treated as the positive (green) state and false as the muted
-## (grey) state, applied uniformly to every boolean option.
+## Classifies a boolean value: true is positive, false is muted.
 ##
 ## :param value: The boolean option value.
 ## :returns: vsGood for true, vsBad for false.
@@ -346,33 +330,6 @@ func classifyModel*(model: string): ValueState =
 func classifyUrl*(url: string): ValueState =
   if url.len > 0: vsNeutral else: vsWarn
 
-## Builds the display text, semantic state, and optional highlighted trailer
-## for command-pattern. The default is the mandatory semantic policy alone;
-## an explicitly cleared supplemental pattern has the same effective policy,
-## while a custom organization policy is shown in emphatic red.
-##
-## :param pattern: The configured command-pattern option.
-## :returns: A tuple of (display text, state, trailer).
-func classifyCommandPattern*(
-  pattern: Option[string]
-): tuple[text: string, state: ValueState,
-         trailer: string] =
-  if pattern.isNone:
-    result = (
-      text: "(semantic policy only)",
-      state: vsMuted,
-      trailer: "(default)")
-  elif pattern.get.len == 0:
-    result = (
-      text: "(semantic policy only)",
-      state: vsMuted,
-      trailer: "(supplemental regex cleared)")
-  else:
-    result = (
-      text: pattern.get,
-      state: vsDanger,
-      trailer: "(custom)")
-
 ## Parses a boolean string.  Empty input returns the default.
 ##
 ## :param value: Raw string from the CLI.
@@ -394,19 +351,6 @@ func implParseBool(
     raise newException(GetError,
       fmt"invalid value '{value}' for " &
       fmt"'{optName}': expected 'true' or 'false'")
-
-## Validates and normalizes a harness configuration value.
-##
-## :param value: Raw harness name.
-## :param fallback: Value used when the input is empty or invalid.
-## :returns: Stable harness name.
-func implHarnessOrDefault(value: string, fallback: string): string =
-  if value.len == 0:
-    return fallback
-  try:
-    result = harnessName(parseHarnessKind(value))
-  except ValueError:
-    result = fallback
 
 ## Validates and normalizes a tool-protocol configuration value.
 ##
@@ -496,8 +440,6 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "model":           cfg.model,
     "manualConfirm":   cfg.manualConfirm,
     "doubleCheck":     cfg.doubleCheck,
-    "instance":        cfg.instance,
-    "harness":         cfg.harness,
     "toolProtocol":    cfg.toolProtocol,
     "timeout":         cfg.timeout,
     "maxToken":        cfg.maxToken,
@@ -510,7 +452,6 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "cacheExpiry":     cfg.cacheExpiry,
     "cacheMaxEntries": cfg.cacheMaxEntries,
     "logMaxEntries":   cfg.logMaxEntries,
-    "vivid":           cfg.vivid,
     "markdown":        cfg.markdown,
     "maxRounds":       cfg.maxRounds,
     "maxToolCalls":    cfg.maxToolCalls,
@@ -519,9 +460,6 @@ proc implConfigToJson(cfg: Config): JsonNode =
     "commandTimeout":  cfg.commandTimeout,
     "maxOutputBytes":  cfg.maxOutputBytes
   }
-  if cfg.commandPattern.isSome:
-    result["commandPattern"] =
-      %cfg.commandPattern.get
   if cfg.systemPrompt.isSome:
     result["systemPrompt"] =
       %cfg.systemPrompt.get
@@ -535,18 +473,8 @@ proc implJsonToConfig(
   node: JsonNode,
   defaults: Config
 ): Config =
-  let legacyInstance = node{"instance"}.getBool(
-    defaults.instance)
-  let migratedHarness =
-    if not node{"harness"}.isNil:
-      implHarnessOrDefault(
-        node{"harness"}.getStr(""),
-        defaults.harness
-      )
-    elif legacyInstance:
-      "direct"
-    else:
-      defaults.harness
+  # Keys removed in schema 5 (instance, harness, vivid, commandPattern) are
+  # ignored here and dropped on the next save.
   let storedMaxRounds = node{"maxRounds"}.getInt(
     defaults.maxRounds)
   let storedMaxToolCalls = node{"maxToolCalls"}.getInt(
@@ -569,8 +497,6 @@ proc implJsonToConfig(
       defaults.manualConfirm),
     doubleCheck: node{"doubleCheck"}.getBool(
       defaults.doubleCheck),
-    instance: migratedHarness == "direct",
-    harness: migratedHarness,
     toolProtocol: implProtocolOrDefault(
       node{"toolProtocol"}.getStr(""),
       defaults.toolProtocol),
@@ -593,7 +519,6 @@ proc implJsonToConfig(
         defaults.cacheMaxEntries),
     logMaxEntries: node{"logMaxEntries"}.getInt(
       defaults.logMaxEntries),
-    vivid: node{"vivid"}.getBool(defaults.vivid),
     markdown: node{"markdown"}.getBool(defaults.markdown),
     maxRounds:
       if storedMaxRounds in 1 .. MAX_HARNESS_ROUNDS:
@@ -618,12 +543,6 @@ proc implJsonToConfig(
         storedMaxOutputBytes
       else: defaults.maxOutputBytes
   )
-  let cmdNode = node{"commandPattern"}
-  if not cmdNode.isNil and
-      cmdNode.kind == JString:
-    result.commandPattern = some(cmdNode.getStr())
-  else:
-    result.commandPattern = none(string)
   let sysNode = node{"systemPrompt"}
   if not sysNode.isNil and
       sysNode.kind == JString and
@@ -651,12 +570,9 @@ func defaultConfig*(): Config =
     model:           DEFAULT_MODEL,
     manualConfirm:   DEFAULT_MANUAL_CONFIRM,
     doubleCheck:     DEFAULT_DOUBLE_CHECK,
-    instance:        DEFAULT_INSTANCE,
-    harness:         DEFAULT_HARNESS,
     toolProtocol:    DEFAULT_TOOL_PROTOCOL,
     timeout:         DEFAULT_TIMEOUT,
     maxToken:        DEFAULT_MAX_TOKEN,
-    commandPattern:  none(string),
     systemPrompt:    none(string),
     shell:           implDefaultShell(),
     log:             DEFAULT_LOG,
@@ -666,7 +582,6 @@ func defaultConfig*(): Config =
     cacheExpiry:     DEFAULT_CACHE_EXPIRY,
     cacheMaxEntries: DEFAULT_CACHE_MAX_ENTRIES,
     logMaxEntries:   DEFAULT_LOG_MAX_ENTRIES,
-    vivid:           DEFAULT_VIVID,
     markdown:        DEFAULT_MARKDOWN,
     maxRounds:       DEFAULT_MAX_ROUNDS,
     maxToolCalls:    DEFAULT_MAX_TOOL_CALLS,
@@ -744,7 +659,7 @@ proc implLoadKeyUnlocked(): Option[string] =
     try:
       result = some(implDecryptDpapi(content))
     except GetError:
-      styleWarning(toStyleKind(DEFAULT_VIVID),
+      styleWarning(detectStyle(),
         "warning: cannot decrypt key file," &
         " treating as unset")
       result = none(string)
@@ -779,12 +694,12 @@ proc implLoadConfigUnlocked(): Config =
     let node = parseJson(content)
     result = implJsonToConfig(node, defaults)
   except JsonParsingError:
-    styleWarning(toStyleKind(defaults.vivid),
+    styleWarning(detectStyle(),
       "warning: config file is corrupted," &
       " using defaults")
     result = defaults
   except IOError:
-    styleWarning(toStyleKind(defaults.vivid),
+    styleWarning(detectStyle(),
       "warning: cannot read config file," &
       " using defaults")
     result = defaults
@@ -817,108 +732,83 @@ proc saveConfig*(cfg: Config) =
 # Public API — display
 # ---------------------------------------------------------------------------
 
-## Prints every configuration option to stdout.  The API key is
-## stored with platform-specific encryption and cannot be
-## retrieved; the display therefore only shows whether a key is
-## set. When ``command-pattern`` is ``none`` (the default), the display says
-## that only the mandatory semantic policy is active. When it is explicitly
-## set to an empty string, the display says that the supplemental regex was
-## cleared while the same mandatory semantic policy remains active.
+## One displayed setting: its CLI name, value text, and meaning for colour.
+type
+  ConfigRow* = object
+    name*: string
+    value*: string
+    state*: ValueState
+
+## Lists every setting in display order. The API key is stored encrypted or
+## private and cannot be read back, so only its presence is shown.
 ##
-## In vivid mode each value is colourised according to its
-## meaning via ``styleConfigValue``: the key placeholder is
-## dimmed, booleans use a consistent green/grey pair, the
-## semantic-policy-only default is dimmed with a highlighted
-## ``(default)`` trailer while a custom pattern is
-## shown in emphatic red, and recognised shells
-## and in-range integers are green. Model identifiers are neutral;
-## questionable values are amber.
+## :param cfg: The configuration to describe.
+## :param keySet: Whether an API key is stored.
+## :returns: Rows in the order ``get config`` prints them.
+func configRows*(cfg: Config, keySet: bool): seq[ConfigRow] =
+  let systemPrompt =
+    if cfg.systemPrompt.isSome: cfg.systemPrompt.get else: ""
+  result = @[
+    ConfigRow(name: "key",
+      value: (if keySet: "set" else: "not set"),
+      state: (if keySet: vsMuted else: vsWarn)),
+    ConfigRow(name: "url", value: cfg.url, state: classifyUrl(cfg.url)),
+    ConfigRow(name: "model", value: cfg.model, state: classifyModel(cfg.model)),
+    ConfigRow(name: "manual-confirm", value: $cfg.manualConfirm,
+      state: classifyBool(cfg.manualConfirm)),
+    ConfigRow(name: "double-check", value: $cfg.doubleCheck,
+      state: classifyBool(cfg.doubleCheck)),
+    ConfigRow(name: "tool-protocol", value: cfg.toolProtocol, state: vsGood),
+    ConfigRow(name: "timeout", value: formatIntOrDisable(cfg.timeout),
+      state: classifyInt(cfg.timeout, 1, 3600)),
+    ConfigRow(name: "max-token", value: formatIntOrDisable(cfg.maxToken),
+      state: classifyInt(cfg.maxToken, 1024, 1_000_000)),
+    ConfigRow(name: "max-rounds", value: formatIntOrDisable(cfg.maxRounds),
+      state: classifyInt(cfg.maxRounds, 1, 10)),
+    ConfigRow(name: "max-tool-calls", value: formatIntOrDisable(cfg.maxToolCalls),
+      state: classifyInt(cfg.maxToolCalls, 1, 64)),
+    ConfigRow(name: "max-parallel", value: formatIntOrDisable(cfg.maxParallel),
+      state: classifyInt(cfg.maxParallel, 1, 16)),
+    ConfigRow(name: "query-timeout", value: $cfg.queryTimeout,
+      state: classifyInt(cfg.queryTimeout, 1, 3600)),
+    ConfigRow(name: "command-timeout", value: formatIntOrDisable(cfg.commandTimeout),
+      state: classifyInt(cfg.commandTimeout, 1, 3600)),
+    ConfigRow(name: "max-output-bytes", value: formatIntOrDisable(cfg.maxOutputBytes),
+      state: classifyInt(cfg.maxOutputBytes, 1024, 100_000_000)),
+    ConfigRow(name: "system-prompt", value: systemPrompt, state: vsNeutral),
+    ConfigRow(name: "shell", value: cfg.shell, state: classifyShell(cfg.shell)),
+    ConfigRow(name: "log", value: $cfg.log, state: classifyBool(cfg.log)),
+    ConfigRow(name: "diagnostics", value: $cfg.diagnostics,
+      state: classifyBool(cfg.diagnostics)),
+    ConfigRow(name: "hide-process", value: $cfg.hideProcess,
+      state: classifyBool(cfg.hideProcess)),
+    ConfigRow(name: "system-proxy", value: $cfg.systemProxy,
+      state: classifyBool(cfg.systemProxy)),
+    ConfigRow(name: "cache", value: $cfg.cache, state: classifyBool(cfg.cache)),
+    ConfigRow(name: "cache-expiry", value: formatIntOrDisable(cfg.cacheExpiry),
+      state: classifyInt(cfg.cacheExpiry, 1, 365)),
+    ConfigRow(name: "cache-max-entries", value: formatIntOrDisable(cfg.cacheMaxEntries),
+      state: classifyInt(cfg.cacheMaxEntries, 1, 100_000)),
+    ConfigRow(name: "log-max-entries", value: formatIntOrDisable(cfg.logMaxEntries),
+      state: classifyInt(cfg.logMaxEntries, 1, 100_000)),
+    ConfigRow(name: "markdown", value: $cfg.markdown,
+      state: classifyBool(cfg.markdown))
+  ]
+
+## Prints every setting, or only ``name`` when given, as aligned key/value
+## lines on stdout.
 ##
 ## :param sk: The active output style.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
-proc displayConfig*(sk: StyleKind = skSimp) =
-  let cfg = loadConfig()
-  let key = loadKey()
-  let keyDisplay =
-    if key.isSome:
-      "set (encrypted storage, value cannot be retrieved)"
-    else:
-      "not set"
-  styleConfigValue(sk, "key", keyDisplay,
-    (if key.isSome: vsMuted else: vsWarn))
-  styleConfigValue(sk, "url", cfg.url,
-    classifyUrl(cfg.url))
-  styleConfigValue(sk, "model", cfg.model,
-    classifyModel(cfg.model))
-  styleConfigValue(sk, "manual-confirm",
-    $cfg.manualConfirm, classifyBool(cfg.manualConfirm))
-  styleConfigValue(sk, "double-check",
-    $cfg.doubleCheck, classifyBool(cfg.doubleCheck))
-  styleConfigValue(sk, "instance", $cfg.instance,
-    classifyBool(cfg.instance))
-  styleConfigValue(sk, "harness", cfg.harness,
-    vsGood)
-  styleConfigValue(sk, "tool-protocol",
-    cfg.toolProtocol, vsGood)
-  styleConfigValue(sk, "timeout",
-    formatIntOrDisable(cfg.timeout),
-    classifyInt(cfg.timeout, 1, 3600))
-  styleConfigValue(sk, "max-token",
-    formatIntOrDisable(cfg.maxToken),
-    classifyInt(cfg.maxToken, 1024, 1_000_000))
-  styleConfigValue(sk, "max-rounds",
-    formatIntOrDisable(cfg.maxRounds),
-    classifyInt(cfg.maxRounds, 1, 10))
-  styleConfigValue(sk, "max-tool-calls",
-    formatIntOrDisable(cfg.maxToolCalls),
-    classifyInt(cfg.maxToolCalls, 1, 64))
-  styleConfigValue(sk, "max-parallel",
-    formatIntOrDisable(cfg.maxParallel),
-    classifyInt(cfg.maxParallel, 1, 16))
-  styleConfigValue(sk, "query-timeout", $cfg.queryTimeout,
-    classifyInt(cfg.queryTimeout, 1, 3600))
-  styleConfigValue(sk, "command-timeout",
-    formatIntOrDisable(cfg.commandTimeout),
-    classifyInt(cfg.commandTimeout, 1, 3600))
-  styleConfigValue(sk, "max-output-bytes",
-    formatIntOrDisable(cfg.maxOutputBytes),
-    classifyInt(cfg.maxOutputBytes, 1024, 100_000_000))
-  let (cmdPat, cmdState, cmdTrailer) =
-    classifyCommandPattern(cfg.commandPattern)
-  styleConfigValue(sk, "command-pattern", cmdPat,
-    cmdState, cmdTrailer)
-  let sysPmt =
-    if cfg.systemPrompt.isSome:
-      cfg.systemPrompt.get else: ""
-  styleConfigValue(sk, "system-prompt", sysPmt,
-    vsNeutral)
-  styleConfigValue(sk, "shell", cfg.shell,
-    classifyShell(cfg.shell))
-  styleConfigValue(sk, "log", $cfg.log,
-    classifyBool(cfg.log))
-  styleConfigValue(sk, "diagnostics", $cfg.diagnostics, classifyBool(cfg.diagnostics))
-  styleConfigValue(sk, "hide-process",
-    $cfg.hideProcess, classifyBool(cfg.hideProcess))
-  styleConfigValue(sk, "system-proxy",
-    $cfg.systemProxy, classifyBool(cfg.systemProxy))
-  styleConfigValue(sk, "cache", $cfg.cache,
-    classifyBool(cfg.cache))
-  styleConfigValue(sk, "cache-expiry",
-    formatIntOrDisable(cfg.cacheExpiry),
-    classifyInt(cfg.cacheExpiry, 1, 365))
-  styleConfigValue(sk, "cache-max-entries",
-    formatIntOrDisable(cfg.cacheMaxEntries),
-    classifyInt(cfg.cacheMaxEntries, 1, 100_000))
-  styleConfigValue(sk, "log-max-entries",
-    formatIntOrDisable(cfg.logMaxEntries),
-    classifyInt(cfg.logMaxEntries, 1, 100_000))
-  styleConfigValue(sk, "vivid", $cfg.vivid,
-    classifyBool(cfg.vivid))
-  styleConfigValue(sk, "markdown", $cfg.markdown,
-    classifyBool(cfg.markdown))
+## :param name: One option to show; empty shows all.
+## :raises: GetError: If ``name`` is not a setting.
+proc displayConfig*(sk: StyleKind = skSimp, name = "") =
+  var found = false
+  for row in configRows(loadConfig(), loadKey().isSome):
+    if name.len == 0 or row.name == name:
+      styleConfigValue(sk, row.name, row.value, row.state)
+      found = true
+  if not found:
+    raise newException(GetError, fmt"unknown config option '{name}'")
 
 # ---------------------------------------------------------------------------
 # Public API — reset
@@ -940,24 +830,11 @@ proc resetConfig*() =
 # Public API — set by name
 # ---------------------------------------------------------------------------
 
-## Sets a single configuration option by its CLI kebab-case
-## name.
-##
-## For ``command-pattern`` specifically, behaviour depends on
-## both ``value`` and ``explicit``:
-##
-## - ``value`` non-empty -> set to that value (custom pattern).
-## - ``value`` empty, ``explicit = true`` -> set to ``some("")``
-##   (supplemental regex cleared; triggered by
-##   ``get set command-pattern ""``).
-## - ``value`` empty, ``explicit = false`` -> set to
-##   ``none(string)`` (restore the semantic-policy-only default; triggered by
-##   ``get set command-pattern``).
+## Sets a single configuration option by its CLI kebab-case name. An empty
+## value restores the option's default.
 ##
 ## :param name: The kebab-case option name.
-## :param value: The new value, or empty to unset/reset.
-## :param explicit: When true, an empty value is treated as an
-##                  explicit clear rather than a reset signal.
+## :param value: The new value, or empty to reset.
 ## :raises: GetError: If the name is unknown or value invalid.
 ##
 ## .. code-block:: nim
@@ -965,8 +842,7 @@ proc resetConfig*() =
 ##     discard
 proc setConfigOption*(
   name: string,
-  value: string,
-  explicit: bool = false
+  value: string
 ) =
   if name == "key":
     if value.len == 0:
@@ -989,20 +865,6 @@ proc setConfigOption*(
   of "double-check":
     cfg.doubleCheck = implParseBool(
       value, name, DEFAULT_DOUBLE_CHECK)
-  of "instance":
-    cfg.instance = implParseBool(
-      value, name, DEFAULT_INSTANCE)
-    cfg.harness =
-      if cfg.instance: "direct"
-      else: DEFAULT_HARNESS
-  of "harness":
-    try:
-      cfg.harness = harnessName(parseHarnessKind(
-        if value.len > 0: value else: DEFAULT_HARNESS))
-    except ValueError as error:
-      raise newException(GetError,
-        fmt"invalid value '{value}' for '{name}': {error.msg}")
-    cfg.instance = cfg.harness == "direct"
   of "tool-protocol":
     try:
       cfg.toolProtocol = toolProtocolName(parseToolProtocolKind(
@@ -1016,23 +878,6 @@ proc setConfigOption*(
   of "max-token":
     cfg.maxToken = implParseIntOrDisable(
       value, name, DEFAULT_MAX_TOKEN)
-  of "command-pattern":
-    if value.len > 0:
-      cfg.commandPattern = some(value)
-      let safetyWarn = checkPatternSafety(value)
-      if safetyWarn.len > 0:
-        styleWarning(toStyleKind(cfg.vivid),
-          safetyWarn)
-    elif explicit:
-      # Disable only the supplemental user regex. The mandatory
-      # read-only policy remains active in the query dispatcher.
-      cfg.commandPattern = some("")
-      styleWarning(toStyleKind(cfg.vivid),
-        "warning: command-pattern cleared - " &
-        "mandatory read-only policy remains active")
-    else:
-      # ``get set command-pattern`` (no value) - restore default.
-      cfg.commandPattern = none(string)
   of "system-prompt":
     if value.len > 0:
       cfg.systemPrompt = some(value)
@@ -1067,9 +912,6 @@ proc setConfigOption*(
   of "log-max-entries":
     cfg.logMaxEntries = implParseIntOrDisable(
       value, name, DEFAULT_LOG_MAX_ENTRIES)
-  of "vivid":
-    cfg.vivid = implParseBool(
-      value, name, DEFAULT_VIVID)
   of "markdown":
     cfg.markdown = implParseBool(
       value, name, DEFAULT_MARKDOWN)

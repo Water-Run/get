@@ -1,4 +1,4 @@
-## Mandatory read-only command policy for get v3.
+## Mandatory read-only command policy.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -43,7 +43,7 @@ const SIMPLE_READ_ONLY_COMMANDS = [
   "nproc", "lsmem", "lsns", "lsipc", "lslocks", "lsmod", "modinfo",
   "pmap", "pidof", "sw_vers", "system_profiler", "ioreg",
   "lsb_release", "biosdecode", "cpuid", "acpi", "glxinfo", "clinfo",
-  "rocminfo", "vm_stat",
+  "vm_stat",
   "findmnt", "md5sum", "sha1sum", "sha224sum", "sha256sum",
   "sha384sum", "sha512sum", "b2sum", "cksum", "strings",
   "od", "hexdump", "cmp", "comm", "nl", "fold", "fmt", "expand",
@@ -71,12 +71,11 @@ const POWERSHELL_READ_ONLY_COMMANDS = [
   "get-scheduledtask", "get-localuser", "get-localgroup", "get-hotfix",
   "get-dnsclientserveraddress", "get-netipconfiguration",
   "get-physicaldisk", "get-storagepool", "get-pnpdevice", "get-eventlog",
-  "get-wmiobject", "get-netfirewallprofile", "get-netfirewallrule",
-  "get-netfirewallportfilter", "get-netneighbor", "get-netconnectionprofile",
+  "get-wmiobject", "get-netneighbor", "get-netconnectionprofile",
   "get-dnsclientcache", "get-smbshare", "get-smbconnection", "get-psdrive",
   "get-itemproperty", "get-itempropertyvalue", "get-localgroupmember",
   "get-scheduledtaskinfo", "get-bitlockervolume", "get-tpm",
-  "get-mpcomputerstatus", "get-mppreference", "get-appxpackage",
+  "get-mpcomputerstatus", "get-mppreference",
   "get-windowsoptionalfeature", "get-windowscapability",
   "get-processmitigation", "get-computerrestorepoint", "test-netconnection",
   "test-connection", "confirm-securebootuefi", "tnc",
@@ -90,7 +89,7 @@ const POWERSHELL_READ_ONLY_COMMANDS = [
   "get-mpthreatdetection", "get-cimclass", "get-pnpdeviceproperty",
   "get-random", "get-variable", "get-history", "get-module",
   "get-help", "measure-object", "select-object",
-  "sort-object", "group-object", "compare-object", "where-object",
+  "sort-object", "group-object", "compare-object",
   "format-list", "format-table", "format-wide", "format-custom",
   "out-string", "out-null", "write-output", "select-string", "test-path",
   "resolve-path", "split-path", "join-path", "convertto-json",
@@ -116,7 +115,7 @@ const STDIN_DATA_READERS = [
   "sha384sum", "sha512sum", "b2sum", "cksum", "strings", "od",
   "hexdump", "nl", "fold", "fmt", "expand", "unexpand", "paste", "join",
   "sort", "uniq", "base64", "xxd", "cmp", "comm", "diff", "diff3",
-  "awk", "sed", "xargs"
+  "awk", "xargs"
 ]
 
 func implReject(reason: string): CommandPolicyDecision =
@@ -424,16 +423,6 @@ func implHasEnabledBooleanOption(
     if lower.startsWith(expected & "="):
       return lower[expected.len + 1 .. ^1] in ["1", "true", "yes", "on"]
 
-func implDockerFollowEnabled(token: string): bool =
-  let lower = toLowerAscii(token)
-  if lower in ["-f", "--follow"]:
-    return true
-  for option in ["-f=", "--follow="]:
-    if lower.startsWith(option):
-      return lower[option.len .. ^1] notin ["0", "false", "no", "off"]
-  result = token.startsWith("-") and not token.startsWith("--") and
-    token.contains('f')
-
 func implFirstAction(
   tokens: seq[string],
   start: int,
@@ -569,7 +558,7 @@ func implAllowsStablePathVariables(executable: string): bool =
   ]
 
 ## Unqualified globs are safe for readers whose complete option surface cannot
-## write files or execute helpers. Dual-use tools (find, sed, sort, rg, git,
+## write files or execute helpers. Dual-use tools (find, sort, rg, git,
 ## and similar validators) still require a qualified glob or ``--`` because a
 ## hostile filename could otherwise expand into a dangerous option.
 func implAllowsUnquotedGlobs(executable: string): bool =
@@ -1870,202 +1859,6 @@ func implValidateAwk(tokens: seq[string]): CommandPolicyDecision =
     index += 1
   result = implAllow()
 
-func implSafeSedAddress(value: string): bool =
-  if value == "$" or implUnsignedAtMost(value, 1_000_000_000):
-    return true
-  if value.len < 2 or value[0] != '/':
-    return false
-  var escaped = false
-  for index in 1 ..< value.len:
-    if escaped:
-      escaped = false
-    elif value[index] == '\\':
-      escaped = true
-    elif value[index] == '/':
-      return index == value.len - 1
-  result = false
-
-func implSafeSedAddressExpression(raw: string): bool =
-  var value = raw
-  if value.endsWith("!"):
-    value.setLen(value.len - 1)
-  if value.len == 0 or implSafeSedAddress(value):
-    return true
-  let separator = value.find(',')
-  if separator <= 0 or separator >= value.len - 1 or
-      value.find(',', separator + 1) >= 0:
-    return false
-  result = implSafeSedAddress(value[0 ..< separator]) and
-    implSafeSedAddress(value[separator + 1 .. ^1])
-
-## Accepts one stdout-only substitution. The sed ``e`` and ``w`` flags are
-## deliberately excluded because they execute a command or write a file.
-func implSafeSedSubstitution(raw: string): bool =
-  if raw.len < 4 or raw[0] != 's':
-    return false
-  let delimiter = raw[1]
-  if delimiter.isAlphaNumeric or delimiter in {
-      '\\', '\r', '\n', '\0', ' ', '\t', ';', '{', '}'}:
-    return false
-  var index = 2
-  var separators = 0
-  var escaped = false
-  while index < raw.len and separators < 2:
-    let character = raw[index]
-    if escaped:
-      escaped = false
-    elif character == '\\':
-      escaped = true
-    elif character == delimiter:
-      separators += 1
-    index += 1
-  if separators != 2:
-    return false
-  let flags = if index < raw.len: raw[index .. ^1] else: ""
-  var occurrence = ""
-  var occurrenceEnded = false
-  for character in flags:
-    if character in {'g', 'p', 'i', 'I', 'm', 'M'}:
-      occurrenceEnded = occurrence.len > 0
-      continue
-    if character in {'0' .. '9'} and not occurrenceEnded:
-      occurrence.add(character)
-      continue
-    return false
-  result = occurrence.len == 0 or
-    implPositiveAtMost(occurrence, 1_000_000_000)
-
-## Accepts a short list of independent stdout substitutions. Semicolons inside
-## a pattern or replacement remain data because the scanner first consumes the
-## two unescaped substitution delimiters. Every command is then checked by the
-## same flag allowlist as a standalone substitution.
-func implSafeSedSubstitutionSequence(raw: string): bool =
-  var cursor = 0
-  var commands = 0
-  while cursor < raw.len:
-    while cursor < raw.len and raw[cursor] in {' ', '\t'}:
-      cursor += 1
-    if cursor >= raw.len or raw[cursor] != 's' or cursor + 1 >= raw.len:
-      return false
-    let commandStart = cursor
-    let delimiter = raw[cursor + 1]
-    if delimiter.isAlphaNumeric or delimiter in {
-        '\\', '\r', '\n', '\0', ' ', '\t', ';', '{', '}'}:
-      return false
-    cursor += 2
-    var separators = 0
-    var escaped = false
-    while cursor < raw.len and separators < 2:
-      let character = raw[cursor]
-      if escaped:
-        escaped = false
-      elif character == '\\':
-        escaped = true
-      elif character == delimiter:
-        separators += 1
-      cursor += 1
-    if separators != 2:
-      return false
-    while cursor < raw.len and raw[cursor] != ';':
-      cursor += 1
-    let command = raw[commandStart ..< cursor].strip()
-    if not implSafeSedSubstitution(command):
-      return false
-    commands += 1
-    if commands > 8:
-      return false
-    if cursor < raw.len:
-      cursor += 1
-      if cursor >= raw.len:
-        return false
-  result = commands > 0
-
-## ``sed`` is useful for file inspection and stdout transformations, but its
-## full language can write files or execute commands. Admit only address +
-## observational-command expressions such as ``1,20p`` and one stdout-only
-## substitution such as ``s/.*\\.//``.
-func implSafeSedProgram(raw: string): bool =
-  let program = raw.strip()
-  if program.len == 0 or program.len > 512 or
-      program.contains('\n') or program.contains('\r'):
-    return false
-  if program.contains(';'):
-    return implSafeSedSubstitutionSequence(program)
-  if implSafeSedSubstitution(program):
-    return true
-  if program[^1] notin {'p', 'P', 'q', 'Q', 'd', 'D', '=', 'l', 'n', 'N'}:
-    return false
-  result = implSafeSedAddressExpression(program[0 ..< program.len - 1])
-
-func implValidateSed(tokens: seq[string]): CommandPolicyDecision =
-  if tokens.len == 2 and toLowerAscii(tokens[1]) in ["-h", "--help", "--version"]:
-    return implAllow()
-  var index = 1
-  var expressionCount = 0
-  var optionsEnded = false
-  while index < tokens.len:
-    let token = tokens[index]
-    if not optionsEnded and token == "--":
-      optionsEnded = true
-      index += 1
-      continue
-    if not optionsEnded and token.startsWith("--"):
-      if token in [
-        "--quiet", "--silent", "--regexp-extended", "--unbuffered",
-        "--separate", "--null-data", "--posix", "--sandbox", "--binary"
-      ]:
-        index += 1
-        continue
-      if token == "--expression":
-        if index + 1 >= tokens.len or
-            not implSafeSedProgram(tokens[index + 1]):
-          return implReject("sed expression is outside the display-only subset")
-        expressionCount += 1
-        index += 2
-        continue
-      if token.startsWith("--expression="):
-        if not implSafeSedProgram(token[13 .. ^1]):
-          return implReject("sed expression is outside the display-only subset")
-        expressionCount += 1
-        index += 1
-        continue
-      return implReject("sed option can modify files or load a program")
-    if not optionsEnded and token.startsWith("-") and token != "-":
-      var cursor = 1
-      while cursor < token.len:
-        let option = token[cursor]
-        if option in {'n', 'E', 'r', 'u', 's', 'z', 'b'}:
-          cursor += 1
-          continue
-        if option != 'e':
-          return implReject("sed option can modify files or load a program")
-        var expression = ""
-        if cursor + 1 < token.len:
-          expression = token[cursor + 1 .. ^1]
-        elif index + 1 < tokens.len:
-          expression = tokens[index + 1]
-          index += 1
-        if not implSafeSedProgram(expression):
-          return implReject("sed expression is outside the display-only subset")
-        expressionCount += 1
-        cursor = token.len
-      index += 1
-      continue
-    if expressionCount == 0:
-      if not implSafeSedProgram(token):
-        return implReject("sed expression is outside the display-only subset")
-      expressionCount = 1
-      index += 1
-    break
-  if expressionCount == 0:
-    return implReject("sed requires a display-only expression")
-  while index < tokens.len:
-    if not optionsEnded and tokens[index] != "-" and
-        tokens[index].startsWith("-"):
-      return implReject("sed input operand resembles an option")
-    index += 1
-  result = implAllow()
-
 func implValidateSensors(tokens: seq[string]): CommandPolicyDecision =
   if implHasForbiddenOption(tokens, ["-s", "--set"]):
     return implReject("sensors set mode can change hardware thresholds")
@@ -2898,287 +2691,6 @@ func implValidateSystemReader(
     discard
   result = implAllow()
 
-func implNvidiaOptionMatches(token: string, option: string): bool =
-  let separator = token.find('=')
-  let optionName = if separator >= 0: token[0 ..< separator] else: token
-  if option.startsWith("--"):
-    return toLowerAscii(optionName) == toLowerAscii(option)
-  result = optionName == option
-
-func implHasNvidiaOption(
-  tokens: seq[string],
-  options: openArray[string]
-): bool =
-  for index in 2 ..< tokens.len:
-    for option in options:
-      if implNvidiaOptionMatches(tokens[index], option):
-        return true
-
-## NVIDIA reuses short option letters across subcommands (for example top-level
-## ``-p`` changes state while ``topo -p`` only prints a path). Validate each
-## query namespace against its own documented option surface instead of
-## applying top-level mutation prefixes to unrelated subcommands.
-func implValidateNvidiaQueryOptions(
-  action: string,
-  tokens: seq[string],
-  options: openArray[string]
-): CommandPolicyDecision =
-  for index in 2 ..< tokens.len:
-    let token = tokens[index]
-    if not token.startsWith("-"):
-      continue
-    var allowed = false
-    for option in options:
-      if implNvidiaOptionMatches(token, option):
-        allowed = true
-        break
-    if not allowed:
-      return implReject(
-        "nvidia-smi " & action & " option is outside documented query mode")
-  result = implAllow()
-
-func implValidateNvidiaMonitor(
-  action: string,
-  tokens: seq[string]
-): CommandPolicyDecision =
-  let optionDecision = implValidateNvidiaQueryOptions(action, tokens, [
-    "-i", "--id", "-d", "--delay", "-c", "--count", "-s", "--select",
-    "--gpm-metrics", "--gpm-options", "-o", "--options", "-h", "--help",
-    "--format"
-  ])
-  if not optionDecision.allowed:
-    return optionDecision
-  if implHasNvidiaOption(tokens, ["-h", "--help"]):
-    return implAllow()
-
-  var hasBoundedCount = false
-  var index = 2
-  while index < tokens.len:
-    let lower = toLowerAscii(tokens[index])
-    if lower in ["-c", "--count"]:
-      if index + 1 >= tokens.len or
-          not implPositiveAtMost(tokens[index + 1], 5):
-        return implReject("nvidia-smi monitor count exceeds the safe bound")
-      hasBoundedCount = true
-      index += 2
-      continue
-    if lower.startsWith("-c=") or lower.startsWith("--count="):
-      let separator = lower.find('=')
-      if not implPositiveAtMost(tokens[index][separator + 1 .. ^1], 5):
-        return implReject("nvidia-smi monitor count exceeds the safe bound")
-      hasBoundedCount = true
-    if lower in ["-d", "--delay"]:
-      if index + 1 >= tokens.len or
-          not implPositiveAtMost(tokens[index + 1], 10):
-        return implReject("nvidia-smi monitor delay exceeds the safe bound")
-      index += 2
-      continue
-    if lower.startsWith("-d=") or lower.startsWith("--delay="):
-      let separator = lower.find('=')
-      if not implPositiveAtMost(tokens[index][separator + 1 .. ^1], 10):
-        return implReject("nvidia-smi monitor delay exceeds the safe bound")
-    index += 1
-  if not hasBoundedCount:
-    return implReject("nvidia-smi monitor requires a bounded sample count")
-  result = implAllow()
-
-func implValidateNvidiaSubcommand(
-  action: string,
-  tokens: seq[string]
-): CommandPolicyDecision =
-  case action
-  of "dmon", "pmon":
-    if implHasNvidiaOption(tokens, ["-f", "--filename"]):
-      return implReject("nvidia-smi monitor output file can modify the filesystem")
-    return implValidateNvidiaMonitor(action, tokens)
-  of "topo":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-m", "--matrix", "-mp", "--matrix_pci", "-i", "--id", "-c",
-      "--cpu", "-n", "--nearest_gpus", "-p", "--gpu_path", "-p2p",
-      "--p2pstatus", "-C", "--get-numa-id-of-nearby-cpu", "-M",
-      "--get-numa-id-of-nearby-mem", "-gnid", "--gpu-numa-id", "-h",
-      "--help", "-nvme", "--matrix_nvme"
-    ])
-  of "nvlink":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--id", "-l", "--link", "-s", "--status",
-      "-c", "--capabilities", "-p", "--pcibusid", "-R",
-      "--remotelinkinfo", "-gc", "--getcontrol", "-g", "--getcounters",
-      "-e", "--errorcounters", "-ec", "--crcerrorcounters", "-gt",
-      "--getthroughput", "-gLowPwrInfo", "--getLowPowerInfo", "-gBwMode",
-      "--getBandwidthMode", "-cBridge", "--checkBridge", "-gLWidth",
-      "--getLinkWidth", "-info", "--info"
-    ])
-  of "c2c":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--id", "-l", "--link", "-s", "--status",
-      "-e", "--errorCounters", "-gLowPwrInfo", "-getLowPowerInfo"
-    ])
-  of "encodersessions", "fbcsessions":
-    if implHasNvidiaOption(tokens, ["-l", "--loop"]):
-      return implReject("nvidia-smi session loop mode is unbounded")
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--id"
-    ])
-  of "vgpu":
-    if implHasToken(tokens, ["set-scheduler-state"]) or
-        implHasNvidiaOption(tokens, [
-          "-caa", "--clear-accounted-apps", "-shm",
-          "--set-heterogeneous-mode", "-smts", "--set-mig-timeslice-mode"
-        ]):
-      return implReject("nvidia-smi vgpu option changes scheduler or accounting state")
-    if implHasNvidiaOption(tokens, [
-        "-l", "--loop", "-lms", "--loop-ms"
-      ]):
-      return implReject("nvidia-smi vgpu loop mode is unbounded")
-    if implHasNvidiaOption(tokens, ["-f", "--filename"]):
-      return implReject("nvidia-smi vgpu output file can modify the filesystem")
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--id", "-gi", "--gpu-instance-id", "-q",
-      "--query", "-u", "--utilization", "--gpm-metrics", "-p", "--pmon",
-      "-s", "--supported", "-c", "--creatable", "-es", "--encodersessions",
-      "-m", "--migrationcap", "-ss", "--schedulerstate", "-sc",
-      "--schedulercaps", "-sl", "--schedulerlogs",
-      "--query-vgpu-scheduler-logs", "-v", "--verbose",
-      "--query-accounted-apps", "-fs", "--fbcsessions", "-ghm",
-      "--get-heterogeneous-mode", "--query-gpu-instance-vgpu-scheduler-logs",
-      "--format"
-    ])
-  of "power-hint":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-i", "--id", "-l", "--list-info", "-gc", "--graphics-clock",
-      "-mc", "--memory-clock", "-t", "--temperature", "-p", "--profile",
-      "-h", "--help"
-    ])
-  of "base-clocks":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-i", "--id", "-h", "--help"
-    ])
-  of "pci":
-    if implHasNvidiaOption(tokens, ["-cErrCnt", "--clearErrorCounters"]):
-      return implReject("nvidia-smi pci clear mode changes hardware counters")
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--id", "-gErrCnt", "--getErrorCounters",
-      "-gCnt", "--getCounters"
-    ])
-  of "prm":
-    return implValidateNvidiaQueryOptions(action, tokens, [
-      "-h", "--help", "-i", "--index", "-l", "--list", "-n", "--name",
-      "-f", "--info", "-p", "--params", "-c", "--counters"
-    ])
-  else:
-    return implReject("nvidia-smi subcommand is outside query mode")
-
-func implValidateNvidiaSmi(tokens: seq[string]): CommandPolicyDecision =
-  if tokens.len > 1 and not tokens[1].startsWith("-"):
-    let action = toLowerAscii(tokens[1])
-    if action in [
-      "stats", "daemon", "replay", "mig", "drain", "conf-compute",
-      "clocks", "compute-policy", "boost-slider", "gpm",
-      "power-smoothing", "power-profiles"
-    ]:
-      return implReject(
-        "nvidia-smi subcommand can stream, write, or control GPU state")
-    return implValidateNvidiaSubcommand(action, tokens)
-
-  if implHasForbiddenOption(tokens, [
-    "-pm", "--persistence-mode", "-pl", "--power-limit", "-ac",
-    "--applications-clocks", "-rac", "--reset-applications-clocks", "-lgc",
-    "--lock-gpu-clocks", "-rgc", "--reset-gpu-clocks", "-lmc",
-    "--lock-memory-clocks", "-rmc", "--reset-memory-clocks", "-r", "--gpu-reset",
-    "-gom", "--gom", "--compute-mode", "--auto-boost-default",
-    "--auto-boost-permission", "--clock-lock", "--reset-ecc-errors",
-    "-e", "--ecc-config", "-mig", "--mig-mode", "-dm", "--driver-model",
-    "-fdm", "--force-driver-model", "-am", "--accounting-mode",
-    "-caa", "--clear-accounted-apps", "-gtt", "--gpu-target-temp",
-    "--module-power-limit", "--power-hint", "--filename", "--debug",
-    "-p", "-vm", "--virt-mode", "-cc", "--cuda-clocks", "-den",
-    "--dram-encryption", "--set-hostname", "-t", "--toggle-led",
-    "--multi-instance-gpu"
-  ]):
-    return implReject("nvidia-smi option changes GPU state")
-  for token in tokens:
-    let lower = toLowerAscii(token)
-    if token == "-l" or lower in ["--loop", "-lms", "--loop-ms"] or
-        lower.startsWith("--loop=") or lower.startsWith("--loop-ms=") or
-        (token.startsWith("-l") and not token.startsWith("--") and
-          token.len > 2 and implAllDigits(token[2 .. ^1])):
-      return implReject("nvidia-smi loop mode is unbounded")
-    if token.startsWith("-") and not token.startsWith("--") and
-        token.contains('f'):
-      return implReject("nvidia-smi output option can write a file")
-    for prefix in [
-      "-pm", "-pl", "-ac", "-rac", "-lgc", "-rgc", "-lmc", "-rmc",
-      "-r", "-gom", "-c", "-e", "-caa", "-gtt", "-mig", "-dm",
-      "-fdm", "-am", "-p", "-vm", "-den", "-t"
-    ]:
-      if lower.startsWith(prefix):
-        return implReject("nvidia-smi option changes GPU state")
-  # Top-level nvidia-smi mixes queries and controls. Keep documented
-  # query/list/help families, but fail closed on unknown future switches.
-  for index in 1 ..< tokens.len:
-    let token = tokens[index]
-    if implIsSafeOptionTerminator(tokens, index):
-      break
-    if not token.startsWith("-"):
-      continue
-    let separator = token.find('=')
-    let optionName =
-      if separator >= 0: token[0 ..< separator]
-      else: token
-    let lower = toLowerAscii(optionName)
-    if optionName in ["-h", "-L", "-B", "-q", "-x", "-u", "-i", "-d"] or
-        lower in [
-          "--help", "--version", "--list-gpus", "--list-excluded-gpus",
-          "--query", "--xml-format", "--dtd", "--unit", "--id",
-          "--select", "--display", "--format", "--verbose"
-        ] or lower.startsWith("--query-") or lower.startsWith("--list-") or
-        lower.startsWith("--help-"):
-      continue
-    return implReject("nvidia-smi option is outside documented query mode")
-  result = implAllow()
-
-## ROCm SMI is a mixed monitoring/control CLI. AMD deliberately groups query
-## switches under ``--show*`` while clock, fan, power, partition, RAS, load,
-## save, and reset switches mutate hardware or files. Keep the broad query
-## family useful, but reject every documented control family (including
-## argparse-style long-option abbreviations) before considering display flags.
-func implValidateRocmSmi(tokens: seq[string]): CommandPolicyDecision =
-  if implHasForbiddenOption(tokens, [
-    "--gpureset", "--load", "--save", "--resetclocks", "--resetfans",
-    "--resetprofile", "--resetpoweroverdrive", "--resetxgmierr",
-    "--resetperfdeterminism", "--resetcomputepartition",
-    "--resetmemorypartition", "--setclock", "--setsclk", "--setmclk",
-    "--setpcie", "--setslevel", "--setmlevel", "--setvc", "--setsrange",
-    "--setextremum", "--setmrange", "--setfan", "--setperflevel",
-    "--setoverdrive", "--setmemoverdrive", "--setpoweroverdrive",
-    "--setprofile", "--setperfdeterminism", "--setcomputepartition",
-    "--setmemorypartition", "--rasenable", "--rasdisable", "--rasinject",
-    "--autorespond"
-  ]):
-    return implReject("rocm-smi option can modify GPU or filesystem state")
-  for index in 1 ..< tokens.len:
-    let token = tokens[index]
-    if not token.startsWith("-"):
-      continue
-    let separator = token.find('=')
-    let optionName = if separator >= 0: token[0 ..< separator] else: token
-    let lower = toLowerAscii(optionName)
-    if token == "-r" or lower == "--resetclocks" or
-        lower.startsWith("--set") or lower.startsWith("--reset") or
-        lower.startsWith("--ras"):
-      return implReject("rocm-smi option can modify GPU state")
-    if token in [
-      "-h", "-V", "-d", "-a", "-i", "-v", "-e", "-f", "-P", "-t",
-      "-u", "-b", "-c", "-g", "-l", "-M", "-m", "-o", "-p", "-S", "-s"
-    ] or lower.startsWith("--show") or lower in [
-      "--help", "--version", "--device", "--alldevices", "--loglevel",
-      "--json", "--csv"
-    ]:
-      continue
-    return implReject("rocm-smi option is outside documented query mode")
-  result = implAllow()
-
 func implValidateHardwareReader(
   name: string,
   tokens: seq[string]
@@ -3252,79 +2764,6 @@ func implValidateHardwareReader(
     ]:
       return implAllow()
     return implReject("ethtool action is outside the query allowlist")
-  else:
-    discard
-  result = implAllow()
-
-func implValidateFirewallReader(
-  name: string,
-  tokens: seq[string]
-): CommandPolicyDecision =
-  case name
-  of "ufw":
-    if tokens.len >= 2 and toLowerAscii(tokens[1]) in ["status", "show"]:
-      return implAllow()
-    return implReject("ufw is allowed only for status/show queries")
-  of "firewall-cmd":
-    if tokens.len < 2:
-      return implReject("firewall-cmd query is missing an option")
-    for index in 1 ..< tokens.len:
-      let option = toLowerAscii(tokens[index])
-      if not option.startsWith("-"):
-        continue
-      if option in [
-        "-h", "--help", "-v", "--version", "-q", "--quiet", "--state",
-        "--check-config", "--permanent", "--direct", "--zone", "--policy",
-        "--ipset"
-      ] or option.startsWith("--get-") or option.startsWith("--list-") or
-          option == "--list-all" or option.startsWith("--query-") or
-          option.startsWith("--info-") or option.startsWith("--path-") or
-          option.startsWith("--zone=") or option.startsWith("--policy=") or
-          option.startsWith("--ipset="):
-        continue
-      return implReject("firewall-cmd option is outside query mode")
-  of "nft":
-    if implHasForbiddenOption(tokens, ["--file", "--interactive"]) or
-        "-f" in tokens or "-i" in tokens:
-      return implReject("nft input mode can apply state-changing commands")
-    var action = ""
-    var index = 1
-    while index < tokens.len:
-      let token = tokens[index]
-      if token.contains(';') or token.contains('\n') or token.contains('\r') or
-          token.contains('{') or token.contains('}'):
-        return implReject("nft embedded command syntax is not permitted")
-      if token.startsWith("-") and token notin [
-          "-a", "--handle", "-n", "--numeric", "-j", "--json",
-          "-s", "--stateless", "-t", "--terse", "-y", "--numeric-priority",
-          "-p", "--numeric-protocol", "-N", "--reversedns",
-          "-S", "--service", "-u", "--guid"]:
-        return implReject("nft option is outside the query allowlist")
-      if not token.startsWith("-"):
-        if action.len == 0:
-          action = toLowerAscii(token)
-      index += 1
-    if action notin ["list", "get", "describe"]:
-      return implReject("nft is allowed only for list/get/describe queries")
-  of "iptables", "ip6tables":
-    if implHasForbiddenOption(tokens, [
-      "--append", "--delete", "--insert", "--replace", "--flush",
-      "--zero", "--new", "--delete-chain", "--policy", "--rename-chain",
-      "--modprobe", "--set-counters", "-M"
-    ]) or "-M" in tokens:
-      return implReject(name & " option can change firewall state or run a helper")
-    var listing = false
-    for token in tokens:
-      if token in ["-L", "-S", "-C"] or
-          toLowerAscii(token) in [
-            "--list", "--list-rules", "--check", "-v", "--version"]:
-        listing = true
-      if token.startsWith("-") and not token.startsWith("--"):
-        for flag in ['A', 'D', 'I', 'R', 'F', 'Z', 'N', 'X', 'E', 'P', 'M']:
-          if token.contains(flag):
-            return implReject(name & " command can change firewall state")
-    if not listing:
-      return implReject(name & " requires -L/--list or -S/--list-rules")
   else:
     discard
   result = implAllow()
@@ -3857,264 +3296,6 @@ func implValidateGit(tokens: seq[string]): CommandPolicyDecision =
     return implAllow()
   result = implReject("git subcommand is not in the read-only allowlist")
 
-func implValidateContainer(
-  name: string,
-  tokens: seq[string]
-): CommandPolicyDecision =
-  if tokens.len < 2:
-    return implReject(name & " query is missing a subcommand")
-  let action = toLowerAscii(tokens[1])
-  var effectiveAction = action
-  if action in ["container", "image", "network", "volume"] and tokens.len > 2:
-    effectiveAction = toLowerAscii(tokens[2])
-  if effectiveAction == "logs":
-    for token in tokens:
-      if implDockerFollowEnabled(token):
-        return implReject(name & " logs follow mode is unbounded")
-  if effectiveAction == "stats" and
-      not implHasEnabledBooleanOption(tokens, "--no-stream"):
-    return implReject(name & " stats requires --no-stream")
-  if effectiveAction == "events" and
-      not implHasOption(tokens, ["--until"]):
-    return implReject(name & " events requires a finite --until bound")
-  if action in [
-    "ps", "images", "inspect", "logs", "version", "info", "top", "stats",
-    "events", "diff", "history"
-  ]:
-    return implAllow()
-  if action in ["container", "image", "network", "volume"] and tokens.len > 2:
-    let nested = toLowerAscii(tokens[2])
-    if nested in ["ls", "inspect", "logs", "top", "stats", "history"]:
-      return implAllow()
-  if name == "docker" and action == "compose" and tokens.len > 2 and
-      toLowerAscii(tokens[2]) in ["ps", "logs", "config", "images", "top", "ls"]:
-    var hasShortOutput = false
-    for token in tokens:
-      if token.startsWith("-o") and not token.startsWith("--"):
-        hasShortOutput = true
-    if toLowerAscii(tokens[2]) == "config" and (
-        implHasForbiddenOption(tokens, ["--output"]) or hasShortOutput):
-      return implReject(name & " compose config output can write a file")
-    if toLowerAscii(tokens[2]) == "logs":
-      for token in tokens:
-        if implDockerFollowEnabled(token):
-          return implReject("docker compose logs follow mode is unbounded")
-    return implAllow()
-  result = implReject(name & " subcommand is not in the read-only allowlist")
-
-func implValidateKubectl(tokens: seq[string]): CommandPolicyDecision =
-  if tokens.len < 2:
-    return implReject("kubectl query is missing a subcommand")
-  if implHasForbiddenOption(tokens, [
-    "--kubeconfig", "--cache-dir", "--profile", "--profile-output",
-    "--output-directory"
-  ]):
-    return implReject(
-      "kubectl config, cache, profile, or file output is not permitted")
-  var index = 1
-  while index < tokens.len and tokens[index].startsWith("-"):
-    let option = toLowerAscii(tokens[index])
-    if option.contains('='):
-      index += 1
-    elif option in ["--namespace", "-n", "--context", "--cluster", "--user"]:
-      index += 2
-    else:
-      index += 1
-  if index >= tokens.len:
-    return implReject("kubectl query is missing a subcommand")
-  let action = toLowerAscii(tokens[index])
-  for token in tokens:
-    let lower = toLowerAscii(token)
-    if lower in ["-w", "--watch", "--watch-only"] or
-        ((lower.startsWith("--watch=") or
-          lower.startsWith("--watch-only=")) and not lower.endsWith("=false")):
-      return implReject("kubectl watch mode is unbounded")
-    if action == "logs" and (lower in ["-f", "--follow"] or
-        (token.startsWith("-f") and not token.startsWith("--")) or
-        (lower.startsWith("--follow=") and not lower.endsWith("=false"))):
-      return implReject("kubectl logs follow mode is unbounded")
-  if action in [
-    "get", "describe", "logs", "explain", "api-resources", "api-versions",
-    "version", "top"
-  ]:
-    return implAllow()
-  if action == "cluster-info":
-    if index + 1 < tokens.len and
-        toLowerAscii(tokens[index + 1]) == "dump":
-      return implReject("kubectl cluster-info dump can write diagnostic files")
-    return implAllow()
-  if action == "auth" and index + 1 < tokens.len and
-      toLowerAscii(tokens[index + 1]) == "can-i":
-    return implAllow()
-  if action == "config" and index + 1 < tokens.len and
-      toLowerAscii(tokens[index + 1]) in ["view", "current-context", "get-contexts"]:
-    return implAllow()
-  result = implReject("kubectl subcommand is not in the read-only allowlist")
-
-func implValidatePackageQuery(
-  name: string,
-  tokens: seq[string]
-): CommandPolicyDecision =
-  if tokens.len < 2:
-    return implReject(name & " query is missing an action")
-  case name
-  of "apt", "apt-get", "apt-cache":
-    if implHasForbiddenOption(tokens, ["--option", "--config-file"]) or
-        "-o" in tokens or "-c" in tokens:
-      return implReject("APT configuration injection is not permitted")
-    for token in tokens:
-      if token.startsWith("-o") or token.startsWith("-c"):
-        if not token.startsWith("--"):
-          return implReject("APT configuration injection is not permitted")
-  of "dnf", "yum":
-    if implHasForbiddenOption(tokens, [
-      "--config", "--setopt", "--enableplugin", "--disableplugin",
-      "--installroot"
-    ]) or "-c" in tokens:
-      return implReject(name & " plugin or config injection is not permitted")
-    for token in tokens:
-      if token.startsWith("-c") and not token.startsWith("--"):
-        return implReject(name & " plugin or config injection is not permitted")
-  of "zypper":
-    if implHasForbiddenOption(tokens, [
-      "--config", "--reposd-dir", "--cache-dir", "--root"
-    ]):
-      return implReject("zypper config injection is not permitted")
-  of "pacman":
-    if implHasForbiddenOption(tokens, [
-      "--config", "--root", "--dbpath", "--hookdir", "--logfile",
-      "--cachedir", "--gpgdir", "--sysroot"
-    ]):
-      return implReject("pacman config or output redirection is not permitted")
-  of "pip", "pip3":
-    if implHasForbiddenOption(tokens, [
-      "--python", "--config-settings", "--log", "--cache-dir"
-    ]):
-      return implReject("pip interpreter, config, or output path is not permitted")
-  of "npm":
-    if implHasForbiddenOption(tokens, [
-      "--userconfig", "--globalconfig", "--cache", "--logs-dir",
-      "--script-shell", "--ignore-scripts", "--foreground-scripts",
-      "--timing"
-    ]):
-      return implReject("npm config, script, or output injection is not permitted")
-  of "cargo":
-    if implHasForbiddenOption(tokens, ["--config"]):
-      return implReject("cargo config injection is not permitted")
-  of "rpm":
-    if implHasForbiddenOption(tokens, [
-      "--eval", "--pipe", "--setperms", "--setugids", "--restore",
-      "--rebuilddb", "--initdb", "--import", "--install", "--upgrade",
-      "--freshen", "--erase", "--verify", "--define", "--predefine", "--undefine",
-      "--macros", "--rcfile", "--load", "--specfile"
-    ]) or implHasToken(tokens, ["-i", "-U", "-F", "-e"]) or
-        (tokens.len > 1 and tokens[1].startsWith("-V")):
-      return implReject(
-        "rpm action can execute package scripts, macros, or modify packages")
-    for token in tokens:
-      if token.startsWith("-") and not token.startsWith("--") and
-          (token.contains('E') or token.contains('D')):
-        return implReject("rpm macro evaluation/definition can execute code")
-  else:
-    discard
-  let action = toLowerAscii(tokens[1])
-  case name
-  of "apt", "apt-get":
-    if action in ["list", "show", "search", "policy", "--version"]:
-      return implAllow()
-  of "apt-cache":
-    if action in ["show", "search", "policy", "depends", "rdepends", "pkgnames", "stats"]:
-      return implAllow()
-  of "dnf", "yum":
-    if action in [
-      "list", "info", "search", "repolist", "check-update", "repoquery",
-      "provides", "--version"
-    ]:
-      return implAllow()
-    if action == "history" and (tokens.len == 2 or
-        toLowerAscii(tokens[2]) in ["list", "info", "userinstalled"]):
-      return implAllow()
-    if action in ["module", "group"] and tokens.len >= 3 and
-        toLowerAscii(tokens[2]) in ["list", "info"]:
-      return implAllow()
-  of "zypper":
-    if action in [
-      "list-updates", "lu", "patches", "packages", "pa", "repos", "lr",
-      "products", "patterns", "search", "se", "info", "if", "--version"
-    ]:
-      return implAllow()
-  of "pacman":
-    if action.startsWith("-q") or action in ["-ss", "-si", "--version"]:
-      return implAllow()
-  of "brew":
-    if action in [
-      "list", "search", "config", "outdated", "leaves", "deps", "uses",
-      "missing", "--version"
-    ]:
-      return implAllow()
-    if action == "services" and tokens.len >= 3 and
-        toLowerAscii(tokens[2]) == "list":
-      return implAllow()
-    if action == "info":
-      for index in 2 ..< tokens.len:
-        let operand = toLowerAscii(tokens[index])
-        if operand.startsWith(".") or operand.startsWith("/") or
-            operand.contains("\\") or
-            operand.endsWith(".rb"):
-          return implReject("brew info cannot evaluate a path-selected formula")
-      return implAllow()
-  of "winget":
-    if action in ["list", "show", "search", "--version"]:
-      return implAllow()
-    if action == "upgrade" and tokens.len == 2:
-      return implAllow()
-  of "choco":
-    if action in ["list", "search", "info", "outdated", "--version"]:
-      return implAllow()
-  of "pip", "pip3":
-    if action in ["list", "show", "freeze", "check", "debug", "--version"]:
-      return implAllow()
-  of "npm":
-    if action in ["list", "ls", "view", "info", "search", "outdated", "why", "--version"]:
-      return implAllow()
-  of "pnpm", "yarn":
-    if action == "--version":
-      return implAllow()
-  of "cargo":
-    if action in ["search", "--version", "-v"]:
-      return implAllow()
-  of "nimble":
-    if action in ["list", "search", "--version", "-v"]:
-      return implAllow()
-  of "rpm":
-    if action.startsWith("-q") or action in ["--query", "--version"]:
-      return implAllow()
-  of "dpkg":
-    if action in [
-      "-l", "--list", "-s", "--status", "-L", "--listfiles", "-S",
-      "--search", "--print-architecture", "--print-foreign-architectures",
-      "--compare-versions", "--version"
-    ]:
-      return implAllow()
-  of "apk":
-    if action in ["info", "search", "list", "policy", "version", "dot"]:
-      return implAllow()
-  of "snap":
-    if action in [
-      "list", "info", "find", "services", "connections", "changes", "tasks",
-      "warnings", "version"
-    ]:
-      return implAllow()
-  of "flatpak":
-    if action in [
-      "list", "info", "search", "remote-ls", "remotes", "history",
-      "documents", "permission-show", "--version"
-    ]:
-      return implAllow()
-  else:
-    discard
-  result = implReject(name & " action is not in the read-only allowlist")
-
 func implValidateArchive(
   name: string,
   tokens: seq[string]
@@ -4635,29 +3816,6 @@ func implValidateWebCmdlet(tokens: seq[string]): CommandPolicyDecision =
     index += 1
   result = implAllow()
 
-## Allows only Where-Object's comparison form. Its positional FilterScript
-## parameter converts strings to executable ScriptBlocks, so accepting an
-## arbitrary quoted argument would bypass shell metacharacter rejection.
-func implValidateWhereObject(tokens: seq[string]): CommandPolicyDecision =
-  if implHasForbiddenPowerShellParameter(tokens, ["-filterscript"]):
-    return implReject("Where-Object script blocks are not permitted")
-  var hasComparison = false
-  for token in tokens:
-    let lower = toLowerAscii(token)
-    if token.contains('{') or token.contains('}') or token.contains("$_"):
-      return implReject("Where-Object script blocks are not permitted")
-    if lower in [
-      "-eq", "-ceq", "-ne", "-cne", "-gt", "-cgt", "-ge", "-cge",
-      "-lt", "-clt", "-le", "-cle", "-like", "-clike", "-notlike",
-      "-cnotlike", "-match", "-cmatch", "-notmatch", "-cnotmatch",
-      "-contains", "-ccontains", "-notcontains", "-cnotcontains", "-in",
-      "-cin", "-notin", "-cnotin", "-is", "-isnot"
-    ]:
-      hasComparison = true
-  if not hasComparison:
-    return implReject("Where-Object requires the non-script comparison form")
-  result = implAllow()
-
 func implValidateSortObject(tokens: seq[string]): CommandPolicyDecision =
   # PowerShell's bare `sort` alias resolves to Sort-Object, not sort.exe.
   # In particular, `sort -o file` is parsed as an ambiguous common parameter
@@ -4874,8 +4032,6 @@ func implValidateStage(
     return implReject(
       "PowerShell variable-output and custom buffering parameters are not " &
       "permitted across validated command stages")
-  if name == "where-object":
-    return implValidateWhereObject(tokens)
   if name == "sort-object":
     return implValidateSortObject(tokens)
   if name == "get-help":
@@ -4913,7 +4069,7 @@ func implValidateStage(
       return implValidateWebCmdlet(tokens)
     if name == "where" and
         not toLowerAscii(tokens[0]).endsWith("where.exe"):
-      return implValidateWhereObject(tokens)
+      return implReject("bare where is PowerShell's Where-Object alias")
     if name == "sort" and
         not toLowerAscii(tokens[0]).endsWith("sort.exe"):
       return implValidateSortObject(tokens)
@@ -4958,7 +4114,6 @@ func implValidateStage(
   of "ping": return implValidatePing(tokens, shell)
   of "top": return implValidateTop(tokens)
   of "awk": return implValidateAwk(tokens)
-  of "sed": return implValidateSed(tokens)
   of "sensors": return implValidateSensors(tokens)
   of "yq":
     if implHasForbiddenOption(tokens, [
@@ -4994,21 +4149,11 @@ func implValidateStage(
     return implValidateMacReader(name, tokens)
   of "xattr", "mdfind", "pkgutil", "plutil", "xcode-select":
     return implValidateMacMetadataReader(name, tokens)
-  of "nvidia-smi": return implValidateNvidiaSmi(tokens)
-  of "rocm-smi": return implValidateRocmSmi(tokens)
   of "smartctl", "lshw", "upower", "ethtool":
     return implValidateHardwareReader(name, tokens)
-  of "ufw", "firewall-cmd", "nft", "iptables", "ip6tables":
-    return implValidateFirewallReader(name, tokens)
   of "curl": return implValidateCurl(tokens, shell)
   of "wget": return implValidateWget(tokens)
   of "git": return implValidateGit(tokens)
-  of "docker", "podman": return implValidateContainer(name, tokens)
-  of "kubectl": return implValidateKubectl(tokens)
-  of "apt", "apt-get", "apt-cache", "dnf", "yum", "zypper", "pacman",
-      "brew", "winget", "choco", "pip", "pip3", "npm", "pnpm", "yarn",
-      "cargo", "nimble", "rpm", "dpkg", "apk", "snap", "flatpak":
-    return implValidatePackageQuery(name, tokens)
   of "tar", "bsdtar", "unzip", "zipinfo", "gzip", "gunzip", "bzip2",
       "bunzip2", "xz", "unxz", "zcat", "bzcat", "xzcat":
     return implValidateArchive(name, tokens)

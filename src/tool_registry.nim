@@ -7,19 +7,17 @@ import harness_types
 import llm
 
 const
-  LEGACY_SHELL_TOOL* = "run_readonly_shell"
   QUERY_TOOL_NAMES* = ["read_environment", "read_file", "search_files",
     "run_process", "run_shell"]
-  TOOL_SCHEMA_REVISION* = "get-v4-query-tools-1"
+  TOOL_SCHEMA_REVISION* = "get-v5-query-tools-1"
   MAX_TOOL_ARGUMENT_BYTES* = 32_768
 
 func knownQueryTool*(name: string): bool =
-  name == LEGACY_SHELL_TOOL or name in QUERY_TOOL_NAMES
+  name in QUERY_TOOL_NAMES
 
 func toolParameters(name: string): JsonNode =
   var properties = %*{
     "purpose": {"type": "string"},
-    "result_mode": {"type": "string", "enum": ["return_raw", "continue"]},
     "fresh": {"type": "boolean", "description": "Collect a new time-sensitive sample."},
     "required": {"type": "boolean", "description": "This observation is essential to answering the request."}
   }
@@ -27,7 +25,7 @@ func toolParameters(name: string): JsonNode =
     "description": "Reuse the same key when repairing a query for an essential fact."}
   var required: seq[string] = @[]
   case name
-  of "run_shell", LEGACY_SHELL_TOOL:
+  of "run_shell":
     properties["command"] = %*{"type": "string", "minLength": 1}
     properties["cwd"] = %*{"type": "string"}
     properties["shell"] = %*{"type": "string"}
@@ -100,8 +98,7 @@ func stringArray(node: JsonNode, key: string, minimum, maximum: int): seq[string
       raise newException(ValueError, key & " contains an invalid string")
     result.add(item.getStr)
 
-func parseQueryArguments*(name, id: string, node: JsonNode,
-    defaultMode = trmContinue): ToolCall =
+func parseQueryArguments*(name, id: string, node: JsonNode): ToolCall =
   if not knownQueryTool(name):
     raise newException(ValueError, "unsupported tool '" & name & "'")
   if node.kind != JObject or ($node).len > MAX_TOOL_ARGUMENT_BYTES:
@@ -115,14 +112,12 @@ func parseQueryArguments*(name, id: string, node: JsonNode,
     if not node.hasKey(field.getStr):
       raise newException(ValueError, "missing tool argument '" & field.getStr & "'")
   result = ToolCall(id: id, toolName: name, argumentsJson: $node,
-    purpose: stringValue(node, "purpose"), resultMode: defaultMode,
+    purpose: stringValue(node, "purpose"),
     fresh: boolValue(node, "fresh"), required: boolValue(node, "required"))
   result.evidenceKey = stringValue(node, "evidence_key")
-  let mode = stringValue(node, "result_mode")
-  if mode.len > 0: result.resultMode = parseToolResultMode(mode)
   result.cwd = stringValue(node, "cwd")
   case name
-  of "run_shell", LEGACY_SHELL_TOOL:
+  of "run_shell":
     result.invocationKind = tikShell
     result.command = stringValue(node, "command").strip()
     result.shell = stringValue(node, "shell")
@@ -162,6 +157,16 @@ func parseQueryArguments*(name, id: string, node: JsonNode,
     result.command = name & " " & $node
 
 
+func callTarget*(call: ToolCall): string =
+  ## What a call reads, in a few words, for the process line.
+  case call.invocationKind
+  of tikShell: call.command
+  of tikProcess: (@[call.executable] & call.argv).join(" ")
+  of tikEnvironment: call.names.join(",")
+  of tikReadFile: call.path
+  of tikSearchFiles:
+    if call.pattern.len > 0: call.pattern else: call.path
+
 func queryIdentity*(call: ToolCall): string =
   ## Sampling intent and user-facing descriptions do not alter the query.
   $(%*{"tool": call.toolName, "kind": $call.invocationKind,
@@ -175,12 +180,30 @@ func queryIdentity*(call: ToolCall): string =
 proc cachedQueryPlan*(observation: ToolObservation): string =
   var arguments = if observation.argumentsJson.len > 0:
     parseJson(observation.argumentsJson) else: newJObject()
-  if observation.toolName in [LEGACY_SHELL_TOOL, "run_shell"]:
+  if observation.toolName == "run_shell":
     arguments["command"] = %observation.command
   $(%*{"tool": observation.toolName, "arguments": arguments})
 
-proc decodeCachedQueryPlan*(content: string): ToolCall =
-  let node = parseJson(content)
-  if node.kind != JObject or node{"tool"}.isNil or node{"arguments"}.isNil:
+proc encodeCachedQueryPlan*(observations: seq[ToolObservation]): string =
+  ## A plan is the ordered list of reads that produced an answer.
+  var calls = newJArray()
+  for observation in observations:
+    calls.add(parseJson(cachedQueryPlan(observation)))
+  $calls
+
+proc implDecodeCall(item: JsonNode, id: string): ToolCall =
+  if item.kind != JObject or item{"tool"}.isNil or item{"arguments"}.isNil or
+      item["tool"].kind != JString:
     raise newException(ValueError, "invalid cached query plan")
-  parseQueryArguments(node["tool"].getStr, "cached-1", node["arguments"], trmReturnRaw)
+  parseQueryArguments(item["tool"].getStr, id, item["arguments"])
+
+## Decodes one call encoded by ``cachedQueryPlan``.
+proc decodeQueryCall*(content: string): ToolCall =
+  implDecodeCall(parseJson(content), "cached-1")
+
+proc decodeCachedQueryPlan*(content: string): seq[ToolCall] =
+  let node = parseJson(content)
+  if node.kind != JArray or node.len == 0:
+    raise newException(ValueError, "invalid cached query plan")
+  for index, item in node.elems:
+    result.add(implDecodeCall(item, "cached-" & $(index + 1)))

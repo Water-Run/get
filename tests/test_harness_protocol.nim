@@ -1,4 +1,4 @@
-## Tests the structured and legacy get v3 harness action protocols.
+## Tests the strict action protocol of the query loop.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -7,8 +7,8 @@
 ## :License: AGPL-3.0
 ##
 ## This suite verifies strict action validation, provider-native tool argument
-## decoding, parallel call decoding, and compatibility with v2 fenced command
-## responses.  It performs no network or shell operations.
+## decoding, and parallel call decoding. Text that is not a strict JSON action
+## is an answer. It performs no network or shell operations.
 
 {.experimental: "strictFuncs".}
 
@@ -32,7 +32,7 @@ suite "harness action protocol":
       check value.kind == hakAnswer
       check value.text == source
     let action = decodeTextAction(
-      "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"command\":\"pwd\"}]}\n```")
+      "```json\n{\"type\":\"tool_calls\",\"calls\":[{\"tool\":\"run_shell\",\"command\":\"pwd\"}]}\n```")
     check action.kind == hakToolCalls
 
   test "parses a structured answer":
@@ -62,34 +62,37 @@ suite "harness action protocol":
     let action = parseStructuredAction("""
       {
         "type": "tool_calls",
-        "after": "continue",
         "calls": [
-          {"arguments": {"command": "uname -a"}},
-          {"arguments": {
-            "command": "git branch --show-current",
-            "result_mode": "return_raw"
-          }}
+          {"tool": "run_shell", "arguments": {"command": "uname -a"}},
+          {"tool": "read_file", "arguments": {"path": "README.md"}}
         ]
       }
     """).get
     check action.kind == hakToolCalls
     check action.calls.len == 2
-    check action.calls[0].resultMode == trmContinue
-    check action.calls[1].resultMode == trmReturnRaw
+    check action.calls[0].command == "uname -a"
+    check action.calls[1].invocationKind == tikReadFile
+
+  test "a call without a tool name is rejected":
+    expect ValueError:
+      discard parseStructuredAction(
+        """{"type":"tool_calls","calls":[{"command":"pwd"}]}""")
+    expect ValueError:
+      discard parseStructuredAction(
+        """{"type":"tool_calls","calls":[{"tool":"run_shell","arguments":{"command":"pwd","result_mode":"return_raw"}}]}""")
 
   test "parses provider-native arguments":
     let call = parseNativeToolCall(
       "call-8",
-      READ_ONLY_SHELL_TOOL,
+      "run_shell",
       """{
         "command": "pwd",
-        "purpose": "show the current directory",
-        "result_mode": "return_raw"
+        "purpose": "show the current directory"
       }"""
     )
     check call.id == "call-8"
     check call.command == "pwd"
-    check call.resultMode == trmReturnRaw
+    check call.purpose == "show the current directory"
 
   test "old Markdown commands and action markers are inert answer text":
     for source in ["```sh\npwd\n```\n<!-- FINAL -->",
@@ -99,49 +102,14 @@ suite "harness action protocol":
       check action.text == source
       check action.calls.len == 0
 
-  test "parses a Qwen textual tool call":
-    let action = decodeTextAction(
-      "[Tool call] run_readonly_shell " &
-      "{command: date +%Y, purpose: get current year, " &
-      "result_mode: return_raw}")
-    check action.kind == hakToolCalls
-    check action.calls.len == 1
-    check action.calls[0].id == "text-tool-1"
-    check action.calls[0].command == "date +%Y"
-    check action.calls[0].purpose == "get current year"
-    check action.calls[0].resultMode == trmReturnRaw
-
-  test "parses quoted Qwen textual arguments and command commas":
-    let quoted = decodeTextAction(
-      "[tool CALL] run_readonly_shell " &
-      "{command: \"printf '%s,%s' a b\", " &
-      "result_mode: \"continue\"}")
-    check quoted.calls[0].command == "printf '%s,%s' a b"
-    check quoted.calls[0].resultMode == trmContinue
-
-    let unquoted = decodeTextAction(
-      "[Tool call] run_readonly_shell " &
-      "{command: printf %s,%s a b, result_mode: return_raw}")
-    check unquoted.calls[0].command == "printf %s,%s a b"
-
-  test "rejects unsafe textual tool-call ambiguity":
-    expect ValueError:
-      discard decodeTextAction(
-        "[Tool call] write_file {command: touch x}")
-    expect ValueError:
-      discard decodeTextAction(
-        "[Tool call] run_readonly_shell {purpose: no command}")
-    expect ValueError:
-      discard decodeTextAction(
-        "[Tool call] run_readonly_shell " &
-        "{command: pwd, unknown: value}")
-    expect ValueError:
-      discard decodeTextAction(
-        "[Tool call] run_readonly_shell " &
-        "{\"command\":\"pwd\",\"unknown\":\"value\"}")
-    expect ValueError:
-      discard decodeTextAction(
-        "[Tool call] run_readonly_shell {command: pwd} trailing")
+  test "textual tool-call markers are answer text":
+    for source in [
+        "[Tool call] run_shell {command: date +%Y, purpose: get current year}",
+        "[tool CALL] run_shell {\"command\":\"pwd\"}",
+        "[Tool call] write_file {command: touch x}"]:
+      let action = decodeTextAction(source)
+      check action.kind == hakAnswer
+      check action.text == source
 
   test "embedded textual marker remains an answer":
     let action = decodeTextAction(
@@ -175,7 +143,7 @@ suite "harness action protocol":
   test "replaces an empty fallback identifier":
     let action = parseStructuredAction(
       "{\"type\":\"tool_calls\",\"calls\":[{" &
-      "\"id\":\"\",\"command\":\"pwd\"}]}").get
+      "\"id\":\"\",\"tool\":\"run_shell\",\"command\":\"pwd\"}]}").get
     check action.calls[0].id == "local-1"
 
   test "non-JSON content is not a structured action":
@@ -184,7 +152,7 @@ suite "harness action protocol":
   test "adds precise model hints for silent finite readers":
     let identical = observationJson(ToolObservation(
       callId: "cmp-1",
-      toolName: READ_ONLY_SHELL_TOOL,
+      toolName: "run_shell",
       command: "cmp -s ./a ./b",
       output: "",
       exitCode: 0,
@@ -197,7 +165,7 @@ suite "harness action protocol":
 
     let noMatch = observationJson(ToolObservation(
       callId: "grep-1",
-      toolName: READ_ONLY_SHELL_TOOL,
+      toolName: "run_shell",
       command: "/usr/bin/grep needle ./file",
       output: "",
       exitCode: 1,
@@ -225,20 +193,13 @@ suite "harness action protocol":
     observation.required = false
     check not observationJson(observation).contains("repairs this required fact")
 
-## Verifies stable harness configuration parsing and budgets.
-suite "harness kinds and budgets":
-  test "accepts compatibility aliases":
-    check parseHarnessKind("instance") == hkDirect
-    check parseHarnessKind("agent") == hkLoop
-    check parseHarnessKind("batch") == hkParallel
-
-  test "direct budget has one turn and one call":
-    let budget = defaultRunBudget(hkDirect)
-    check budget.maxTurns == 1
-    check budget.maxToolCalls == 1
-    check budget.maxParallel == 1
-
-  test "automatic budget permits bounded parallelism":
-    let budget = defaultRunBudget(hkAuto)
+## Verifies the default budget.
+suite "budget":
+  test "the default budget matches the documented caps":
+    let budget = defaultRunBudget()
     check budget.maxTurns == DEFAULT_HARNESS_TURNS
+    check budget.maxToolCalls == DEFAULT_TOOL_CALLS
     check budget.maxParallel == DEFAULT_PARALLELISM
+    check budget.totalTimeoutSec == DEFAULT_QUERY_TIMEOUT
+    check budget.commandTimeoutSec == DEFAULT_COMMAND_TIMEOUT
+    check budget.maxOutputBytes == DEFAULT_MAX_OUTPUT_BYTES

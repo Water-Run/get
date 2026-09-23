@@ -29,7 +29,7 @@
 
 import std/[
   envvars, locks, monotimes, os, osproc, streams, strformat, strtabs, strutils,
-  tempfiles, times
+  tempfiles, terminal, times
 ]
 
 when defined(windows):
@@ -1120,42 +1120,18 @@ proc terminateActiveCommands*() =
     activeProcessSlots[index] = nil
   release(activeProcessLock)
 
-## Displays the command and reads a y/N confirmation.  Returns
-## true only when the user types "y" (case-insensitive).
+## Shows what a call will read and asks for y/N on stderr. Only "y" runs it.
 ##
-## :param command: The command awaiting confirmation.
+## :param target: What the call reads, as shown on the process line.
 ## :param sk: The active output style.
-## :param showCommand: Whether to display the command.
 ## :returns: true if the user confirms with "y".
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
 proc confirmExecution*(
-  command: string,
-  sk: StyleKind = skSimp,
-  showCommand: bool = true
+  target: string,
+  sk: StyleKind = skSimp
 ): bool =
-  case sk
-  of skSimp:
-    if showCommand:
-      stderr.write(
-        "execute: " & command &
-        "\nconfirm? (y/N): ")
-    else:
-      stderr.write("confirm? (y/N): ")
-  of skVivid:
-    if showCommand:
-      stderr.write(
-        ANSI_MAGENTA &
-        "\xe2\x9d\xaf " & ANSI_BOLD &
-        command & ANSI_RESET &
-        "\n" & ANSI_YELLOW & ANSI_BOLD &
-        "confirm? (y/N): " & ANSI_RESET)
-    else:
-      stderr.write(
-        ANSI_YELLOW & ANSI_BOLD &
-        "confirm? (y/N): " & ANSI_RESET)
+  let colored = sk == skColor and stderr.isatty()
+  let prompt = "run " & target & "? (y/N): "
+  stderr.write(if colored: ANSI_YELLOW & prompt & ANSI_RESET else: prompt)
   stderr.flushFile()
   stdout.flushFile()
   let response = implReadTerminalLine()
@@ -1481,31 +1457,6 @@ proc isolatedComputeAvailable*(): bool =
     result = computeSandboxState == 1
   finally:
     release(computeSandboxLock)
-
-## Executes a command with compatibility defaults and captures its output.
-##
-## This v2-compatible wrapper has no deadline or output cap. New harness code
-## uses ``executeCommandBounded`` with explicit budgets.
-##
-## :param command: Validated command to execute.
-## :param shell: Shell executable name or path.
-## :returns: An unbounded ExecResult.
-## :raises: GetError: If the shell process cannot be started.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
-proc executeCommand*(
-  command: string,
-  shell: string
-): ExecResult =
-  result = executeCommandBounded(
-    command,
-    shell,
-    timeoutSec = 0,
-    maxOutputBytes = 0
-  )
-
 
 proc executeGitSnapshot*(arguments: seq[string], timeoutSec, maxOutputBytes: int,
     workingDirectory: string): ExecResult =

@@ -2,162 +2,90 @@
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
-## :Date: 2026-06-06
+## :Date: 2026-09-23
 ## :File: style.nim
 ## :License: AGPL-3.0
 ##
-## This module provides two output modes — simp (plain) and vivid
-## — that control how progress indicators, separators, warnings,
-## commands, results, and configuration values are rendered on
-## stderr and stdout.  Simp mode produces unformatted text; vivid
-## mode provides animated spinners, ANSI colours, and semantic
-## colourisation of configuration values.
+## Process lines, warnings, and errors go to stderr; answers and settings go
+## to stdout. Colour is used only when the target stream is an interactive
+## terminal and neither ``NO_COLOR`` nor ``TERM=dumb`` asks for plain text, so
+## pipes and redirections always receive plain text.
 ##
-## Semantic colourisation (vivid mode only) highlights
-## configuration values according to their meaning: booleans use
-## a consistent green/grey pair, the API-key placeholder is
-## dimmed, the default command-pattern status is dimmed while its
-## ``(default)`` marker is highlighted, a custom or
-## changed pattern is shown in emphatic red, and recognised
-## values (known shells and in-range integers) are green; model
-## identifiers stay neutral while questionable values are amber.
-##
-## On Windows, ANSI virtual terminal processing must be
-## explicitly enabled via initAnsi before any styled output is
-## written.  initAnsi is a no-op on non-Windows platforms.
-##
-## All styled output directed at progress or status goes to
-## stderr; final results go to stdout.
+## On Windows, ANSI virtual terminal processing must be enabled via initAnsi
+## before any styled output is written. initAnsi is a no-op elsewhere.
 
 {.experimental: "strictFuncs".}
 
-import std/[os, strformat, strutils, terminal]
+import std/[os, strutils, terminal]
 import markdown_render
 
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
-## Enumerates the two supported output styles.
+## Whether the environment permits colour at all. A stream still gets plain
+## text unless it is a terminal.
 type
   StyleKind* = enum
-    skSimp  ## Plain text, no formatting.
-    skVivid ## Animated spinners and semantic colours.
+    skSimp  ## Plain text only.
+    skColor ## Colour on interactive terminals.
 
-## Classifies the semantic state of a configuration value so
-## that vivid mode can colourise it appropriately.
+## Classifies the semantic state of a configuration value for colouring.
 type
   ValueState* = enum
     vsNeutral  ## No special meaning; default foreground.
     vsGood     ## Recognised / in-range (green).
-    vsBad      ## Off / disabled / negative sense (grey).
+    vsBad      ## Off / disabled (dim).
     vsWarn     ## Out-of-range or unrecognised (amber).
     vsMuted    ## De-emphasised text (dim).
-    vsDanger   ## Custom / overriding a safe default (red).
 
 # ---------------------------------------------------------------------------
-# Constants — ANSI escape codes
+# Constants
 # ---------------------------------------------------------------------------
 
-## Resets all ANSI attributes.
 const ANSI_RESET* = "\e[0m"
-
-## Bold text.
 const ANSI_BOLD* = "\e[1m"
-
-## Dim / faint text.
 const ANSI_DIM* = "\e[2m"
-
-## Red foreground.
 const ANSI_RED* = "\e[31m"
-
-## Green foreground.
 const ANSI_GREEN* = "\e[32m"
-
-## Yellow foreground.
 const ANSI_YELLOW* = "\e[33m"
-
-## Cyan foreground.
 const ANSI_CYAN* = "\e[36m"
 
-## Magenta foreground.
-const ANSI_MAGENTA* = "\e[35m"
+## Width of the key column in ``get config``, ``get cache``, and ``get log``.
+const KEY_COLUMN_WIDTH* = 18
 
-# ---------------------------------------------------------------------------
-# Constants — dividers
-# ---------------------------------------------------------------------------
-
-## Thin separator for minor boundaries.
-const DIV_THIN* = "---"
-
-## Emphasis separator for warnings.
-const DIV_WARN* = "***"
-
-## Major section separator.
-const DIV_SECTION* = "==="
-
-## Footer separator.
-const DIV_FOOTER* = "____"
-
-## Decorative separator for special notices.
-const DIV_NOTICE* = "\\\\\\\\\\\\"
-
-# ---------------------------------------------------------------------------
-# Constants — vivid mode spinner frames
-# ---------------------------------------------------------------------------
-
-## Braille-dot spinner frames for vivid mode animation.
-const SPINNER_FRAMES* = [
-  "\xe2\xa0\x8b", "\xe2\xa0\x99",
-  "\xe2\xa0\xb9", "\xe2\xa0\xb8",
-  "\xe2\xa0\xbc", "\xe2\xa0\xb4",
-  "\xe2\xa0\xa6", "\xe2\xa0\xa7",
-  "\xe2\xa0\x87", "\xe2\xa0\x8f"]
+## Column widths of one process line: tool, target, status, duration.
+const PROCESS_TOOL_WIDTH = 15
+const PROCESS_TARGET_WIDTH = 16
+const PROCESS_STATUS_WIDTH = 12
 
 # ---------------------------------------------------------------------------
 # Platform-specific ANSI enabling (Windows)
 # ---------------------------------------------------------------------------
 
 when defined(windows):
-  ## Win32 standard output handle constant.
   const IMPL_STD_OUTPUT_HANDLE = -11'i32
-
-  ## Win32 standard error handle constant.
   const IMPL_STD_ERROR_HANDLE = -12'i32
-
-  ## Enables ANSI escape sequence processing.
   const IMPL_ENABLE_VTP = 0x0004'u32
 
-  ## Retrieves a handle for the specified standard device.
   proc implGetStdHandle(
     nStdHandle: int32
   ): int {.importc: "GetStdHandle",
     stdcall, dynlib: "kernel32".}
 
-  ## Retrieves the current console mode.
   proc implGetConsoleMode(
     hConsole: int,
     lpMode: ptr uint32
   ): int32 {.importc: "GetConsoleMode",
     stdcall, dynlib: "kernel32".}
 
-  ## Sets the console mode.
   proc implSetConsoleMode(
     hConsole: int,
     dwMode: uint32
   ): int32 {.importc: "SetConsoleMode",
     stdcall, dynlib: "kernel32".}
 
-# ---------------------------------------------------------------------------
-# Public API — ANSI initialisation
-# ---------------------------------------------------------------------------
-
-## Enables ANSI virtual terminal processing on Windows.  No-op
-## on non-Windows platforms.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     initAnsi()
+## Enables ANSI virtual terminal processing on Windows. No-op elsewhere.
 proc initAnsi*() =
   when defined(windows):
     for h in [IMPL_STD_OUTPUT_HANDLE,
@@ -172,396 +100,139 @@ proc initAnsi*() =
           handle, mode or IMPL_ENABLE_VTP)
 
 # ---------------------------------------------------------------------------
-# Public API — style conversion
+# Public API — style detection
 # ---------------------------------------------------------------------------
 
-## Converts a vivid boolean flag to the corresponding StyleKind.
-##
-## :param vivid: true for vivid mode, false for plain mode.
-## :returns: skVivid or skSimp.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert toStyleKind(true) == skVivid
-##     assert toStyleKind(false) == skSimp
-func toStyleKind*(vivid: bool): StyleKind =
-  if vivid: skVivid else: skSimp
+## Returns skColor unless ``NO_COLOR`` is set or ``TERM`` is ``dumb``.
+proc detectStyle*(): StyleKind =
+  if existsEnv("NO_COLOR") or getEnv("TERM") == "dumb": skSimp
+  else: skColor
 
-# ---------------------------------------------------------------------------
-# Public API — semantic value colourisation
-# ---------------------------------------------------------------------------
+## Whether a write to ``f`` may carry colour.
+proc implColored(kind: StyleKind, f: File): bool =
+  kind == skColor and f.isatty()
 
-## Returns the ANSI prefix for a value state, or an empty
-## string for neutral / non-vivid output.
-##
-## :param kind: The active output style.
-## :param state: The semantic state of the value.
-## :returns: An ANSI escape prefix, or empty string.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert ansiForState(skSimp, vsGood) == ""
-func ansiForState(
-  kind: StyleKind,
-  state: ValueState
-): string =
-  if kind != skVivid:
-    return ""
+func implPaint(on: bool, prefix, text: string): string =
+  if on and prefix.len > 0: prefix & text & ANSI_RESET else: text
+
+func ansiForState(state: ValueState): string =
   case state
   of vsNeutral: result = ""
   of vsGood:    result = ANSI_GREEN
   of vsBad:     result = ANSI_DIM
   of vsWarn:    result = ANSI_YELLOW
   of vsMuted:   result = ANSI_DIM
-  of vsDanger:  result = ANSI_RED & ANSI_BOLD
 
 # ---------------------------------------------------------------------------
-# Private helpers — built-in help colourisation
+# Public API — stderr messages
 # ---------------------------------------------------------------------------
 
-## Applies lightweight ANSI colouring to a help text string for
-## vivid mode.  The colour scheme is intentionally restrained:
-## the banner and section headers are bold cyan, example/usage
-## ``get`` invocations are bold green, flags beginning with
-## ``--`` are amber, and option-name leaders are highlighted
-## cyan while their descriptions stay neutral.
-##
-## :param text: The full help text to colourise.
-## :returns: The colourised string.
-func implColorizeHelp(text: string): string =
-  var lines: seq[string] = @[]
-  var isFirst = true
-  for rawLine in text.splitLines():
-    if isFirst:
-      isFirst = false
-      lines.add(
-        ANSI_CYAN & ANSI_BOLD &
-        rawLine & ANSI_RESET)
-      continue
-    let stripped = rawLine.strip()
-    if stripped.len == 0:
-      lines.add("")
-      continue
-    if not rawLine.startsWith(" ") and
-        stripped.endsWith(":"):
-      lines.add(
-        ANSI_CYAN & ANSI_BOLD &
-        rawLine & ANSI_RESET)
-    elif rawLine.startsWith("  get "):
-      lines.add(
-        ANSI_GREEN & ANSI_BOLD &
-        rawLine & ANSI_RESET)
-    elif rawLine.startsWith("  --"):
-      lines.add(
-        ANSI_YELLOW & ANSI_BOLD &
-        rawLine & ANSI_RESET)
-    elif rawLine.startsWith("  ") and
-        not rawLine.startsWith("    ") and
-        stripped.len > 0 and
-        stripped[0] in {'a' .. 'z', 'A' .. 'Z'}:
-      let trimmed = rawLine.strip(
-        leading = true, trailing = false)
-      let spIdx = trimmed.find(' ')
-      let indent = rawLine.len - trimmed.len
-      let pad = repeat(' ', indent)
-      if spIdx > 0:
-        let name = trimmed[0 ..< spIdx]
-        let rest = trimmed[spIdx .. ^1]
-        lines.add(
-          pad & ANSI_CYAN & ANSI_BOLD &
-          name & ANSI_RESET & rest)
-      else:
-        lines.add(
-          pad & ANSI_CYAN & ANSI_BOLD &
-          trimmed & ANSI_RESET)
-    else:
-      lines.add(rawLine)
-  result = lines.join("\n")
-
-# ---------------------------------------------------------------------------
-# Public API — styled stderr output
-# ---------------------------------------------------------------------------
-
-## Writes a progress message to stderr.
-##
-## :param kind: The active output style.
-## :param text: The progress message text.
+## Writes a progress or status note to stderr.
 proc styleProgress*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    stderr.writeLine(text)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_CYAN & ANSI_BOLD & text & ANSI_RESET)
+  stderr.writeLine(implPaint(implColored(kind, stderr), ANSI_DIM, text))
 
-## Writes a warning message to stderr.
-##
-## :param kind: The active output style.
-## :param text: The warning message text.
+## Writes a warning to stderr.
 proc styleWarning*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    stderr.writeLine(text)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_YELLOW & ANSI_BOLD &
-      "\xe2\x9a\xa0 " & text & ANSI_RESET)
+  stderr.writeLine(implPaint(implColored(kind, stderr), ANSI_YELLOW, text))
 
-## Writes an error message to stderr.
-##
-## :param kind: The active output style.
-## :param text: The error message text.
+## Writes an error to stderr.
 proc styleError*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    stderr.writeLine(text)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_RED & ANSI_BOLD & text & ANSI_RESET)
+  stderr.writeLine(implPaint(implColored(kind, stderr), ANSI_RED, text))
 
-## Writes a success message to stderr.
-##
-## :param kind: The active output style.
-## :param text: The success message text.
+## Writes a confirmation of a completed management action to stderr.
 proc styleSuccess*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    stderr.writeLine(text)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_GREEN & ANSI_BOLD & text & ANSI_RESET)
+  stderr.writeLine(implPaint(implColored(kind, stderr), ANSI_GREEN, text))
 
-## Writes a command display to stderr.
-##
-## :param kind: The active output style.
-## :param label: The label prefix (e.g. "command").
-## :param command: The command string to display.
-proc styleCommand*(
-  kind: StyleKind,
-  label: string,
-  command: string
-) =
-  case kind
-  of skSimp:
-    stderr.writeLine(fmt"{label}: {command}")
-  of skVivid:
-    stderr.writeLine(
-      ANSI_MAGENTA & "\xe2\x9d\xaf " &
-      ANSI_BOLD & command & ANSI_RESET)
+## Returns a process-line target shortened to its column.
+func implShortTarget(target: string): string =
+  result = target.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+  if result.len >= PROCESS_TARGET_WIDTH:
+    var cut = PROCESS_TARGET_WIDTH - 4
+    while cut > 0 and (byte(result[cut]) and 0xC0'u8) == 0x80'u8:
+      dec cut
+    result = result[0 ..< cut] & "..."
 
-## Writes the agent loop round indicator to stderr.
-##
-## :param kind: The active output style.
-## :param current: The current round number (1-based).
-## :param maxRounds: Configured maximum rounds (0 = unlimited).
-proc styleRound*(
-  kind: StyleKind,
-  current: int,
-  maxRounds: int
-) =
-  let text =
-    if maxRounds > 0:
-      fmt"round {current}/{maxRounds}"
-    else:
-      fmt"round {current}"
-  case kind
-  of skSimp:
-    stderr.writeLine(text)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_DIM & "\xe2\x94\x80\xe2\x94\x80 " &
-      ANSI_CYAN & ANSI_BOLD & text & ANSI_RESET &
-      ANSI_DIM &
-      " \xe2\x94\x80\xe2\x94\x80" & ANSI_RESET)
+func implStatusColor(status: string): string =
+  case status
+  of "ok", "no match", "finding", "reused": ANSI_GREEN
+  of "denied": ANSI_RED
+  of "timeout", "unsupported": ANSI_YELLOW
+  else: ""
 
-## Writes a section separator to stderr.  Simp emits a blank
-## line; vivid emits nothing.
+## Writes one observation line to stderr: tool, target, status, duration.
+## A negative duration (nothing ran) leaves the last column empty.
 ##
-## :param kind: The active output style.
-## :param separator: The divider string (kept for API
-##                   stability).
-proc styleSeparator*(
-  kind: StyleKind,
-  separator: string
-) =
-  case kind
-  of skSimp:
-    stderr.writeLine("")
-  of skVivid:
-    discard
+## .. code-block:: text
+##   read_file      src/get.nim     ok          12ms
+##   run_process    ps              denied
+proc styleProcessLine*(kind: StyleKind, tool, target, status: string,
+    elapsedMs: int64) =
+  let colored = implColored(kind, stderr)
+  var line = alignLeft(tool, PROCESS_TOOL_WIDTH - 1) & " " &
+    alignLeft(implShortTarget(target), PROCESS_TARGET_WIDTH - 1) & " "
+  if elapsedMs >= 0:
+    line.add(implPaint(colored, implStatusColor(status),
+      alignLeft(status, PROCESS_STATUS_WIDTH - 1)) & " " & $elapsedMs & "ms")
+  else:
+    line.add(implPaint(colored, implStatusColor(status), status))
+  stderr.writeLine(line)
 
-# ---------------------------------------------------------------------------
-# Public API — vivid spinner helpers
-# ---------------------------------------------------------------------------
-
-## Returns the spinner frame for the given tick count.
-##
-## :param tick: A monotonically increasing counter.
-## :returns: The Unicode spinner character for this tick.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     let f = spinnerFrame(0)
-##     assert f.len > 0
-func spinnerFrame*(tick: int): string =
-  result = SPINNER_FRAMES[
-    tick mod SPINNER_FRAMES.len]
-
-## Writes a spinner frame with a message to stderr, overwriting
-## the current line using carriage return.
-##
-## :param tick: The current tick counter.
-## :param message: Text to display beside the spinner.
-proc writeSpinner*(tick: int, message: string) =
-  stderr.write(
-    "\r" & ANSI_CYAN &
-    spinnerFrame(tick) & " " &
-    message & ANSI_RESET & "   ")
+## Shows the single waiting line while a model request is in flight.
+proc writeRequesting*(seconds: int) =
+  stderr.write("\rrequesting " & $seconds & "s\e[K")
   stderr.flushFile()
 
-## Clears the spinner line on stderr.
-proc clearSpinner*() =
+## Clears the waiting line.
+proc clearRequesting*() =
   stderr.write("\r\e[K")
   stderr.flushFile()
 
 # ---------------------------------------------------------------------------
-# Public API — result output
+# Public API — stdout
 # ---------------------------------------------------------------------------
 
-## Writes a final result, optionally rendering model Markdown on a terminal.
-## Pipes, redirected output, and raw command results retain their original text.
-##
-## :param kind: The active output style.
-## :param text: The result text to display.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
+## Writes the answer to stdout. Model Markdown is rendered only on an
+## interactive terminal; pipes and redirections keep the original text.
 proc styleResult*(
   kind: StyleKind,
   text: string,
   markdown: bool = false
 ) =
   if markdown and stdout.isatty() and getEnv("TERM") != "dumb":
-    echo renderMarkdown(text, kind == skVivid and not existsEnv("NO_COLOR"))
+    echo renderMarkdown(text, implColored(kind, stdout))
   else:
     echo text
 
-# ---------------------------------------------------------------------------
-# Public API — unified styled output helpers
-# ---------------------------------------------------------------------------
-
-## Writes a key-value pair to stdout.
-##
-## :param kind: The active output style.
-## :param key: The option or field name.
-## :param value: The value to display.
+## Writes one aligned key and value to stdout.
 proc styleKeyValue*(
   kind: StyleKind,
   key: string,
   value: string
 ) =
-  case kind
-  of skSimp:
-    echo fmt"{key} = {value}"
-  of skVivid:
-    echo ANSI_CYAN & ANSI_BOLD & key &
-      ANSI_RESET & " = " & value
+  let colored = implColored(kind, stdout)
+  echo implPaint(colored, ANSI_CYAN, alignLeft(key, KEY_COLUMN_WIDTH - 1)) &
+    " " & value
 
-## Writes a key-value pair to stdout with semantic colouring of
-## the value in vivid mode.  The value may be split into a main
-## segment and an optional trailing segment that is highlighted
-## separately (used for the ``(default)`` marker on
-## the command-pattern value).
-##
-## :param kind: The active output style.
-## :param key: The option or field name.
-## :param value: The main value text.
-## :param state: Semantic state controlling the value colour.
-## :param trailer: Optional trailing text appended after the
-##                 value and shown highlighted (bold cyan) in
-##                 vivid mode.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     styleConfigValue(skSimp, "shell", "bash", vsGood)
+## Writes one aligned configuration key and value, colouring the value by
+## meaning on a terminal.
 proc styleConfigValue*(
   kind: StyleKind,
   key: string,
   value: string,
-  state: ValueState = vsNeutral,
-  trailer: string = ""
+  state: ValueState = vsNeutral
 ) =
-  case kind
-  of skSimp:
-    if trailer.len > 0:
-      echo fmt"{key} = {value} {trailer}"
-    else:
-      echo fmt"{key} = {value}"
-  of skVivid:
-    let valPrefix = ansiForState(kind, state)
-    var line = ANSI_CYAN & ANSI_BOLD & key &
-      ANSI_RESET & " = "
-    if valPrefix.len > 0:
-      line.add(valPrefix & value & ANSI_RESET)
-    else:
-      line.add(value)
-    if trailer.len > 0:
-      line.add(" " & ANSI_CYAN & ANSI_BOLD &
-        trailer & ANSI_RESET)
-    echo line
+  let colored = implColored(kind, stdout)
+  echo implPaint(colored, ANSI_CYAN, alignLeft(key, KEY_COLUMN_WIDTH - 1)) &
+    " " & implPaint(colored, ansiForState(state), value)
 
 ## Writes a single value to stdout.
-##
-## :param kind: The active output style.
-## :param text: The value text to display.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard
 proc styleValue*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    echo text
-  of skVivid:
-    echo ANSI_CYAN & ANSI_BOLD &
-      text & ANSI_RESET
-
-## Writes a section header to stderr.
-##
-## :param kind: The active output style.
-## :param title: The section title text.
-proc styleHeader*(kind: StyleKind, title: string) =
-  case kind
-  of skSimp:
-    stderr.writeLine(title)
-  of skVivid:
-    stderr.writeLine(
-      ANSI_CYAN & ANSI_BOLD & title & ANSI_RESET)
+  echo text
 
 ## Writes informational text to stdout.
-##
-## :param kind: The active output style.
-## :param text: The informational text to display.
 proc styleInfo*(kind: StyleKind, text: string) =
-  case kind
-  of skSimp:
-    echo text
-  of skVivid:
-    echo text
+  echo text
 
-## Displays help text to stdout.  In vivid mode the built-in
-## colouriser is applied; in plain mode the text is echoed
-## verbatim.
-##
-## :param kind: The active output style.
-## :param text: The help text content.
-proc styleHelp*(
-  kind: StyleKind,
-  text: string
-) =
-  case kind
-  of skSimp:
-    echo text
-  of skVivid:
-    echo implColorizeHelp(text)
+## Writes the help text to stdout as plain text.
+proc styleHelp*(text: string) =
+  echo text

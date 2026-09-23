@@ -9,10 +9,10 @@ import ../src/sysinfo
 import ../src/utils
 
 suite "version metadata":
-  test "uses release version 4.0.0 consistently":
+  test "uses release version 5.0.0 consistently":
     const nimbleContent = staticRead("../get.nimble")
-    check APP_VERSION == "4.0.0"
-    check nimbleContent.contains("version       = \"4.0.0\"")
+    check APP_VERSION == "5.0.0"
+    check nimbleContent.contains("version       = \"5.0.0\"")
 
   test "pins the supported Windows OpenSSL 3 runtime":
     const buildConfig = staticRead("../config.nims")
@@ -64,17 +64,18 @@ suite "model configuration":
     check classifyModel("") == classifyUrl("")
 
 suite "configuration":
-  test "defaults to MiniMax M3 and does not prefer system proxy":
+  test "defaults to DeepSeek-V4.1-Flash and does not prefer system proxy":
     let cfg = defaultConfig()
-    check cfg.model == "minimax-m3"
+    check cfg.model == "deepseek-flash"
+    check cfg.url == "https://api.deepseek.com"
     check cfg.systemProxy == false
 
   test "installer defaults match runtime defaults":
     const installerContent = staticRead("../get_ready.py")
     check installerContent.contains(
-      "DEFAULT_MODEL: str = \"minimax-m3\"")
+      "DEFAULT_MODEL: str = \"deepseek-flash\"")
     check installerContent.contains(
-      "DEFAULT_URL: str = \"https://api.minimaxi.com/v1\"")
+      "DEFAULT_URL: str = \"https://api.deepseek.com\"")
 
   test "system proxy preference overrides terminal proxy only when enabled":
     check chooseProxyForTest(
@@ -113,8 +114,7 @@ suite "agent response parsing":
       availableTools: @["rg"]
     )
     let msgs = buildHarnessMessages(
-      info, "list files", "powershell", hkAuto,
-      defaultRunBudget(hkAuto), none(string), none(string))
+      info, "list files", "powershell", defaultRunBudget(), none(string))
     let sys = msgs[0].content
     check sys.contains("Get-ChildItem")
     check sys.contains("dynamic/local facts")

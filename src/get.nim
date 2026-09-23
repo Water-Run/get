@@ -6,14 +6,11 @@
 ## :File: get.nim
 ## :License: AGPL-3.0
 ##
-## This module parses command-line arguments, routes execution to
-## the appropriate subcommand handler, and manages top-level error
-## reporting. The v3 query path uses one typed model/action/tool/observation
-## state machine with auto, direct, loop, and parallel strategy policies.
-## Provider-native tool calls are preferred, structured JSON is the fallback,
-## and the old Markdown markers are isolated in a compatibility decoder.
-## Every fresh or cached command passes through the same safety gate and a
-## bounded executor before it can run.
+## This module parses command-line arguments, routes execution to the
+## appropriate subcommand handler, and manages top-level error reporting.
+## A query runs through one loop: provider-native tool calls are preferred and
+## strict JSON actions are the fallback. Every fresh or cached call passes the
+## same authorization and a bounded executor before it can run.
 
 {.experimental: "strictFuncs".}
 
@@ -25,6 +22,7 @@ import native_query_worker
 import compute_sandbox
 import exec
 import harness_types
+import installer
 import llm
 import logger
 import prompt
@@ -43,138 +41,81 @@ const HELP_TEXT* = """get -- get anything from your computer
 usage:
   get "query" [flags]          retrieve information via natural language
   get set <option> [value]     set configuration (omit value to reset)
-  get config [flags]           view or reset configuration
-  get cache [flags]            view or manage response cache
-  get log [flags]              view or manage execution log
+  get config [--<option>]      view settings, or one setting
+  get config --reset           reset all settings and remove the key
+  get cache [flags]            view or manage the cache
+  get log [flags]              view recent queries or clear the log
+  get update                   install the latest release
+  get uninstall [--purge]      remove get (--purge also removes settings)
   get get [flags]              display application information
-  get author                   display application author
   get version, --version, -V   display version
   get isok                     verify configuration readiness
   get help                     display this help message
 
-query flags (per-invocation overrides):
-  --no-cache                   bypass cache for this query
-  --cache                      force cache for this query
-  --manual-confirm             prompt before executing
-  --no-manual-confirm          skip confirmation prompt
-  --double-check               enable safety review
-  --no-double-check            skip safety review
-  --instance                   fast single-call mode
-  --no-instance                alias for loop
-  --harness <kind>             auto, direct, loop, or parallel
+query flags (this query only):
+  --model <name>               use another model
+  --timeout <seconds>          request timeout
+  --no-cache                   skip the cache
+  --cache                      also cache the answer text
   --protocol <kind>            auto, native, or json
-  --hide-process               suppress intermediate output
-  --no-hide-process            show intermediate output
-  --system-proxy               prefer OS system proxy settings
-  --no-system-proxy            use terminal proxy environment only
-  --vivid                      enable vivid output mode
-  --no-vivid                   plain text output mode
-  --markdown                   render model Markdown in an interactive terminal
-  --no-markdown                display original Markdown source
-  --model <name>               override LLM model
-  --timeout <seconds>          override request timeout
+  --hide-process               hide process lines
+  --no-hide-process            show process lines
+  --markdown                   render Markdown in an interactive terminal
+  --no-markdown                print Markdown source
+  --manual-confirm             ask before each call runs
+  --no-manual-confirm          do not ask
+  --double-check               second model reviews each call
+  --no-double-check            no review
+  --system-proxy               prefer the OS proxy settings
+  --no-system-proxy            use terminal proxy variables only
 
 set options:
-  key                LLM API key (string, default: empty)
-  url                API endpoint URL (string,
-                       default: https://api.minimaxi.com/v1)
-  model              LLM model name (string,
-                       default: minimax-m3)
-  manual-confirm     prompt before executing
-                       (true/false, default: false)
-  double-check       second model safety review
-                       (true/false, default: false)
-  instance           alias for harness=direct
-                       (true/false, default: false)
-  harness            orchestration strategy
-                       (auto/direct/loop/parallel, default: auto)
-  tool-protocol      model tool protocol
-                       (auto/native/json, default: auto)
-  timeout            request timeout in seconds
-                       (integer or false, default: 300)
-  max-token          max tokens per request
-                       (integer or false, default: 20480)
-  max-rounds         inspection-turn limit (+ one final answer)
-                       (positive integer, default: 6)
-  max-tool-calls     max tool calls per run
-                       (integer, default: 16)
-  max-parallel       max concurrent tool calls
-                       (integer, default: 4)
+  key                API key (default: empty)
+  url                API base URL (default: https://api.deepseek.com)
+  model              model name (default: deepseek-flash)
+  manual-confirm     ask before each call runs (true/false, default: false)
+  double-check       second model reviews each call (true/false, default: false)
+  tool-protocol      auto, native, or json (default: auto)
+  timeout            request timeout in seconds, or false (default: 300)
+  max-token          max tokens per request, or false (default: 20480)
+  max-rounds         model requests per query (default: 6)
+  max-tool-calls     tool calls per query (default: 16)
+  max-parallel       calls run at once (default: 4)
   query-timeout      whole-query deadline in seconds (default: 120)
-  command-timeout    command deadline in seconds
-                       (positive integer, default: 30)
-  max-output-bytes   captured bytes per command
-                       (positive integer, default: 1048576)
-  command-pattern    optional supplemental forbidden regex;
-                       omit value to restore the semantic-only
-                       default, use "" to disable an existing regex
-                       (string, default: semantic policy only)
-  system-prompt      custom system prompt
-                       (string, default: empty)
-  shell              shell executable
-                       (string, default: bash / powershell)
-  log                log requests and executions
+  command-timeout    per-command deadline in seconds (default: 30)
+  max-output-bytes   captured bytes per command (default: 1048576)
+  system-prompt      extra instruction for the model (default: empty)
+  shell              shell for commands (default: bash / powershell)
+  log                log one line per query (true/false, default: true)
+  diagnostics        structured events on stderr (true/false, default: false)
+  hide-process       hide process lines (true/false, default: false)
+  system-proxy       prefer the OS proxy settings (true/false, default: false)
+  cache              use the cache (true/false, default: true)
+  cache-expiry       cache lifetime in days, or false (default: 30)
+  cache-max-entries  cached entries kept, or false (default: 1000)
+  log-max-entries    log entries kept, or false (default: 1000)
+  markdown           render answers in interactive terminals
                        (true/false, default: true)
-  diagnostics        structured query events to stderr (default: false)
-  hide-process       hide intermediate output
-                       (true/false, default: false)
-  system-proxy       prefer OS system proxy settings; when false,
-                       use terminal proxy environment only
-                       (true/false, default: false)
-  cache              enable response caching
-                       (true/false, default: true)
-  cache-expiry       cache lifetime in days
-                       (integer or false, default: 30)
-  cache-max-entries  max cached entries
-                       (integer or false, default: 1000)
-  log-max-entries    max log entries retained
-                       (integer or false, default: 1000)
-  vivid              vivid output mode with colours and animation
-                        (true/false, default: true)
-  markdown           render model answers in interactive terminals
-                        (true/false, default: true; pipes keep source text)
-
-  Request, cache, and log limits accept 'false'. Harness and command
-  safety limits require a positive integer.
-
-config flags:
-  (none)             display all current settings
-  --reset            reset all settings to defaults
-  --<option>         display one setting (any set option name)
 
 cache flags:
   (none)             display cache status
   --clean            remove all cached entries
-  --unset "query"    remove entries matching query
+  --unset "query"    remove entries for a query
 
 log flags:
-  (none)             display log status
+  (none)             display log status and recent queries
   --clean            remove all log entries
 
 get flags:
-  (none)             display all application info
-  --name             display application name
-  --intro            display introduction
-  --version          display version
-  --author           display author
-  --license          display license identifier
-  --github           display GitHub URL
+  --name, --intro, --version, --author, --license, --github
 
 examples:
   get "system version"
   get "disk usage" --no-cache
-  get "list files" --model minimax-m3 --vivid
-  get set model minimax-m3
+  get set model deepseek-flash
   get set key sk-your-api-key
-  get set url https://api.minimaxi.com/v1
-  get set timeout false
-  get set max-rounds 5
-  get set command-pattern
-  get set command-pattern ""
   get config --model
-  get config --command-pattern
-  get cache --clean
-  get log --clean"""
+  get log"""
 
 # ---------------------------------------------------------------------------
 # Types — CLI override structure
@@ -187,12 +128,9 @@ type
     forceCache*: Option[bool]    ## Force cache on.
     manualConfirm*: Option[bool] ## Override manual-confirm.
     doubleCheck*: Option[bool]   ## Override double-check.
-    instance*: Option[bool]      ## Override instance mode.
-    harness*: Option[string]     ## Override v3 harness strategy.
     toolProtocol*: Option[string] ## Override provider tool protocol.
     hideProcess*: Option[bool]   ## Override hide-process.
     systemProxy*: Option[bool]   ## Override system-proxy.
-    vivid*: Option[bool]         ## Override vivid mode.
     markdown*: Option[bool]      ## Override model Markdown rendering.
     model*: Option[string]       ## Override model name.
     timeout*: Option[int]        ## Override timeout seconds.
@@ -259,12 +197,9 @@ func implParseQueryArgs(
     forceCache: none(bool),
     manualConfirm: none(bool),
     doubleCheck: none(bool),
-    instance: none(bool),
-    harness: none(string),
     toolProtocol: none(string),
     hideProcess: none(bool),
     systemProxy: none(bool),
-    vivid: none(bool),
     markdown: none(bool),
     model: none(string),
     timeout: none(int)
@@ -285,21 +220,6 @@ func implParseQueryArgs(
       ov.doubleCheck = some(true)
     of "--no-double-check":
       ov.doubleCheck = some(false)
-    of "--instance":
-      ov.instance = some(true)
-    of "--no-instance":
-      ov.instance = some(false)
-    of "--harness":
-      if i + 1 >= args.len:
-        raise newException(GetError,
-          "--harness requires a value")
-      i += 1
-      try:
-        ov.harness = some(harnessName(
-          parseHarnessKind(args[i])))
-      except ValueError as error:
-        raise newException(GetError,
-          fmt"invalid harness value: {error.msg}")
     of "--protocol":
       if i + 1 >= args.len:
         raise newException(GetError,
@@ -319,10 +239,6 @@ func implParseQueryArgs(
       ov.systemProxy = some(true)
     of "--no-system-proxy":
       ov.systemProxy = some(false)
-    of "--vivid":
-      ov.vivid = some(true)
-    of "--no-vivid":
-      ov.vivid = some(false)
     of "--markdown":
       ov.markdown = some(true)
     of "--no-markdown":
@@ -347,6 +263,8 @@ func implParseQueryArgs(
       except ValueError:
         raise newException(GetError,
           fmt"invalid timeout value: {args[i]}")
+    of "--harness", "--instance", "--no-instance", "--vivid", "--no-vivid":
+      raise newException(GetError, fmt"unknown option '{a}'")
     else:
       queryParts.add(a)
     i += 1
@@ -369,39 +287,18 @@ proc implApplyOverrides(
     cfg.manualConfirm = ov.manualConfirm.get
   if ov.doubleCheck.isSome:
     cfg.doubleCheck = ov.doubleCheck.get
-  if ov.instance.isSome:
-    cfg.instance = ov.instance.get
-    cfg.harness =
-      if cfg.instance: "direct"
-      else: "loop"
-  if ov.harness.isSome:
-    cfg.harness = ov.harness.get
-    cfg.instance = cfg.harness == "direct"
   if ov.toolProtocol.isSome:
     cfg.toolProtocol = ov.toolProtocol.get
   if ov.hideProcess.isSome:
     cfg.hideProcess = ov.hideProcess.get
   if ov.systemProxy.isSome:
     cfg.systemProxy = ov.systemProxy.get
-  if ov.vivid.isSome:
-    cfg.vivid = ov.vivid.get
   if ov.markdown.isSome:
     cfg.markdown = ov.markdown.get
   if ov.model.isSome:
     cfg.model = ov.model.get
   if ov.timeout.isSome:
     cfg.timeout = ov.timeout.get
-
-# ---------------------------------------------------------------------------
-# Private helpers — style loading
-# ---------------------------------------------------------------------------
-
-## Resolves the active output style from the configuration.
-##
-## :param cfg: The loaded configuration.
-## :returns: The StyleKind to use for output.
-func implLoadStyle(cfg: Config): StyleKind =
-  result = toStyleKind(cfg.vivid)
 
 # ---------------------------------------------------------------------------
 # Private helpers — subcommand handlers
@@ -414,152 +311,31 @@ proc implHandleSet(args: seq[string]) =
   if args.len == 0:
     implUsageError("missing option name for 'set'")
   let optName = args[0]
-  let explicit = args.len > 1
   let value =
     if args.len > 1: args[1 .. ^1].join(" ") else: ""
-  setConfigOption(optName, value, explicit)
+  setConfigOption(optName, value)
 
 ## Handles `get config`, `get config --reset`, and
 ## `get config --<option>`.
 ##
 ## :param args: Arguments after "config".
 proc implHandleConfig(args: seq[string]) =
-  let cfg = loadConfig()
-  let sk = implLoadStyle(cfg)
+  let sk = detectStyle()
   if args.len == 0:
     displayConfig(sk)
     return
+  if args.len > 1:
+    implUsageError(fmt"'config {args[0]}' takes no arguments")
   if args[0] == "--reset":
-    if args.len > 1:
-      implUsageError(
-        "'config --reset' takes no arguments")
     resetConfig()
     styleSuccess(sk, "configuration reset.")
-    return
-  if args[0].startsWith("--"):
-    if args.len > 1:
-      implUsageError(
-        fmt"'config {args[0]}' takes no arguments")
-    let optName = args[0][2 .. ^1]
-    case optName
-    of "key":
-      let key = loadKey()
-      if key.isSome:
-        styleConfigValue(sk, "key",
-          "set (encrypted storage, " &
-          "value cannot be retrieved)", vsMuted)
-      else:
-        styleConfigValue(sk, "key", "not set",
-          vsWarn)
-    of "url":
-      styleConfigValue(sk, "url", cfg.url,
-        classifyUrl(cfg.url))
-    of "model":
-      styleConfigValue(sk, "model", cfg.model,
-        classifyModel(cfg.model))
-    of "manual-confirm":
-      styleConfigValue(sk, "manual-confirm",
-        $cfg.manualConfirm,
-        classifyBool(cfg.manualConfirm))
-    of "double-check":
-      styleConfigValue(sk, "double-check",
-        $cfg.doubleCheck,
-        classifyBool(cfg.doubleCheck))
-    of "instance":
-      styleConfigValue(sk, "instance",
-        $cfg.instance, classifyBool(cfg.instance))
-    of "harness":
-      styleConfigValue(sk, "harness",
-        cfg.harness, vsGood)
-    of "tool-protocol":
-      styleConfigValue(sk, "tool-protocol",
-        cfg.toolProtocol, vsGood)
-    of "timeout":
-      styleConfigValue(sk, "timeout",
-        formatIntOrDisable(cfg.timeout),
-        classifyInt(cfg.timeout, 1, 3600))
-    of "max-token":
-      styleConfigValue(sk, "max-token",
-        formatIntOrDisable(cfg.maxToken),
-        classifyInt(cfg.maxToken, 1024, 1_000_000))
-    of "max-rounds":
-      styleConfigValue(sk, "max-rounds",
-        formatIntOrDisable(cfg.maxRounds),
-        classifyInt(cfg.maxRounds, 1, 10))
-    of "max-tool-calls":
-      styleConfigValue(sk, "max-tool-calls",
-        formatIntOrDisable(cfg.maxToolCalls),
-        classifyInt(cfg.maxToolCalls, 1, 64))
-    of "max-parallel":
-      styleConfigValue(sk, "max-parallel",
-        formatIntOrDisable(cfg.maxParallel),
-        classifyInt(cfg.maxParallel, 1, 16))
-    of "query-timeout":
-      styleConfigValue(sk, "query-timeout", $cfg.queryTimeout,
-        classifyInt(cfg.queryTimeout, 1, 3600))
-    of "command-timeout":
-      styleConfigValue(sk, "command-timeout",
-        formatIntOrDisable(cfg.commandTimeout),
-        classifyInt(cfg.commandTimeout, 1, 3600))
-    of "max-output-bytes":
-      styleConfigValue(sk, "max-output-bytes",
-        formatIntOrDisable(cfg.maxOutputBytes),
-        classifyInt(cfg.maxOutputBytes,
-          1024, 100_000_000))
-    of "command-pattern":
-      let (pat, state, trailer) =
-        classifyCommandPattern(cfg.commandPattern)
-      styleConfigValue(sk, "command-pattern", pat,
-        state, trailer)
-    of "system-prompt":
-      let pmt =
-        if cfg.systemPrompt.isSome:
-          cfg.systemPrompt.get else: ""
-      styleConfigValue(sk, "system-prompt", pmt,
-        vsNeutral)
-    of "shell":
-      styleConfigValue(sk, "shell", cfg.shell,
-        classifyShell(cfg.shell))
-    of "log":
-      styleConfigValue(sk, "log", $cfg.log,
-        classifyBool(cfg.log))
-    of "diagnostics":
-      styleConfigValue(sk, "diagnostics", $cfg.diagnostics, classifyBool(cfg.diagnostics))
-    of "hide-process":
-      styleConfigValue(sk, "hide-process",
-        $cfg.hideProcess,
-        classifyBool(cfg.hideProcess))
-    of "system-proxy":
-      styleConfigValue(sk, "system-proxy",
-        $cfg.systemProxy,
-        classifyBool(cfg.systemProxy))
-    of "cache":
-      styleConfigValue(sk, "cache", $cfg.cache,
-        classifyBool(cfg.cache))
-    of "cache-expiry":
-      styleConfigValue(sk, "cache-expiry",
-        formatIntOrDisable(cfg.cacheExpiry),
-        classifyInt(cfg.cacheExpiry, 1, 365))
-    of "cache-max-entries":
-      styleConfigValue(sk, "cache-max-entries",
-        formatIntOrDisable(cfg.cacheMaxEntries),
-        classifyInt(cfg.cacheMaxEntries, 1, 100_000))
-    of "log-max-entries":
-      styleConfigValue(sk, "log-max-entries",
-        formatIntOrDisable(cfg.logMaxEntries),
-        classifyInt(cfg.logMaxEntries, 1, 100_000))
-    of "vivid":
-      styleConfigValue(sk, "vivid", $cfg.vivid,
-        classifyBool(cfg.vivid))
-    of "markdown":
-      styleConfigValue(sk, "markdown", $cfg.markdown,
-        classifyBool(cfg.markdown))
-    else:
-      implUsageError(
-        fmt"unknown config option '{optName}'")
-    return
-  implUsageError(
-    fmt"unknown argument '{args[0]}' for 'config'")
+  elif args[0].startsWith("--"):
+    try:
+      displayConfig(sk, args[0][2 .. ^1])
+    except GetError as error:
+      implUsageError(error.msg)
+  else:
+    implUsageError(fmt"unknown argument '{args[0]}' for 'config'")
 
 ## Handles `get cache`, `get cache --clean`, and
 ## `get cache --unset "query"`.
@@ -567,7 +343,7 @@ proc implHandleConfig(args: seq[string]) =
 ## :param args: Arguments after "cache".
 proc implHandleCache(args: seq[string]) =
   let cfg = loadConfig()
-  let sk = implLoadStyle(cfg)
+  let sk = detectStyle()
   if args.len == 0:
     displayCacheInfo(
       cfg.cache, cfg.cacheExpiry,
@@ -603,7 +379,7 @@ proc implHandleCache(args: seq[string]) =
 ## :param args: Arguments after "log".
 proc implHandleLog(args: seq[string]) =
   let cfg = loadConfig()
-  let sk = implLoadStyle(cfg)
+  let sk = detectStyle()
   if args.len == 0:
     displayLogInfo(cfg.log, cfg.logMaxEntries, sk)
     return
@@ -620,17 +396,14 @@ proc implHandleLog(args: seq[string]) =
 ##
 ## :param args: Arguments after "get".
 proc implHandleGet(args: seq[string]) =
-  let cfg = loadConfig()
-  let sk = implLoadStyle(cfg)
+  let sk = detectStyle()
   if args.len == 0:
-    styleSeparator(sk, DIV_SECTION)
     styleKeyValue(sk, "name",    APP_NAME)
     styleKeyValue(sk, "version", APP_VERSION)
     styleKeyValue(sk, "author",  APP_AUTHOR)
     styleKeyValue(sk, "intro",   APP_INTRO)
     styleKeyValue(sk, "license", APP_LICENSE)
     styleKeyValue(sk, "github",  APP_GITHUB)
-    styleSeparator(sk, DIV_FOOTER)
     return
   case args[0]
   of "--name":
@@ -653,7 +426,7 @@ proc implHandleGet(args: seq[string]) =
 ## Handles `get isok`.
 proc implHandleIsOk() =
   let cfg = loadConfig()
-  let sk = implLoadStyle(cfg)
+  let sk = detectStyle()
   let envWarning = checkEnvironment()
   if envWarning.len > 0 and not cfg.hideProcess:
     styleWarning(sk, envWarning)
@@ -702,7 +475,21 @@ proc implHandleIsOk() =
 # Private helpers — query flow
 # ---------------------------------------------------------------------------
 
-## Handles a natural-language query through the configured unified harness.
+## Handles `get update`.
+proc implHandleUpdate(args: seq[string]) =
+  if args.len > 0:
+    implUsageError(fmt"unknown argument '{args[0]}' for 'update'")
+  let code = updateGet(detectStyle(), loadConfig().systemProxy)
+  if code != 0:
+    implQuitWithCode(code)
+
+## Handles `get uninstall` and `get uninstall --purge`.
+proc implHandleUninstall(args: seq[string]) =
+  if args.len > 1 or (args.len == 1 and args[0] != "--purge"):
+    implUsageError("usage: get uninstall [--purge]")
+  uninstallGet(detectStyle(), purge = args.len == 1)
+
+## Handles a natural-language query.
 ##
 ## :param query: The user's natural-language query.
 ## :param ov: Per-invocation override flags.
@@ -757,15 +544,15 @@ proc implMain() =
   of "get":
     implHandleGet(args[1 .. ^1])
   of "version", "--version", "-V":
-    let cfg = loadConfig()
-    let sk = toStyleKind(cfg.vivid)
-    styleValue(sk, APP_VERSION)
+    styleValue(detectStyle(), APP_VERSION)
   of "isok":
     implHandleIsOk()
+  of "update":
+    implHandleUpdate(args[1 .. ^1])
+  of "uninstall":
+    implHandleUninstall(args[1 .. ^1])
   of "help", "--help", "-h":
-    let cfg = loadConfig()
-    let sk = implLoadStyle(cfg)
-    styleHelp(sk, HELP_TEXT)
+    styleHelp(HELP_TEXT)
   else:
     if args[0] == "no-such-command":
       raise newException(GetError, "unknown subcommand: " & args[0])
@@ -782,10 +569,8 @@ proc implMain() =
 proc implCtrlCHandler() {.noconv.} =
   try:
     terminateActiveCommands()
-    let cfg = loadConfig()
-    let sk = toStyleKind(cfg.vivid)
     stderr.write("\n")
-    styleProgress(sk, "interrupted.")
+    styleProgress(detectStyle(), "interrupted.")
   except CatchableError:
     stderr.write("\ninterrupted.\n")
   implQuitWithCode(130)
@@ -800,19 +585,6 @@ when isMainModule:
   setControlCHook(implCtrlCHandler)
   try:
     implMain()
-  except GetError as e:
-    try:
-      let cfgForErr = loadConfig()
-      styleError(toStyleKind(cfgForErr.vivid),
-        fmt"error: {e.msg}")
-    except CatchableError:
-      stderr.writeLine(fmt"error: {e.msg}")
-    quit(1)
   except CatchableError as e:
-    try:
-      let cfgForErr = loadConfig()
-      styleError(toStyleKind(cfgForErr.vivid),
-        fmt"error: {e.msg}")
-    except CatchableError:
-      stderr.writeLine(fmt"error: {e.msg}")
+    styleError(detectStyle(), fmt"error: {e.msg}")
     quit(1)

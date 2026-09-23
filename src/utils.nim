@@ -17,9 +17,8 @@
 
 {.experimental: "strictFuncs".}
 
-import std/[os, options, strformat, strutils, tempfiles]
+import std/[os, options, strutils, tempfiles]
 
-import regex
 
 # ---------------------------------------------------------------------------
 # Constants — application identity
@@ -29,7 +28,7 @@ import regex
 const APP_NAME* = "get"
 
 ## The version string, kept in sync with get.nimble.
-const APP_VERSION* = "4.0.0"
+const APP_VERSION* = "5.0.0"
 
 ## The author of the application.
 const APP_AUTHOR* = "WaterRun"
@@ -68,27 +67,6 @@ const CACHE_FILE_NAME* = "cache.json"
 const HELP_HINT* = "Run 'get help' for usage information."
 
 # ---------------------------------------------------------------------------
-# Constants — safety
-# ---------------------------------------------------------------------------
-
-## The v3 semantic command policy is the default deterministic boundary.
-## A raw whole-command keyword regex is deliberately not enabled by default:
-## it cannot distinguish executing ``rm`` from searching documentation for
-## the word ``rm`` and therefore caused substantial v2 false positives.
-## Users who need an organization-specific supplemental blocklist can still
-## configure one with ``get set command-pattern REGEX``.
-const DEFAULT_COMMAND_PATTERN* = ""
-
-## Core dangerous command names used to validate whether a custom
-## command-pattern adequately covers common destructive
-## operations.  When a user sets a custom pattern that fails to
-## match any of these names, a safety warning is emitted.
-const DANGEROUS_COMMAND_NAMES* = [
-  "rm", "rmdir", "del", "mv", "cp",
-  "chmod", "mkfs", "dd", "kill",
-  "shutdown", "reboot", "Remove-Item"]
-
-# ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
@@ -110,9 +88,6 @@ type
     toolCallId*: string     ## Provider tool-call identifier for tool results.
     toolCallsJson*: string  ## Raw validated assistant tool_calls JSON array.
 
-## Describes the action the LLM chose in the agent loop
-## protocol.  Used by the prompt parser and the main dispatcher
-## to determine the next step in the multi-round agent flow.
 # ---------------------------------------------------------------------------
 # Public API — path helpers
 # ---------------------------------------------------------------------------
@@ -279,62 +254,3 @@ func extractCodeBlock*(text: string): Option[string] =
 ##     assert formatIntOrDisable(300) == "300"
 func formatIntOrDisable*(value: int): string =
   if value <= 0: "false" else: $value
-
-# ---------------------------------------------------------------------------
-# Public API — command pattern validation
-# ---------------------------------------------------------------------------
-
-## Validates a command string against a forbidden-command regex
-## pattern.  Returns true when the command is allowed (no match).
-##
-## :param command: The command to validate.
-## :param pattern: A forbidden-command regex string.
-## :returns: true if the command is allowed.
-## :raises: GetError: If the pattern is not a valid regex.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert validateCommandPattern(
-##       "ls -la", "\\brm\\b")
-##     assert not validateCommandPattern(
-##       "rm -rf /", "\\brm\\b")
-proc validateCommandPattern*(
-  command: string,
-  pattern: string
-): bool =
-  try:
-    result = not command.contains(re2(pattern))
-  except CatchableError:
-    raise newException(GetError,
-      fmt"invalid command-pattern regex: {pattern}")
-
-## Checks whether a user-provided forbidden-command-pattern
-## regex adequately covers common dangerous commands.  Returns a
-## warning message listing uncovered commands, or an empty
-## string.
-##
-## :param pattern: The user's forbidden-command regex.
-## :returns: Warning text, or empty string if adequate.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     discard checkPatternSafety("^ls")
-proc checkPatternSafety*(
-  pattern: string
-): string =
-  if pattern.len == 0:
-    return ""
-  var uncovered: seq[string] = @[]
-  for name in DANGEROUS_COMMAND_NAMES:
-    try:
-      if not name.contains(re2(pattern)):
-        uncovered.add(name)
-    except CatchableError:
-      discard
-  if uncovered.len > 0:
-    result =
-      "warning: custom command-pattern does " &
-      "not block these dangerous commands: " &
-      uncovered.join(", ")
-  else:
-    result = ""

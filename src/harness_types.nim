@@ -1,4 +1,4 @@
-## Core data types for the get v3 harness runtime.
+## Core data types for the get query loop.
 ##
 ## :Author: WaterRun
 ## :GitHub: https://github.com/Water-Run/get
@@ -7,9 +7,9 @@
 ## :License: AGPL-3.0
 ##
 ## This module defines the provider-independent actions, observations, budgets,
-## events, and results used by every v3 harness strategy.  Keeping these types
-## independent from HTTP, prompts, execution, and terminal rendering gives all
-## strategies one explicit state-machine contract.
+## events, and results used by the query loop.  Keeping these types independent
+## from HTTP, prompts, execution, and terminal rendering gives the loop one
+## explicit contract.
 
 {.experimental: "strictFuncs".}
 
@@ -19,16 +19,17 @@ import std/[strutils, monotimes]
 # Constants
 # ---------------------------------------------------------------------------
 
-## Default number of model turns available to an automatic harness run.
+## Default number of model requests available to one query.
 const DEFAULT_HARNESS_TURNS* = 6
 
-## Default maximum number of tool calls available to one harness run.
+## Default maximum number of tool calls available to one query.
 const DEFAULT_TOOL_CALLS* = 16
 
 const DEFAULT_QUERY_TIMEOUT* = 120
-const DEFAULT_ANSWER_RESERVE* = 20
 const MAX_PROPOSALS_PER_TURN* = 16
-const MAX_RECOVERY_TURNS* = 2
+
+## A call repeated with identical arguments this many turns in a row stops the loop.
+const MAX_IDENTICAL_CALL_REPEATS* = 3
 
 ## Default maximum number of independent tool calls executed together.
 const DEFAULT_PARALLELISM* = 4
@@ -43,26 +44,12 @@ const DEFAULT_MAX_OUTPUT_BYTES* = 1_048_576
 # Types
 # ---------------------------------------------------------------------------
 
-## Selects the orchestration policy used by the unified harness state machine.
-type
-  HarnessKind* = enum
-    hkAuto      ## Inspects local facts, then answers from the observations.
-    hkDirect    ## Allows one model turn and terminal tool execution.
-    hkLoop      ## Feeds observations back to the model until completion.
-    hkParallel  ## Allows batches of independent read-only tool calls.
-
 ## Selects how model tool calls are encoded on the wire.
 type
   ToolProtocolKind* = enum
     tpkAuto    ## Tries native tools, then falls back to structured JSON.
     tpkNative  ## Requires provider-native function tools.
     tpkJson  ## Uses explicit structured JSON actions.
-
-## Selects what the harness does after a tool call finishes.
-type
-  ToolResultMode* = enum
-    trmReturnRaw ## Returns tool output directly without another model call.
-    trmContinue  ## Feeds tool output back to the model for another turn.
 
 ## Identifies the action proposed by a model response.
 type
@@ -81,7 +68,6 @@ type
     toolName*: string            ## Registered tool name.
     command*: string             ## Exact read-only shell command to execute.
     purpose*: string             ## Short user-facing reason for the invocation.
-    resultMode*: ToolResultMode  ## Terminal or model-feedback behavior.
     invocationKind*: ToolInvocationKind
     argumentsJson*: string      ## Validated arguments for tracing and identity.
     executable*: string
@@ -148,10 +134,9 @@ type
     commandTimeoutSec*: int  ## Per-command timeout; zero means no limit.
     maxOutputBytes*: int     ## Per-command output cap; zero means no limit.
     totalTimeoutSec*: int    ## Whole-query deadline; zero only for embedding/tests.
-    answerReserveSec*: int
     executionDeadline*: MonoTime ## Absolute shared deadline for queued tools; zero means unset.
 
-## Identifies an event emitted by the harness state machine.
+## Identifies an event emitted by the query loop.
 type
   HarnessEventKind* = enum
     hekRunStarted        ## A query run has started.
@@ -159,20 +144,20 @@ type
     hekModelCompleted    ## A model turn has completed.
     hekActionProposed    ## A typed action has been decoded.
     hekToolProposed      ## A tool proposal awaits authorization.
-    hekBatchStarted      ## An authorized batch is being dispatched.
     hekRunSummary        ## Measured counters for one completed run.
-    hekToolAuthorized       ## A tool call is authorized and ready for the executor.
     hekToolCompleted     ## A tool call has completed.
     hekRunCompleted      ## The run completed successfully.
     hekRunFailed         ## The run failed or exhausted its budget.
 
-## Identifies why a harness run stopped.
+## Identifies why a query stopped.
 type
   HarnessTermination* = enum
     htAnswer          ## The model returned a final answer.
-    htRawToolResult   ## Tool output was returned without another model turn.
     htRefused         ## The model explicitly refused the request.
     htBudgetExhausted ## The run reached a configured hard limit.
+    htTimedOut        ## The whole-query deadline passed.
+    htRepeated        ## The model repeated an identical call too often.
+    htModelFailed     ## A model request failed after tools had run.
 
 ## Represents one structured runtime event for rendering and tracing.
 type
@@ -182,6 +167,9 @@ type
     callId*: string         ## Tool call identifier, when applicable.
     message*: string        ## Concise event detail.
     elapsedMs*: int64       ## Elapsed duration associated with the event.
+    tool*: string           ## Tool name for tool events.
+    target*: string         ## Short description of what the tool read.
+    status*: ObservationStatus ## Observation status for hekToolCompleted.
 
 ## Receives structured runtime events as they occur.
 type
@@ -189,7 +177,7 @@ type
     event: HarnessEvent
   ) {.closure.}
 
-## Summarises resource use for one completed harness run.
+## Summarises resource use for one query.
 type
   RunMetrics* = object
     modelTurns*: int       ## Number of completed logical model turns.
@@ -198,11 +186,10 @@ type
     toolProposals*: int
     toolRejections*: int
     toolReuses*: int
-    recoveryTurns*: int
     inputOutputTokens*: int ## Total tokens reported by providers.
     elapsedMs*: int64      ## Complete run wall-clock duration.
 
-## Represents the final provider-independent harness result.
+## Represents the provider-independent result of one query.
 type
   HarnessResult* = object
     output*: string                     ## Final user-facing output.
@@ -213,45 +200,11 @@ type
     termination*: HarnessTermination    ## Stable reason the run stopped.
     refused*: bool                      ## Whether the model explicitly refused.
     partial*: bool                      ## One or more observations remain unavailable.
+    reason*: string                     ## Why a run stopped without a clean answer.
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-## Parses a user-facing harness name.
-##
-## :param value: Case-insensitive harness name.
-## :returns: The corresponding HarnessKind.
-## :raises: ValueError: If the name is not supported.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert parseHarnessKind("auto") == hkAuto
-##     assert parseHarnessKind("parallel") == hkParallel
-func parseHarnessKind*(value: string): HarnessKind =
-  case toLowerAscii(value.strip())
-  of "auto": result = hkAuto
-  of "direct", "instance": result = hkDirect
-  of "loop", "agent": result = hkLoop
-  of "parallel", "batch": result = hkParallel
-  else:
-    raise newException(ValueError,
-      "expected auto, direct, loop, or parallel")
-
-## Returns the stable configuration name for a harness kind.
-##
-## :param kind: Harness kind to format.
-## :returns: Stable lowercase configuration value.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert harnessName(hkDirect) == "direct"
-func harnessName*(kind: HarnessKind): string =
-  case kind
-  of hkAuto: result = "auto"
-  of hkDirect: result = "direct"
-  of hkLoop: result = "loop"
-  of hkParallel: result = "parallel"
 
 ## Parses a user-facing tool protocol name.
 ##
@@ -285,54 +238,18 @@ func toolProtocolName*(kind: ToolProtocolKind): string =
   of tpkNative: result = "native"
   of tpkJson: result = "json"
 
-## Parses a model-provided result mode.
-##
-## :param value: Case-insensitive mode name.
-## :returns: Terminal raw mode or continuation mode.
-## :raises: ValueError: If the mode is unsupported.
+## Returns the default resource budget for one query.
 ##
 ## .. code-block:: nim
 ##   runnableExamples:
-##     assert parseToolResultMode("return_raw") == trmReturnRaw
-##     assert parseToolResultMode("continue") == trmContinue
-func parseToolResultMode*(value: string): ToolResultMode =
-  case toLowerAscii(value.strip()).replace('-', '_')
-  of "return_raw", "raw", "final", "direct":
-    result = trmReturnRaw
-  of "continue", "interpret", "model":
-    result = trmContinue
-  else:
-    raise newException(ValueError,
-      "expected return_raw or continue")
-
-## Returns a default resource budget for a harness kind.
-##
-## Direct mode is deliberately limited to one turn and one tool call.  Other
-## modes share the standard turn and tool-call limits, while loop mode executes
-## calls serially and parallel mode uses the configured concurrency default.
-##
-## :param kind: Harness policy receiving the budget.
-## :returns: A fully populated RunBudget.
-##
-## .. code-block:: nim
-##   runnableExamples:
-##     assert defaultRunBudget(hkDirect).maxTurns == 1
-##     assert defaultRunBudget(hkParallel).maxParallel == 4
-func defaultRunBudget*(kind: HarnessKind): RunBudget =
+##     assert defaultRunBudget().maxTurns == 6
+##     assert defaultRunBudget().maxParallel == 4
+func defaultRunBudget*(): RunBudget =
   result = RunBudget(
-    maxTurns:
-      if kind == hkDirect: 1
-      else: DEFAULT_HARNESS_TURNS,
-    maxToolCalls:
-      if kind == hkDirect: 1
-      else: DEFAULT_TOOL_CALLS,
-    maxParallel:
-      if kind == hkParallel or kind == hkAuto:
-        DEFAULT_PARALLELISM
-      else:
-        1,
+    maxTurns: DEFAULT_HARNESS_TURNS,
+    maxToolCalls: DEFAULT_TOOL_CALLS,
+    maxParallel: DEFAULT_PARALLELISM,
     commandTimeoutSec: DEFAULT_COMMAND_TIMEOUT,
     maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
-    totalTimeoutSec: DEFAULT_QUERY_TIMEOUT,
-    answerReserveSec: DEFAULT_ANSWER_RESERVE
+    totalTimeoutSec: DEFAULT_QUERY_TIMEOUT
   )

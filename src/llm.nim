@@ -21,7 +21,7 @@
 {.experimental: "strictFuncs".}
 
 import std/[asyncdispatch, asyncstreams, httpclient, json, monotimes, net,
-            options, os, strformat, strutils, times, uri]
+            options, os, strformat, strutils, terminal, times, uri]
 
 when defined(windows):
   import std/osproc
@@ -58,6 +58,10 @@ const MAX_LLM_RESPONSE_BYTES* = 8 * 1024 * 1024
 ## a malformed response body, or when the request times out.
 type
   LlmApiError* = object of GetError
+
+## Raised for HTTP 429. Rate limits are retried briefly within the deadline.
+type
+  LlmRateLimitError* = object of LlmApiError
 
 ## Defines one provider-native function tool.
 type
@@ -100,7 +104,6 @@ type
     url: string             ## Configured API base URL.
     timeoutSec: int         ## Request timeout in seconds.
     hideProcess: bool       ## Suppress progress output.
-    styleKind: StyleKind    ## Terminal output style.
     client: AsyncHttpClient ## Reused HTTP client, including proxy transport.
 
 # ---------------------------------------------------------------------------
@@ -318,6 +321,11 @@ proc implDetectProxy(
   result = implChooseProxy(
     terminalProxy, systemProxy, preferSystemProxy)
 
+## Returns the proxy URL that model requests to ``targetUrl`` would use, or
+## an empty string for a direct connection.
+proc detectProxyUrl*(targetUrl: string, preferSystemProxy: bool): string =
+  result = implDetectProxy(targetUrl, preferSystemProxy).url
+
 ## Redacts optional credentials before a proxy URL is displayed.
 ##
 ## :param proxyUrl: Configured proxy URL, possibly containing user info.
@@ -525,6 +533,9 @@ proc implPostRequest(
         respBody[0 ..< 512] & "..."
       else:
         respBody
+    if codeInt == 429:
+      raise newException(LlmRateLimitError,
+        fmt"API returned HTTP {codeInt}: {preview}")
     raise newException(LlmApiError,
       fmt"API returned HTTP {codeInt}: {preview}")
   result = respBody
@@ -534,25 +545,18 @@ proc implPostRequest(
 # Private helpers — progress display
 # ---------------------------------------------------------------------------
 
-## Waits for the future while printing elapsed-time progress.
-## The displayed label is configurable so that callers can show
-## context-specific text (e.g. "checking cache decision")
-## instead of the generic "requesting".
+## Waits for the future. On an interactive terminal one line shows
+## ``requesting`` and the seconds waited; it is cleared when the reply arrives.
 ##
 ## :param fut: The future for the in-flight request.
 ## :param timeoutSec: Maximum wait in seconds (0 = no limit).
-## :param hideProcess: Suppress progress when true.
-## :param sk: The active output style.
-## :param spinnerLabel: Text shown beside the spinner (vivid)
-##                      or before the dots (plain).
+## :param hideProcess: Suppress the waiting line when true.
 ## :returns: The value carried by the future.
 ## :raises: LlmApiError: If the timeout is exceeded.
 proc implAwaitWithProgress(
   fut: Future[string],
   timeoutSec: int,
-  hideProcess: bool,
-  sk: StyleKind,
-  spinnerLabel: string
+  hideProcess: bool
 ): Future[string] {.async.} =
   let timeoutMs =
     if timeoutSec <= 0:
@@ -561,77 +565,25 @@ proc implAwaitWithProgress(
       high(int)
     else:
       timeoutSec * 1000
-  if hideProcess:
-    if timeoutMs > 0:
-      let completed = await withTimeout(fut, timeoutMs)
-      if not completed:
-        raise newException(LlmApiError,
-          fmt"request timed out after {timeoutSec}s. " &
-          NETWORK_ERROR_MESSAGE)
-    result = await fut
-    return
-
+  let showLine = not hideProcess and stderr.isatty() and
+    getEnv("TERM") != "dumb"
   var elapsedMs = 0
-  var displayedSeconds = 0
-  var lineOpen = false
-  let initialMsg = spinnerLabel & "..."
-  if sk == skVivid:
-    writeSpinner(0, initialMsg)
-  else:
-    stderr.write(spinnerLabel)
-    stderr.flushFile()
-    lineOpen = true
+  var displayedSeconds = -1
   while not fut.finished:
     let remainingMs =
-      if timeoutMs > 0:
-        timeoutMs - elapsedMs
-      else:
-        100
+      if timeoutMs > 0: timeoutMs - elapsedMs
+      else: 100
     if remainingMs <= 0:
       break
+    if showLine and elapsedMs div 1000 > displayedSeconds:
+      displayedSeconds = elapsedMs div 1000
+      writeRequesting(displayedSeconds)
     let intervalMs = min(100, remainingMs)
-    let completed = await withTimeout(fut, intervalMs)
-    if completed:
+    if await withTimeout(fut, intervalMs):
       break
     elapsedMs += intervalMs
-    let elapsedSeconds = elapsedMs div 1000
-    if elapsedSeconds > displayedSeconds:
-      displayedSeconds = elapsedSeconds
-      if sk == skVivid:
-        let message =
-          if timeoutSec > 0:
-            fmt"{spinnerLabel}... {elapsedSeconds}/{timeoutSec}s"
-          else:
-            fmt"{spinnerLabel}... {elapsedSeconds}s"
-        writeSpinner(elapsedSeconds, message)
-      else:
-        if elapsedSeconds <= 10:
-          if elapsedSeconds mod 2 == 0:
-            stderr.write(".")
-            stderr.flushFile()
-        elif elapsedSeconds == 11:
-          if lineOpen:
-            stderr.writeLine("")
-            lineOpen = false
-          let waitMsg =
-            if timeoutSec > 0:
-              fmt"- waited 10/{timeoutSec}s"
-            else:
-              "- waited 10s (no timeout)"
-          stderr.writeLine(waitMsg)
-        elif elapsedSeconds mod 10 == 0:
-          let waitMsg =
-            if timeoutSec > 0:
-              fmt"- waited {elapsedSeconds}" &
-              fmt"/{timeoutSec}s"
-            else:
-              fmt"- waited {elapsedSeconds}s" &
-              " (no timeout)"
-          stderr.writeLine(waitMsg)
-  if sk == skVivid:
-    clearSpinner()
-  elif lineOpen:
-    stderr.writeLine("")
+  if showLine and displayedSeconds >= 0:
+    clearRequesting()
   if not fut.finished:
     raise newException(LlmApiError,
       fmt"request timed out after {timeoutSec}s. " &
@@ -866,7 +818,6 @@ proc newLlmSession*(
     url: implNormaliseUrl(url),
     timeoutSec: timeoutSec,
     hideProcess: hideProcess,
-    styleKind: sk,
     client: client
   )
 
@@ -889,7 +840,6 @@ proc closeLlmSession*(session: LlmSession) =
 ##
 ## :param session: Reusable provider session.
 ## :param req: Request payload, including optional native tools.
-## :param spinnerLabel: Text shown while awaiting the provider.
 ## :param preferSystemProxy: Prefer Windows Internet Settings when enabled.
 ## :returns: Parsed text and/or native tool calls.
 ## :raises: LlmApiError: On timeout, HTTP error, or malformed response.
@@ -901,7 +851,6 @@ proc closeLlmSession*(session: LlmSession) =
 proc sendLlmRequest*(
   session: LlmSession,
   req: LlmRequest,
-  spinnerLabel: string = "requesting",
   timeoutOverrideSec: int = -1
 ): LlmResponse =
   if session.isNil:
@@ -922,33 +871,40 @@ proc sendLlmRequest*(
     let fut = implPostRequest(
       session.client, endpoint, bodyStr)
     let respBody = await implAwaitWithProgress(
-      fut, attemptTimeoutSec,
-      session.hideProcess, session.styleKind,
-      spinnerLabel)
+      fut, attemptTimeoutSec, session.hideProcess)
     result = implParseResponse(respBody)
 
   let requestTimeout = if timeoutOverrideSec >= 0: timeoutOverrideSec else: session.timeoutSec
   let requestStarted = getMonoTime()
   var transientFailures = 0
+  var rateLimited = 0
+  proc remainingMs(): int64 =
+    if requestTimeout <= 0: high(int64)
+    else: int64(requestTimeout) * 1000 - (getMonoTime() - requestStarted).inMilliseconds
   while true:
     let attemptTimeoutSec =
       if requestTimeout <= 0:
         0
       else:
-        let elapsedMs =
-          (getMonoTime() - requestStarted).inMilliseconds
-        let remainingMs =
-          int64(requestTimeout) * 1000 - elapsedMs
-        if remainingMs <= 0:
+        let left = remainingMs()
+        if left <= 0:
           raise newException(LlmApiError,
             fmt"request timed out after {requestTimeout}s. " &
             NETWORK_ERROR_MESSAGE)
-        int(max(1'i64, (remainingMs + 999) div 1000))
+        int(max(1'i64, (left + 999) div 1000))
     try:
       result = waitFor impl(attemptTimeoutSec)
-      result.providerRequests += transientFailures
+      result.providerRequests += transientFailures + rateLimited
       return
+    except LlmRateLimitError:
+      # Back off 1, 2, then 4 seconds, and only while the deadline allows it.
+      let pauseMs = 1000 shl rateLimited
+      if rateLimited >= TRANSIENT_NETWORK_RETRIES or remainingMs() <= pauseMs:
+        raise
+      rateLimited += 1
+      sleep(pauseMs)
     except LlmApiError:
+      # Authentication, bad requests, and timeouts are not retried.
       raise
     except GetError:
       raise
@@ -982,7 +938,6 @@ proc sendLlmRequest*(
 ## :param timeoutSec: Maximum seconds to wait; zero disables the limit.
 ## :param hideProcess: Suppress request progress output.
 ## :param sk: Terminal output style.
-## :param spinnerLabel: Text shown while awaiting the provider.
 ## :returns: Parsed text and/or native tool calls.
 ## :raises: LlmApiError: On timeout, HTTP error, or malformed response.
 ## :raises: GetError: If required configuration is missing.
@@ -997,7 +952,6 @@ proc sendLlmRequest*(
   timeoutSec: int = 300,
   hideProcess: bool = false,
   sk: StyleKind = skSimp,
-  spinnerLabel: string = "requesting",
   preferSystemProxy: bool = false
 ): LlmResponse =
   let session = newLlmSession(
@@ -1005,6 +959,6 @@ proc sendLlmRequest*(
     preferSystemProxy)
   try:
     result = sendLlmRequest(
-      session, req, spinnerLabel)
+      session, req)
   finally:
     closeLlmSession(session)
