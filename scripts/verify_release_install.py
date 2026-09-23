@@ -43,8 +43,8 @@ def main():
                "XDG_CONFIG_HOME": str(test_home / ".config"),
                "SHELL": "/bin/bash", "PATH": "/usr/bin:/bin"}
         installer = [sys.executable, str(package / "get_ready.py")]
-        for phase, answers in [("fresh", "y\ny\nn\nn\n"),
-                               ("upgrade", "y\ny\ny\nn\nn\n")]:
+        for phase, answers in [("fresh", "y\n\n"),
+                               ("upgrade", "y\ny\n")]:
             run = subprocess.run(installer, input=answers, text=True,
                                  capture_output=True, env=env, timeout=60)
             assert run.returncode == 0, run.stdout + run.stderr

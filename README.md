@@ -14,7 +14,7 @@ get "current git branch and uncommitted files"
 
 Download a package from [GitHub Releases](https://github.com/Water-Run/get/releases) and keep its files in one directory. Either way leaves an existing configuration in place.
 
-If Python is available, the installer copies the program and updates your PATH:
+If Python is available, the installer checks the package, copies the program, and updates your PATH. On a first install it then helps you connect a model: pick DeepSeek, MiMo, GLM, Kimi, GPT, Claude, Qwen, Grok, Gemini, MiniMax, or a local Ollama, and it fills in the address and model. Any other OpenAI-compatible endpoint works too.
 
 ```bash
 python get_ready.py
@@ -35,7 +35,7 @@ On Linux and macOS, `chmod +x` the installed file. On macOS, also run `xattr -d 
 
 ## Connect a model
 
-`get` works with any OpenAI-compatible Chat Completions endpoint.
+`get` works with any OpenAI-compatible Chat Completions endpoint. The installer can set this up for you; to change it later:
 
 ```bash
 get set model your-model-name

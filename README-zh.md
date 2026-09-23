@@ -14,7 +14,7 @@ get "当前 Git 分支和未提交文件"
 
 从 [GitHub Releases](https://github.com/Water-Run/get/releases) 下载安装包，包内文件放在同一目录。两种装法都不会改动已有配置。
 
-有 Python 时，安装脚本会复制程序并更新 PATH：
+有 Python 时，安装脚本会核对安装包、复制程序并更新 PATH。首次安装时它会接着帮你连接模型：选 DeepSeek、MiMo、GLM、Kimi、GPT、Claude、Qwen、Grok、Gemini、MiniMax 或本地的 Ollama，地址和模型会自动填好。其它 OpenAI 兼容接口也可以。
 
 ```bash
 python get_ready.py
@@ -35,7 +35,7 @@ Linux 和 macOS 上对安装后的文件执行 `chmod +x`。macOS 再执行 `xat
 
 ## 连接模型
 
-`get` 兼容任何 OpenAI 风格的 Chat Completions 接口。
+`get` 兼容任何 OpenAI 风格的 Chat Completions 接口。安装脚本可以帮你设好；之后要改：
 
 ```bash
 get set model 你的模型名称
