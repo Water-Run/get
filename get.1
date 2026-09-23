@@ -1,10 +1,10 @@
-.\" get.1 — manual page for get(1)
+.\" get.1 \(em manual page for get(1)
 .\"
 .\" Author:  WaterRun
 .\" GitHub:  https://github.com/Water-Run/get
 .\" License: AGPL-3.0
 .\"
-.TH GET 1 "2026-09-21" "get 4.0.0" "User Commands"
+.TH GET 1 "2026-09-23" "get 4.0.0" "User Commands"
 .
 .SH NAME
 get \- get anything from your computer
@@ -42,185 +42,138 @@ get \- get anything from your computer
 .
 .SH DESCRIPTION
 .B get
-sends a natural-language query to an OpenAI-compatible model and performs
-read-only local inspection when a tool is required.
+sends a natural-language query to an OpenAI-compatible model and reads local
+facts on its behalf. It is a query tool: it doesn't change the system.
 .PP
-Provider-native function tools are preferred.
-Structured JSON is used as a fallback. Markdown code blocks are answer text.
-Model names are opaque identifiers.
+The model receives typed readers (environment, files, search, processes, Git
+status/diff) and answers from what they return. Tool calls are sent as native
+function calling, falling back to structured JSON when the provider rejects
+them. A query that explicitly asks for "no tools" is routed as text-only:
+no tools are offered and nothing is executed.
 .PP
-Queries that explicitly request no tool use are routed as text-only: no tool
-definition is sent, textual tool actions are rejected, and cached commands are
-ignored.
-.PP
-Every proposed, revised, or cached command passes through the same mandatory
-read-only policy, optional supplemental regex, optional model review, optional
-manual confirmation, and bounded executor.
+Every proposed, revised, or cached command passes the same mandatory read-only
+policy before it runs. Optional extras \(em a supplemental regex
+.RI ( command\-pattern ),
+a second model review
+.RI ( double\-check ),
+or per-command confirmation
+.RI ( manual\-confirm )
+\(em layer on top of it. All are off by default.
 .
-.SH HARNESS STRATEGIES
+.SH HARNESS
+The harness controls how evidence is gathered:
 .TP
 .B auto
-Default. Inspects local facts and then answers using the observations. A denied
-command is not executed. The model may select another reader within the
-inspection budget; a separate final answer turn has no tools.
+Default. Look around, then answer; a denied command is skipped and the model
+may pick another reader within the inspection budget.
 .TP
 .B direct
-Exactly one model turn and at most one terminal tool call.
+One model turn, at most one tool call.
 .TP
 .B loop
-Feeds observations back serially for dependent multi-step work.
+Serial observe-and-refine for dependent multi-step work.
 .TP
 .B parallel
-Allows independent read-only calls to execute concurrently, up to
+Independent read-only calls run concurrently, up to
 .BR max\-parallel .
-.PP
-All strategies share the same state machine and hard budgets.
 .
 .SH COMMANDS
 .SS "Query (default)"
 .BI "get \(dq" query "\(dq [" flags "]"
-.PP
-Runs the query using the configured harness.
-.
+.RS
+Runs the query with the configured harness.
+.RE
 .SS set
 .BI "get set " option " [" value ]
-.PP
-Sets one persistent option. Omitting the value resets it to its default or
-clears a string value.
-.
+.RS
+Sets one persistent option. Omitting the value resets it to the default.
+.RE
 .SS config
 .B get config
-.PP
-Displays settings. The API key is shown only as set or not set.
-.TP
+.RS
+Shows settings; the API key is reported only as set or not set.
 .B \-\-reset
-Restores defaults and removes the stored key.
-.TP
+restores defaults and removes the stored key;
 .BI \-\- option
-Displays one setting.
-.
+shows one setting.
+.RE
 .SS cache
 .B get cache
-.PP
-Displays cache counts, limits, and file location.
-.TP
+.RS
+Shows cache counts, limits, and file location.
 .B \-\-clean
-Removes all entries.
-.TP
+removes all entries;
 .BI "\-\-unset \(dq" query \(dq
-Removes entries matching the query text.
-.
+removes entries matching the query text.
+.RE
 .SS log
 .B get log
-.PP
-Displays log status and location.
-.TP
+.RS
+Shows log status and location.
 .B \-\-clean
-Removes all log entries.
-.
+removes all entries.
+.RE
 .SS get
 .B get get
-.PP
-Displays application metadata.
-.TP
-.B \-\-name
-Show the application name.
-.TP
-.B \-\-intro
-Show the introduction.
-.TP
-.B \-\-version
-Show version 4.0.0.
-.TP
-.B \-\-author
-Show the author.
-.TP
-.B \-\-license
-Show the SPDX license identifier.
-.TP
-.B \-\-github
-Show the repository URL.
-.
+.RS
+Shows application metadata:
+.BR \-\-name ", " \-\-intro ", " \-\-version ", " \-\-author ", " \-\-license ", " \-\-github .
+.RE
 .SS version
-.B get version
-.PP
-Displays version 4.0.0. The standard aliases
-.B \-\-version
-and
-.B \-V
-are equivalent and do not require provider configuration.
-.
+.BR "get version" ", " "get \-\-version" ", " "get \-V"
+.RS
+Shows the version. Doesn't require provider configuration.
+.RE
 .SS isok
 .B get isok
-.PP
-Checks key, URL, and model, then sends a minimal provider request.
+.RS
+Checks key, URL, and model with a minimal provider request.
+.RE
 .
 .SH QUERY FLAGS
 .TP
-.B \-\-no\-cache
-Bypass cache lookup and storage.
+.B \-\-cache / \-\-no\-cache
+Force (or bypass) cache use. \fB\-\-cache\fR may also store a final text answer
+when no reusable command exists.
 .TP
-.B \-\-cache
-Force cache use and permit terminal text-result storage.
+.B \-\-manual\-confirm / \-\-no\-manual\-confirm
+Prompt before every command (or don't).
 .TP
-.B \-\-manual\-confirm
-Prompt before every command.
-.TP
-.B \-\-no\-manual\-confirm
-Skip interactive confirmation.
-.TP
-.B \-\-double\-check
-Enable an additional model safety review.
-.TP
-.B \-\-no\-double\-check
-Skip the additional review. The mandatory deterministic policy still runs.
+.B \-\-double\-check / \-\-no\-double\-check
+Add a second model safety review. The mandatory policy runs either way.
 .TP
 .BI \-\-harness " kind"
-Use auto, direct, loop, or parallel for this query.
+auto, direct, loop, or parallel for this query.
 .TP
 .BI \-\-protocol " kind"
-Use auto, native, or json tool encoding for this query.
+auto, native, or json tool encoding for this query.
 .TP
-.B \-\-instance
-Alias for direct.
+.B \-\-instance / \-\-no\-instance
+Aliases for direct / loop.
 .TP
-.B \-\-no\-instance
-Alias for loop.
+.B \-\-hide\-process / \-\-no\-hide\-process
+Suppress (or show) progress and intermediate observations.
 .TP
-.B \-\-hide\-process
-Suppress progress and intermediate observations.
+.B \-\-system\-proxy / \-\-no\-system\-proxy
+Prefer Windows Internet Settings over terminal proxy variables.
 .TP
-.B \-\-no\-hide\-process
-Show progress and observations.
+.B \-\-vivid / \-\-no\-vivid
+ANSI styling on or off.
 .TP
-.B \-\-system\-proxy
-Prefer enabled Windows Internet Settings over terminal proxy variables.
-.TP
-.B \-\-no\-system\-proxy
-Use terminal proxy variables only.
-.TP
-.B \-\-vivid
-Enable ANSI styling.
-.TP
-.B \-\-no\-vivid
-Use plain text.
-.TP
-.B \-\-markdown
-Render model Markdown in an interactive terminal.
-.TP
-.B \-\-no\-markdown
-Display the original Markdown source.
+.B \-\-markdown / \-\-no\-markdown
+Render the model's Markdown in an interactive terminal, or show the source.
 .TP
 .BI \-\-model " name"
-Override the model.
+Override the model for this query.
 .TP
 .BI \-\-timeout " seconds"
 Override the API request timeout.
 .
-.SH SET OPTIONS
+.SH OPTIONS
 .TP
 .BI "key " string
-API key. Linux storage uses mode 0600; Windows uses DPAPI. Default: empty.
+API key. Stored as a 0600 file on Linux, DPAPI-protected on Windows. Not
+printed or logged. Default: empty.
 .TP
 .BI "url " URL
 API base URL. Default: https://api.minimaxi.com/v1.
@@ -229,48 +182,47 @@ API base URL. Default: https://api.minimaxi.com/v1.
 Model identifier. Default: minimax-m3.
 .TP
 .BI "manual\-confirm " bool
-Interactive command confirmation. Default: false.
+Confirm each command interactively. Default: false.
 .TP
 .BI "double\-check " bool
-Second model review. Default: false.
+Add a second model safety review. Default: false.
 .TP
 .BI "harness " kind
 auto, direct, loop, or parallel. Default: auto.
 .TP
 .BI "tool\-protocol " kind
-auto, native, or json. Default: auto.
+auto, native, or json. Default: auto (native with JSON fallback).
 .TP
 .BI "timeout " "int | false"
-API timeout seconds. Default: 300.
+API timeout in seconds. Default: 300.
 .TP
 .BI "max\-token " "int | false"
 Maximum response tokens. Default: 20480.
 .TP
 .BI "max\-rounds " int
-Inspection-turn limit plus one tool-free final answer turn. Default: 6.
+Inspection-turn limit; one final answer turn is separate. Default: 6.
 .TP
 .BI "max\-tool\-calls " int
-Actual tool-start limit per query. Default: 16.
+Tool-start limit per query. Default: 16.
 .TP
 .BI "max\-parallel " int
 Maximum concurrent tool calls. Default: 4.
 .TP
 .BI "query\-timeout " int
-Whole automatic query deadline, including model and tools. Default: 120.
+Whole-query deadline in seconds, model and tools included. Default: 120.
 .TP
 .BI "diagnostics " bool
 Structured query events and counters on stderr. Default: false.
 .TP
 .BI "command\-timeout " int
-Hard command deadline in seconds. Default: 30.
+Hard deadline per command in seconds. Default: 30.
 .TP
 .BI "max\-output\-bytes " int
-Per-command capture cap. Default: 1048576.
+Captured bytes per command. Default: 1048576.
 .TP
 .BI "command\-pattern " regex
-Supplemental forbidden-command regex. Omitting the value restores the built-in
-semantic-policy-only default. An explicit empty string clears an existing
-supplemental regex; the mandatory read-only policy remains active.
+Extra forbidden-command regex. Omit the value to restore the built-in
+semantic-only policy. Default: off.
 .TP
 .BI "system\-prompt " string
 Additional model instruction. Default: empty.
@@ -282,7 +234,7 @@ Shell executable. Default: bash on Unix, powershell on Windows.
 Execution logging. Default: true.
 .TP
 .BI "hide\-process " bool
-Suppress intermediate output. Default: false.
+Suppress progress and intermediate output. Default: false.
 .TP
 .BI "system\-proxy " bool
 Prefer Windows Internet Settings over terminal proxy variables. Default: false.
@@ -303,114 +255,60 @@ Log entry cap. Default: 1000.
 ANSI styling and animation. Default: true.
 .TP
 .BI "markdown " bool
-Render model answers in interactive terminals. Default: true.
-Pipes, redirected output, TERM=dumb, and raw command output retain source text.
-NO_COLOR or vivid=false disables renderer colors, while preserving layout.
-Cached answers are rendered using the current setting.
+Render model answers in interactive terminals. Pipes, redirects, and
+TERM=dumb keep the source text; NO_COLOR drops the colors. Default: true.
 .TP
 .BI "instance " bool
-Alias for harness. true selects direct; false selects auto when stored.
-.
-.SH TOOL PROTOCOL
-The native tools are read_environment, read_file, search_files, run_process,
-and run_shell. They accept typed names, paths, paging arguments, literal argv,
-or a shell command respectively. required/evidence_key identify essential
-facts; fresh requests a new sample. run_readonly_shell is a compatibility alias.
-.PP
-With tool-protocol auto, provider HTTP 400/404/422 errors that identify
-unsupported tool fields trigger one structured-JSON retry for that run.
-Native mode does not fall back.
-.PP
-Transport failures before an HTTP response retry up to three times within the
-original request timeout. HTTP responses, request timeouts, and parsing errors
-are not retried. Provider response bodies are limited to 8 MiB, and requests
-carrying bearer credentials do not follow redirects.
+Alias for harness: true selects direct, false selects auto. Default: false.
 .
 .SH SAFETY
-Typed environment and file readers do not execute shell text. Files are paged;
-search implements bounded literal content matching, path globs, and common
-ignore rules. Missing values, no matches, and incomplete pages are explicit.
+Typed readers (environment, files, search, processes) don't execute shell
+text; missing values, empty matches, and truncated pages are reported as such.
 .PP
-Known host queries validate executable arguments and observe real host state.
-General scripts and complex shell computation are enabled only on Linux when
-the complete isolation probe succeeds. Namespaces, read-only host mounts,
-seccomp and resource limits restrict writes to private scratch space and block
-network/control sockets, host process control and device control. The parent
-cleans scratch space. macOS and Windows provide typed readers and known host
-queries; arbitrary computation is unavailable there.
+On Linux, free-form scripts and complex shell computation run in an isolated
+sandbox \(em bubblewrap namespaces, read-only host mounts, seccomp, and resource
+limits \(em with no network access. If the sandbox can't be established, the
+script doesn't run. macOS and Windows offer the typed readers and known host
+queries, but not arbitrary computation.
 .PP
-Ordinary Git status/diff use a private metadata snapshot without writing the
-real index. Executable filters, textconv, fsmonitor and submodule inspection
-are disabled. Global excludes, upstream settings and custom filtered results
-may differ from interactive Git; the observation identifies its source.
+Ordinary Git status/diff read a private metadata snapshot instead of the real
+index; executable filters and submodules are disabled, so results can differ
+slightly from interactive Git. The observation says where it came from.
 .PP
-All new, reviewed and cached plans share argument validation, backend selection,
-optional command-pattern restrictions, optional double-check and optional
-manual-confirm. Confirmation does not enable host mutation. Trusted shell
-startup hooks and injection variables are removed from child environments.
-.PP
-Rejections and reused observations do not spend execution slots. A failed step
-can recover within the total budget, with at most two failure-recovery turns.
-Necessary evidence failures remain nonzero even when the model returns prose.
-stdout and stderr are separate; feedback compaction and actual capture
-truncation have distinct flags. fresh permits bounded repeat sampling.
-.PP
-Automatic execution uses query-timeout, command-timeout and max-output-bytes.
-Model requests and queued tools receive only the remaining deadline. A final
-answer turn reserves time and has no tools. Explicit interactive confirmation
-can wait for user input; no tool starts after its execution deadline.
-.PP
-The query boundary resists mutation, not disclosure. Requested observations
-may be sent to the configured provider. Environment credential values are
-redacted, but arbitrary file content is not a universal secret filter.
-Host readers depend on trusted programs and configuration; reads may update
-access metadata. HTTP readers permit checked GET/HEAD forms, whose remote
-semantics depend on the server.
+This boundary guards against mutation, not disclosure: what
+.B get
+reads is sent to your configured provider to be answered. Environment
+credential values are redacted; file contents are not passed through a
+general secret filter.
 .
 .SH CACHE
-The cache performs no classifier model call.
-A successful single-step query stores a context-specific typed plan.
-A hit uses zero model calls, validates the command again, and re-executes it.
-This keeps dynamic information current.
-An explicit text-only request never executes a cached command, though a cached
-final text result may still be returned without a model or tool call.
+A successful single-step query stores a typed plan, keyed by provider, model,
+strategy, working directory, and related context. A hit costs zero model
+calls: the command is revalidated and re-executed, so dynamic answers stay
+current. Multi-step results are not cached, and a text-only query never
+executes a cached command.
 .PP
-Cache identities use SHA-256 over the provider, model, strategy, protocol,
-shell, policy, tool/backend capabilities, execution limits, platform, and working-directory context. Writers serialize the
-complete read-modify-write operation with a cross-process lock. Snapshots are
-flushed, atomically replaced, and backed by a last-good copy used when the
-primary is damaged. Cache files and individual fields are size-bounded and
-schema-validated.
-.PP
-The \-\-cache flag may store a terminal text answer when no reusable command
-exists; hits show its original sample time. Multi-step results are not guessed into cache entries.
-Keys include working directory, provider URL, model, harness,
-protocol, shell, custom prompt, policy configuration, OS, and architecture.
+Cache writes are locked across processes; the file is atomically replaced with
+a last-good backup.
 .
 .SH NETWORK
-All model turns reuse one TLS-verifying HTTP client, including proxy traffic.
-Certificate chains and DNS/IP host names are verified. On Windows, get imports
-the native Windows ROOT certificate store into OpenSSL; no separate CA bundle
-is required for ordinary HTTPS.
-Terminal proxy variables are respected by default. When system-proxy is true,
-enabled Windows Internet Settings take precedence. NO_PROXY/no_proxy bypasses
-either source. Credentials are redacted when a proxy URL is displayed.
+All model traffic uses one TLS-verifying HTTP client, including through
+proxies; requests carrying credentials don't follow redirects. On Windows,
+the native ROOT certificate store is used, so no separate CA bundle is
+needed.
 .PP
-NO_PROXY entries are comma-separated. Domains match themselves and their
-subdomains; IP literals match the exact address; a single * bypasses all proxies.
-An entry without a port applies to every port. A host:port entry applies only
-to that destination port, using HTTP 80 or HTTPS 443 when the URL omits it.
-IPv6 may use ::1 or [::1]; an IPv6 port requires brackets, as in [::1]:8080.
-Entries with empty, nonnumeric, or out-of-range ports (outside 1-65535) are
-ignored without broadening the bypass to the whole host.
+Terminal proxy variables are honored by default; with system-proxy=true,
+enabled Windows Internet Settings take precedence. NO_PROXY takes
+comma-separated domains (matching subdomains), IP literals, and \fI*\fR, with
+optional ports (example.com:443); IPv6 ports use brackets ([::1]:8080).
 .
 .SH FILES
 .TP
 .I ~/.config/get/config.json
-Linux configuration file.
+Configuration (Linux).
 .TP
 .I ~/.config/get/key
-Linux API key file, mode 0600.
+API key file, mode 0600 (Linux).
 .TP
 .I ~/.config/get/cache.json
 Cache store.
@@ -418,9 +316,9 @@ Cache store.
 .I ~/.config/get/get.log
 Execution log.
 .PP
-On Windows these files are under %APPDATA%\eget and the key is DPAPI-protected.
-The release installer also places the required OpenSSL runtime DLLs beside the
-Windows executable.
+On Windows these live under %APPDATA%\eget; the key is DPAPI-protected there.
+The Windows release also installs the required OpenSSL runtime DLLs beside the
+executable.
 .
 .SH EXIT STATUS
 .TP
@@ -428,19 +326,19 @@ Windows executable.
 Success.
 .TP
 .B 1
-Configuration, provider, protocol, policy, refusal, budget, or general error.
+Configuration, provider, protocol, policy, or general error.
 .TP
 .B 124
 Command deadline exceeded.
 .TP
 .B 126
-Tool proposal rejected before execution with no safe revision inside budget.
+Tool proposal rejected, with no safe revision inside the budget.
 .TP
 .B 130
 Interrupted by Ctrl+C.
 .TP
 .B other
-Exit status of a terminal command.
+Exit status of the terminating command.
 .
 .SH EXAMPLES
 .nf
