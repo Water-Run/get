@@ -12,16 +12,26 @@ get "current git branch and uncommitted files"
 
 ## Install
 
-Download a package from [GitHub Releases](https://github.com/Water-Run/get/releases), keep its files together, and run:
+Download a package from [GitHub Releases](https://github.com/Water-Run/get/releases) and keep its files in one directory. Either way leaves an existing configuration in place.
+
+If Python is available, the installer copies the program and updates your PATH:
 
 ```bash
 python get_ready.py
 get version
 ```
 
-The installer keeps your existing configuration when replacing the binary.
+Without Python, copy the binary yourself and make sure its directory is on `PATH`:
 
-> **Windows:** keep `get-windows-x64.exe` together with `libcrypto-3.dll`, `libssl-3.dll`, and `zlib1.dll` — they install as a set. Licenses and provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+| System | From the package | Install as |
+|---|---|---|
+| Linux | `get-linux-x64` | `~/.local/bin/get` |
+| macOS | `get-macos-arm64` | `~/.local/bin/get` |
+| Windows | `get-windows-x64.exe` | `%LOCALAPPDATA%\Programs\get\get.exe` |
+
+On Linux and macOS, `chmod +x` the installed file. On macOS, also run `xattr -d com.apple.quarantine ~/.local/bin/get`. The manual page is optional: copy `get.1` to `~/.local/share/man/man1/get.1`.
+
+> **Windows:** `libcrypto-3.dll`, `libssl-3.dll`, and `zlib1.dll` stay in the same folder as `get.exe`. Licenses and provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Connect a model
 
@@ -75,7 +85,7 @@ If your query says "without tools", `get` switches to text-only mode: no tools a
 `get config` shows every setting; `get config --<option>` shows one; `get config --reset` restores defaults. Omit the value to reset a setting:
 
 ```bash
-get set model minimax-m3
+get set model deepseek-flash
 get set max-parallel 6
 get set max-parallel      # back to the default
 ```
@@ -85,8 +95,8 @@ get set max-parallel      # back to the default
 
 | Option | Default | Description |
 |---|---:|---|
-| `url` | `https://api.minimaxi.com/v1` | API base URL |
-| `model` | `minimax-m3` | Model identifier |
+| `url` | `https://api.deepseek.com` | API base URL |
+| `model` | `deepseek-flash` | DeepSeek-V4.1-Flash |
 | `manual-confirm` | `false` | Confirm each command interactively |
 | `double-check` | `false` | Add a second model safety review |
 | `harness` | `auto` | `auto`, `direct`, `loop`, or `parallel` |

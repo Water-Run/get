@@ -176,10 +176,10 @@ API key. Stored as a 0600 file on Linux, DPAPI-protected on Windows. Not
 printed or logged. Default: empty.
 .TP
 .BI "url " URL
-API base URL. Default: https://api.minimaxi.com/v1.
+API base URL. Default: https://api.deepseek.com.
 .TP
 .BI "model " string
-Model identifier. Default: minimax-m3.
+Model identifier. Default: deepseek-flash (DeepSeek-V4.1-Flash).
 .TP
 .BI "manual\-confirm " bool
 Confirm each command interactively. Default: false.
@@ -285,8 +285,8 @@ general secret filter.
 A successful single-step query stores a typed plan, keyed by provider, model,
 strategy, working directory, and related context. A hit costs zero model
 calls: the command is revalidated and re-executed, so dynamic answers stay
-current. Multi-step results are not cached, and a text-only query never
-executes a cached command.
+current. Multi-step results are not cached, and a text-only query doesn't
+execute a cached command.
 .PP
 Cache writes are locked across processes; the file is atomically replaced with
 a last-good backup.
@@ -301,6 +301,22 @@ Terminal proxy variables are honored by default; with system-proxy=true,
 enabled Windows Internet Settings take precedence. NO_PROXY takes
 comma-separated domains (matching subdomains), IP literals, and \fI*\fR, with
 optional ports (example.com:443); IPv6 ports use brackets ([::1]:8080).
+.
+.SH INSTALL
+Download a release and keep its files together. Either way leaves an
+existing configuration in place. With Python, run
+\fBpython get_ready.py\fR
+to copy the program and update PATH, then run
+\fBget version\fR.
+Without Python, copy the file yourself and put its directory on PATH.
+Linux \fIget-linux-x64\fR and macOS \fIget-macos-arm64\fR become
+\fI~/.local/bin/get\fR.
+Run \fBchmod +x\fR on that file. On macOS also run
+\fBxattr -d com.apple.quarantine ~/.local/bin/get\fR.
+Windows \fIget-windows-x64.exe\fR becomes
+\fI%LOCALAPPDATA%\ePrograms\eget\eget.exe\fR
+beside libcrypto-3.dll, libssl-3.dll, and zlib1.dll. The manual page is
+optional: copy \fIget.1\fR to \fI~/.local/share/man/man1/get.1\fR.
 .
 .SH FILES
 .TP

@@ -12,16 +12,26 @@ get "当前 Git 分支和未提交文件"
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/Water-Run/get/releases) 下载安装包，保持包内文件在同一目录，然后运行：
+从 [GitHub Releases](https://github.com/Water-Run/get/releases) 下载安装包，包内文件放在同一目录。两种装法都不会改动已有配置。
+
+有 Python 时，安装脚本会复制程序并更新 PATH：
 
 ```bash
 python get_ready.py
 get version
 ```
 
-替换程序时会保留你已有的配置。
+没有 Python 时，自己复制对应系统的程序，并把它所在的目录加入 `PATH`：
 
-> **Windows：** `get-windows-x64.exe` 必须与 `libcrypto-3.dll`、`libssl-3.dll`、`zlib1.dll` 放在一起，安装时会整套复制。许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+| 系统 | 包内文件 | 安装为 |
+|---|---|---|
+| Linux | `get-linux-x64` | `~/.local/bin/get` |
+| macOS | `get-macos-arm64` | `~/.local/bin/get` |
+| Windows | `get-windows-x64.exe` | `%LOCALAPPDATA%\Programs\get\get.exe` |
+
+Linux 和 macOS 上对安装后的文件执行 `chmod +x`。macOS 再执行 `xattr -d com.apple.quarantine ~/.local/bin/get`。手册页可选：把 `get.1` 复制到 `~/.local/share/man/man1/get.1`。
+
+> **Windows：** `libcrypto-3.dll`、`libssl-3.dll`、`zlib1.dll` 与 `get.exe` 放在同一目录。许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 连接模型
 
@@ -75,7 +85,7 @@ get "显示当前目录"          --harness direct
 `get config` 查看全部配置；`get config --<选项>` 查看单项；`get config --reset` 恢复默认。设置时省略值即可恢复该项默认：
 
 ```bash
-get set model minimax-m3
+get set model deepseek-flash
 get set max-parallel 6
 get set max-parallel      # 恢复默认
 ```
@@ -85,8 +95,8 @@ get set max-parallel      # 恢复默认
 
 | 选项 | 默认值 | 说明 |
 |---|---:|---|
-| `url` | `https://api.minimaxi.com/v1` | API 基础 URL |
-| `model` | `minimax-m3` | 模型标识 |
+| `url` | `https://api.deepseek.com` | API 基础 URL |
+| `model` | `deepseek-flash` | DeepSeek-V4.1-Flash |
 | `manual-confirm` | `false` | 逐条命令手动确认 |
 | `double-check` | `false` | 增加一次模型安全复核 |
 | `harness` | `auto` | `auto`、`direct`、`loop`、`parallel` |
@@ -132,7 +142,7 @@ get set max-parallel      # 恢复默认
 
 ## Markdown 输出
 
-在交互终端中，`get` 会用内置渲染器显示模型回答的 Markdown——标题、列表、表格、代码——无需外部程序。管道和重定向保留原始文本，`NO_COLOR` 关闭颜色。可用 `get set markdown false` 或 `--no-markdown` 关闭。
+在交互终端中，`get` 会用内置渲染器显示模型回答的 Markdown——标题、列表、表格、代码——无需外部程序。管道、重定向和 `TERM=dumb` 保留原始文本，`NO_COLOR` 关闭颜色。可用 `get set markdown false` 或 `--no-markdown` 关闭。
 
 ## 缓存
 
